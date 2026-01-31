@@ -6,6 +6,21 @@
 
 using namespace vigia;
 
+/*
+RUN COMMAND:
+clang++ -std=c++17 \          
+  tests/perception_test.cpp src/perception.cpp \
+  -Iinclude \
+  -I/opt/homebrew/opt/openvino/include \
+  -I/opt/homebrew/include/opencv4 \
+  -L/opt/homebrew/lib \
+  -L/opt/homebrew/opt/openvino/lib \
+  -Wl,-rpath,/opt/homebrew/opt/openvino/lib \
+  -lopenvino \
+  -lopencv_core -lopencv_imgproc -lopencv_imgcodecs -lopencv_videoio \
+  -pthread -O3 \
+  -o perception_test
+*/
 int main() {
     PerceptionAgent agent(
         "models/yolo26/yolo26_model.xml",

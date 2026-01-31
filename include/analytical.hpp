@@ -1,70 +1,59 @@
 #pragma once
 
-#include <atomic>
-#include <cstdint>
+#include <string>
+#include <vector>
 
 #include <opencv2/core.hpp>
-
-#include "perception.hpp"
-#include "safe_queue.hpp"
+#include <openvino/openvino.hpp>
 
 namespace vigia {
 
-struct CameraIntrinsics {
-    float fx{1.0F};
-    float fy{1.0F};
-    float cx{0.0F};
-    float cy{0.0F};
-};
-
-struct RansacParameters {
-    int iterations{200};
-    float distanceThreshold{0.05F};
-    float minInlierRatio{0.5F};
-};
-
-struct PlaneModel {
-    cv::Vec3f normal{0.0F, 1.0F, 0.0F};
-    float offset{0.0F};
-    float inlierRatio{0.0F};
-    float residualMean{0.0F};
-};
-
-struct AnalyticalRequest {
-    std::uint64_t frameId{0};
-    FramePacket framePacket;
-    PerceptionResult perception;
-};
-
-struct AnalyticalResult {
-    std::uint64_t frameId{0};
-    PlaneModel plane;
-    cv::Mat residualMap;
-    float geometricMagnitude{0.0F};
-    PerceptionResult perception;
-};
-
+/**
+ * @brief Analytical Agent (Phase 2a)
+ * Runs MiDaS monocular depth estimation and prepares
+ * geometry-aware depth signals for later verification.
+ */
 class AnalyticalAgent {
 public:
-    AnalyticalAgent(const CameraIntrinsics& intrinsics,
-                    const RansacParameters& params);
+    explicit AnalyticalAgent(
+        const std::string& modelXmlPath,
+        const std::string& device = "CPU"
+    );
 
-    void run(SafeQueue<AnalyticalRequest>& inputQueue,
-             SafeQueue<AnalyticalResult>& outputQueue,
-             std::atomic<bool>& running);
+    /**
+     * @brief Run MiDaS inference on a full frame
+     * @param frame BGR input image
+     * @return CV_32F depth map (relative inverse depth)
+     */
+    cv::Mat runInference(const cv::Mat& frame);
 
-    const CameraIntrinsics& intrinsics() const { return intrinsics_; }
-    const RansacParameters& params() const { return params_; }
+    /**
+     * @brief Extract and normalize depth inside a region of interest
+     * @param depthMap Full-frame depth map from MiDaS
+     * @param roi Region of interest (e.g., YOLO bbox)
+     * @return CV_32F normalized depth ROI
+     */
+    cv::Mat extractDepthROI(
+        const cv::Mat& depthMap,
+        const cv::Rect& roi
+    ) const;
 
 private:
-    CameraIntrinsics intrinsics_{};
-    RansacParameters params_{};
-};
+    void loadNetwork(
+        const std::string& modelXmlPath,
+        const std::string& device
+    );
 
-PlaneModel fitRoadPlane(const cv::Mat& depthMap,
-                        const CameraIntrinsics& intrinsics,
-                        const RansacParameters& params,
-                        cv::Mat& residualMap,
-                        float* geometricMagnitude = nullptr);
+private:
+    /* ---------- OpenVINO Runtime ---------- */
+    ov::Core core_;
+    ov::CompiledModel compiledModel_;
+    ov::InferRequest inferRequest_;
+    ov::Output<const ov::Node> outputTensor_;
+
+    /* ---------- Model Metadata ---------- */
+    std::size_t inputWidth_{256};
+    std::size_t inputHeight_{256};
+};
 
 } // namespace vigia
