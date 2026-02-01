@@ -2,6 +2,9 @@
 
 #include <opencv2/imgproc.hpp>
 #include <cstring>
+#include <limits>
+#include <cmath>
+#include <numeric>
 
 namespace vigia {
 
@@ -22,7 +25,6 @@ void AnalyticalAgent::loadNetwork(
 ) {
     auto model = core_.read_model(modelXmlPath);
 
-    /* Explicit layout for stability */
     model->get_parameters()[0]->set_layout("NCHW");
     ov::set_batch(model, 1);
 
@@ -41,33 +43,26 @@ void AnalyticalAgent::loadNetwork(
 
     const auto& inputShape = compiledModel_.input().get_shape();
     inputHeight_ = inputShape[2];
-    inputWidth_  = inputShape[3];
+    inputWidth_ = inputShape[3];
 }
 
-/* ===================== MiDaS Inference ===================== */
+/* ===================== Phase 1: MiDaS Inference ===================== */
 
 cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
-    /* ---------- Resize ---------- */
     cv::Mat resized;
     cv::resize(frame, resized, cv::Size(inputWidth_, inputHeight_));
 
-    /* ---------- Normalize to FP32 [0,1] ---------- */
     cv::Mat inputBlob;
     resized.convertTo(inputBlob, CV_32F, 1.0f / 255.0f);
 
-    /* ---------- HWC → CHW ---------- */
     std::vector<float> chw(inputWidth_ * inputHeight_ * 3);
     size_t idx = 0;
 
-    for (int c = 0; c < 3; ++c) {
-        for (int y = 0; y < static_cast<int>(inputHeight_); ++y) {
-            for (int x = 0; x < static_cast<int>(inputWidth_); ++x) {
+    for (int c = 0; c < 3; ++c)
+        for (int y = 0; y < static_cast<int>(inputHeight_); ++y)
+            for (int x = 0; x < static_cast<int>(inputWidth_); ++x)
                 chw[idx++] = inputBlob.at<cv::Vec3f>(y, x)[c];
-            }
-        }
-    }
 
-    /* ---------- Bind Input ---------- */
     ov::Tensor inputTensor(
         ov::element::f32,
         {1, 3, inputHeight_, inputWidth_},
@@ -77,7 +72,6 @@ cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
     inferRequest_.set_input_tensor(inputTensor);
     inferRequest_.infer();
 
-    /* ---------- Retrieve Output ---------- */
     const ov::Tensor output = inferRequest_.get_tensor(outputTensor_);
     const float* depthData =
         static_cast<const float*>(output.data());
@@ -107,16 +101,13 @@ cv::Mat AnalyticalAgent::extractDepthROI(
         0, 0, depthMap.cols, depthMap.rows
     );
 
-    if (boundedROI.empty()) {
+    if (boundedROI.empty())
         return {};
-    }
 
     cv::Mat roiDepth = depthMap(boundedROI).clone();
 
-    /* Noise suppression */
     cv::medianBlur(roiDepth, roiDepth, 5);
 
-    /* Normalize locally for geometric comparison */
     cv::normalize(
         roiDepth,
         roiDepth,
@@ -126,6 +117,151 @@ cv::Mat AnalyticalAgent::extractDepthROI(
     );
 
     return roiDepth;
+}
+
+/* ===================== Phase 2b: Plane Residual Analysis ===================== */
+
+DepthResidualStats AnalyticalAgent::computeDepthResiduals(
+    const cv::Mat& roiDepth
+) const {
+    DepthResidualStats stats{};
+
+    if (roiDepth.empty() || roiDepth.type() != CV_32F)
+        return stats;
+
+    const int rows = roiDepth.rows;
+    const int cols = roiDepth.cols;
+    const int N = rows * cols;
+
+    double sumX = 0, sumY = 0, sumZ = 0;
+    double sumXX = 0, sumYY = 0, sumXY = 0;
+    double sumXZ = 0, sumYZ = 0;
+
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x) {
+            const float z = roiDepth.at<float>(y, x);
+            sumX += x; sumY += y; sumZ += z;
+            sumXX += x * x; sumYY += y * y;
+            sumXY += x * y;
+            sumXZ += x * z; sumYZ += y * z;
+        }
+
+    const double denom =
+        (sumXX * sumYY * N +
+         2 * sumX * sumY * sumXY -
+         sumXX * sumY * sumY -
+         sumYY * sumX * sumX -
+         sumXY * sumXY * N);
+
+    double a = 0, b = 0, c = 0;
+
+    if (std::abs(denom) > 1e-6) {
+        a = (sumXZ * sumYY * N +
+             sumX * sumY * sumYZ +
+             sumXY * sumY * sumZ -
+             sumXZ * sumY * sumY -
+             sumYY * sumX * sumZ -
+             sumXY * sumYZ * N) / denom;
+
+        b = (sumXX * sumYZ * N +
+             sumX * sumY * sumXZ +
+             sumX * sumXY * sumZ -
+             sumXX * sumY * sumZ -
+             sumYZ * sumX * sumX -
+             sumXY * sumXZ * N) / denom;
+
+        c = (sumZ - a * sumX - b * sumY) / N;
+    }
+
+    double mean = 0.0;
+    double minVal = std::numeric_limits<double>::max();
+    double var = 0.0;
+
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x) {
+            const float obs = roiDepth.at<float>(y, x);
+            const float exp = static_cast<float>(a * x + b * y + c);
+            const float r = obs - exp;
+            mean += r;
+            minVal = std::min(minVal, static_cast<double>(r));
+            var += r * r;
+        }
+
+    mean /= N;
+    var = (var / N) - (mean * mean);
+
+    stats.meanResidual = static_cast<float>(mean);
+    stats.minResidual  = static_cast<float>(minVal);
+    stats.stdResidual  = static_cast<float>(
+        std::sqrt(std::max(0.0, var))
+    );
+
+    return stats;
+}
+
+/* ===================== Phase 3: Geometry + Temporal Metrics ===================== */
+
+DepthGeometryMetrics AnalyticalAgent::computeGeometryMetrics(
+    const cv::Mat& roiDepth,
+    const DepthResidualStats& residuals
+) {
+    DepthGeometryMetrics metrics{};
+
+    if (roiDepth.empty())
+        return metrics;
+
+    /* Instantaneous geometry */
+    metrics.depressionScore =
+        std::max(0.0f, -residuals.minResidual);
+
+    metrics.roughness = residuals.stdResidual;
+
+    /* Temporal update */
+    updateTemporalBuffers(
+        metrics.depressionScore,
+        metrics.roughness
+    );
+
+    metrics.persistence = computePersistenceScore();
+
+    return metrics;
+}
+
+/* ===================== Temporal Helpers ===================== */
+
+void AnalyticalAgent::updateTemporalBuffers(
+    float depression,
+    float roughness
+) {
+    depressionHistory_.push_back(depression);
+    roughnessHistory_.push_back(roughness);
+
+    if (depressionHistory_.size() > kHistorySize)
+        depressionHistory_.pop_front();
+
+    if (roughnessHistory_.size() > kHistorySize)
+        roughnessHistory_.pop_front();
+}
+
+float AnalyticalAgent::computePersistenceScore() const {
+    if (depressionHistory_.size() < 2)
+        return 0.0f;
+
+    const float mean =
+        std::accumulate(
+            depressionHistory_.begin(),
+            depressionHistory_.end(),
+            0.0f
+        ) / depressionHistory_.size();
+
+    float var = 0.0f;
+    for (float v : depressionHistory_)
+        var += (v - mean) * (v - mean);
+
+    var /= depressionHistory_.size();
+
+    const float stddev = std::sqrt(var);
+    return mean / (stddev + 1e-4f);
 }
 
 } // namespace vigia
