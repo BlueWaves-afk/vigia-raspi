@@ -1,70 +1,77 @@
-cmake_minimum_required(VERSION 3.10)
-project(VIGIA_Road_Intelligence)
+cmake_minimum_required(VERSION 3.16)
+project(vigia LANGUAGES CXX)
 
+# --------------------
+# Global settings
+# --------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Optimization flags for ARM Cortex-A72 / Apple Silicon
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -pthread")
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 
-# Allow the caller to override the Kleidi search paths
-set(KLEIDIAI_HINT "" CACHE PATH "Root path to the KleidiAI SDK installation")
-set(KLEIDICV_HINT "" CACHE PATH "Root path to the KleidiCV SDK installation")
+# --------------------
+# Output directories
+# --------------------
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-find_package(OpenCV 4.11 REQUIRED COMPONENTS core imgproc dnn)
-find_package(OpenVINO REQUIRED)
+# --------------------
+# Warnings (safe)
+# --------------------
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+endif()
 
+# --------------------
+# Dependencies
+# --------------------
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(Dependencies)
+
+# --------------------
+# Include paths
+# --------------------
 include_directories(
-    include
-    ${OpenCV_INCLUDE_DIRS}
-    ${OpenVINO_INCLUDE_DIRS}
+    ${PROJECT_SOURCE_DIR}/include
 )
 
-find_library(KLEIDIAI_LIB kleidiai
-    HINTS ${KLEIDIAI_HINT} ENV KLEIDIAI_LIB_DIR
-    PATH_SUFFIXES lib lib64
-)
-
-find_library(KLEIDICV_LIB kleidicv
-    HINTS ${KLEIDICV_HINT} ENV KLEIDICV_LIB_DIR
-    PATH_SUFFIXES lib lib64
-)
-
-if(KLEIDIAI_LIB)
-    message(STATUS "Found KleidiAI at ${KLEIDIAI_LIB}")
-    add_compile_definitions(VIGIA_USE_KLEIDIAI=1)
-else()
-    message(WARNING "KleidiAI not found. Set KLEIDIAI_HINT or KLEIDIAI_LIB_DIR to enable optimized kernels.")
-endif()
-
-if(KLEIDICV_LIB)
-    message(STATUS "Found KleidiCV at ${KLEIDICV_LIB}")
-    add_compile_definitions(VIGIA_USE_KLEIDICV=1)
-else()
-    message(WARNING "KleidiCV not found. Set KLEIDICV_HINT or KLEIDICV_LIB_DIR to enable accelerated preprocessing.")
-endif()
-
-add_executable(vigia_main
-    src/main.cpp
+# --------------------
+# Core library
+# --------------------
+add_library(vigia_core
+    src/analytical.cpp
+    src/temporal.cpp
+    src/fusion.cpp
     src/coordinator.cpp
     src/perception.cpp
-    src/analytical.cpp
-    src/fusion.cpp
 )
 
-set(VIGIA_LINK_LIBS
-    ${OpenCV_LIBS}
+target_link_libraries(vigia_core
+    OpenCV_LIBS
     openvino::runtime
     pthread
 )
 
-if(KLEIDIAI_LIB)
-    list(APPEND VIGIA_LINK_LIBS ${KLEIDIAI_LIB})
-endif()
+# --------------------
+# Tests
+# --------------------
+enable_testing()
 
-if(KLEIDICV_LIB)
-    list(APPEND VIGIA_LINK_LIBS ${KLEIDICV_LIB})
-endif()
+add_executable(analytical_test tests/analytical_test.cpp)
+target_link_libraries(analytical_test vigia_core)
 
-target_link_libraries(vigia_main PRIVATE ${VIGIA_LINK_LIBS})
+add_executable(temporal_test tests/temporal_test.cpp)
+target_link_libraries(temporal_test vigia_core)
+
+add_executable(fusion_test tests/fusion_test.cpp)
+target_link_libraries(fusion_test vigia_core)
+
+add_executable(coordinator_test tests/coordinator_test.cpp)
+target_link_libraries(coordinator_test vigia_core)
+
+add_test(NAME analytical_test COMMAND analytical_test)
+add_test(NAME temporal_test COMMAND temporal_test)
+add_test(NAME fusion_test COMMAND fusion_test)
+add_test(NAME coordinator_test COMMAND coordinator_test)

@@ -1,148 +1,240 @@
 #include "coordinator.hpp"
 
-#include <algorithm>
-#include <fstream>
-#include <iostream>
+#include <chrono>
 #include <thread>
+#include <atomic>
+#include <iostream>
+#include <fstream>
+#include <mutex>
+
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#endif
 
 namespace vigia {
 
-CircularFrameBuffer::CircularFrameBuffer(std::size_t capacity)
-    : capacity_(capacity)
-    , frames_(capacity)
+/* ===================== Constants ===================== */
+
+static constexpr std::size_t FRAME_BUFFER_SIZE = 4;
+static constexpr float TEMP_WARN_C = 75.0f;
+static constexpr float TEMP_CRITICAL_C = 85.0f;
+
+/* ===================== Constructor ===================== */
+
+Coordinator::Coordinator(
+    PerceptionAgent& perception,
+    AnalyticalAgent& analytical,
+    TemporalAnalyzer& temporal,
+    FusionEngine& fusion,
+    int targetFps
+)
+    : perception_(perception),
+      analytical_(analytical),
+      temporal_(temporal),
+      fusion_(fusion),
+      targetFrameTimeMs_(1000 / targetFps),
+      running_(false),
+      frameIndex_(0),
+      midasStride_(1)
 {
+    frameBuffer_.resize(FRAME_BUFFER_SIZE);
 }
 
-void CircularFrameBuffer::insert(const FramePacket& packet)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (frames_.empty()) {
-        return;
-    }
-    std::size_t index = packet.frameId % capacity_;
-    frames_[index] = packet;
+/* ===================== Lifecycle ===================== */
+
+void Coordinator::start() {
+    running_ = true;
+
+    captureThread_ = std::thread(&Coordinator::captureLoop, this);
+    mainThread_    = std::thread(&Coordinator::processLoop, this);
+
+    pinThread(captureThread_, 0); // LITTLE core
+    pinThread(mainThread_,  1);   // BIG core
 }
 
-std::optional<FramePacket> CircularFrameBuffer::fetch(std::uint64_t frameId) const
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (frames_.empty()) {
-        return std::nullopt;
-    }
-    std::size_t index = frameId % capacity_;
-    const FramePacket& candidate = frames_[index];
-    if (candidate.frameId != frameId) {
-        return std::nullopt;
-    }
-    return candidate;
+void Coordinator::stop() {
+    running_ = false;
+
+    if (captureThread_.joinable())
+        captureThread_.join();
+
+    if (mainThread_.joinable())
+        mainThread_.join();
 }
 
-Coordinator::Coordinator(const CoordinatorConfig& config,
-                         SafeQueue<FramePacket>& perceptionQueue,
-                         SafeQueue<AnalyticalRequest>& analyticalQueue,
-                         SafeQueue<PerceptionResult>& perceptionResults,
-                         SafeQueue<AnalyticalResult>& analyticalResults,
-                         SafeQueue<FusionState>& fusionQueue)
-    : config_(config)
-    , perceptionQueue_(perceptionQueue)
-    , analyticalQueue_(analyticalQueue)
-    , perceptionResults_(perceptionResults)
-    , analyticalResults_(analyticalResults)
-    , fusionQueue_(fusionQueue)
-    , frameBuffer_(config.frameBufferSize)
-    , frameSkip_(config.initialFrameSkip)
-{
-}
+/* ===================== Capture Loop ===================== */
 
-void Coordinator::run(std::atomic<bool>& running)
-{
-    lastThermalSample_ = std::chrono::steady_clock::now();
+void Coordinator::captureLoop() {
+    while (running_) {
+        cv::Mat frame;
+        if (!perception_.captureFrame(frame))
+            continue;
 
-    while (running.load()) {
-        FramePacket packet;
-        packet.frameId = ++frameCounter_;
-        packet.timestamp = std::chrono::steady_clock::now();
-        packet.frame = cv::Mat::zeros(cv::Size(256, 256), CV_8UC3); // Placeholder frame acquisition.
-
-        frameBuffer_.insert(packet);
-
-        if (frameSkip_.load() <= 1 || (packet.frameId % frameSkip_.load()) == 0) {
-            perceptionQueue_.push(packet);
-        }
-
-        while (auto perception = perceptionResults_.try_pop()) {
-            dispatchAnalysis(*perception);
-        }
-
-        auto now = std::chrono::steady_clock::now();
-        if (now - lastThermalSample_ >= config_.thermalCheckInterval) {
-            if (auto temperature = readCpuTemperatureCelsius()) {
-                adjustThermals(*temperature);
-            }
-            lastThermalSample_ = now;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-    }
-}
-
-void Coordinator::setFrameSkip(std::size_t skip)
-{
-    frameSkip_.store(std::max<std::size_t>(1, skip));
-}
-
-std::size_t Coordinator::frameSkip() const
-{
-    return frameSkip_.load();
-}
-
-void Coordinator::adjustThermals(float temperatureC)
-{
-    constexpr std::size_t maxSkip = 6;
-    auto currentSkip = frameSkip_.load();
-    if (temperatureC >= config_.thermalThresholdC) {
-        if (currentSkip < maxSkip) {
-            frameSkip_.store(currentSkip + 1);
-            std::cout << "[Coordinator] Thermal limit breached (" << temperatureC
-                      << "C). Increasing frame skip to " << frameSkip_.load() << '\n';
-        }
-    } else if (temperatureC < config_.thermalThresholdC - 3.0F) {
-        if (currentSkip > config_.initialFrameSkip) {
-            frameSkip_.store(currentSkip - 1);
-            std::cout << "[Coordinator] Temperature stable (" << temperatureC
-                      << "C). Decreasing frame skip to " << frameSkip_.load() << '\n';
+        {
+            std::lock_guard<std::mutex> lock(bufferMutex_);
+            frameBuffer_[frameIndex_ % FRAME_BUFFER_SIZE] = frame.clone();
+            frameIndex_++;
         }
     }
 }
 
-std::optional<float> Coordinator::readCpuTemperatureCelsius() const
-{
+/* ===================== Processing Loop ===================== */
+
+void Coordinator::processLoop() {
+    using clock = std::chrono::steady_clock;
+
+    while (running_) {
+        const auto start = clock::now();
+
+        processFrame();
+
+        const auto elapsedMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                clock::now() - start
+            ).count();
+
+        adaptiveControl(elapsedMs);
+        frameLimiter(elapsedMs);
+    }
+}
+
+/* ===================== Frame Processing ===================== */
+
+void Coordinator::processFrame() {
+    cv::Mat frame;
+
+    {
+        std::lock_guard<std::mutex> lock(bufferMutex_);
+        if (frameIndex_ == 0)
+            return;
+
+        frame = frameBuffer_[(frameIndex_ - 1) % FRAME_BUFFER_SIZE];
+    }
+
+    /* ---------- YOLO ---------- */
+    auto detections = perception_.runInference(frame);
+
+    const bool runMidas = (frameIndex_ % midasStride_ == 0);
+    cv::Mat depthMap;
+
+    if (runMidas)
+        depthMap = analytical_.runInference(frame);
+
+    for (const auto& det : detections) {
+        if (!det.isPothole())
+            continue;
+
+        if (!runMidas || depthMap.empty())
+            continue;
+
+        cv::Rect depthROI =
+            analytical_.scaleROIToDepth(
+                det.bbox,
+                frame.size(),
+                depthMap.size()
+            );
+
+        cv::Mat roiDepth =
+            analytical_.extractDepthROI(depthMap, depthROI);
+
+        if (roiDepth.empty())
+            continue;
+
+        auto residuals =
+            analytical_.computeDepthResiduals(roiDepth);
+
+        auto geom =
+            analytical_.computeGeometryMetrics(roiDepth, residuals);
+
+        auto temporalMetrics =
+            temporal_.update(geom.depressionScore, geom.roughness);
+
+        FusionInput fin{};
+        fin.yoloConfidence   = det.confidence;
+        fin.depressionScore  = geom.depressionScore;
+        fin.roughness        = geom.roughness;
+        fin.persistence      = temporalMetrics.persistence;
+        fin.stability        = temporalMetrics.stability;
+
+        FusionOutput fout = fusion_.fuse(fin);
+
+        publishResult(det, fout);
+    }
+}
+
+/* ===================== Adaptive Control ===================== */
+
+void Coordinator::adaptiveControl(long elapsedMs) {
+    const float temp = readTemperature();
+
+    if (temp > TEMP_CRITICAL_C) {
+        midasStride_ = 5;
+    }
+    else if (temp > TEMP_WARN_C) {
+        midasStride_ = 3;
+    }
+    else if (elapsedMs > targetFrameTimeMs_) {
+        midasStride_ = std::min(midasStride_ + 1, 5);
+    }
+    else {
+        midasStride_ = std::max(1, midasStride_ - 1);
+    }
+}
+
+/* ===================== Temperature ===================== */
+
+float Coordinator::readTemperature() const {
     std::ifstream file("/sys/class/thermal/thermal_zone0/temp");
-    if (!file.is_open()) {
-        return std::nullopt;
-    }
+    if (!file.is_open())
+        return 0.0f;
 
-    long milliDegrees = 0;
-    file >> milliDegrees;
-    if (file.fail()) {
-        return std::nullopt;
-    }
-
-    return static_cast<float>(milliDegrees) / 1000.0F;
+    float tempMilli = 0.0f;
+    file >> tempMilli;
+    return tempMilli / 1000.0f;
 }
 
-void Coordinator::dispatchAnalysis(const PerceptionResult& perception)
-{
-    auto frame = frameBuffer_.fetch(perception.frameId);
-    if (!frame) {
-        return;
-    }
+/* ===================== FPS Limiter ===================== */
 
-    AnalyticalRequest request;
-    request.frameId = perception.frameId;
-    request.framePacket = *frame;
-    request.perception = perception;
-    analyticalQueue_.push(std::move(request));
+void Coordinator::frameLimiter(long elapsedMs) const {
+    if (elapsedMs < targetFrameTimeMs_) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(
+                targetFrameTimeMs_ - elapsedMs
+            )
+        );
+    }
+}
+
+/* ===================== Thread Pinning ===================== */
+
+void Coordinator::pinThread(std::thread& t, int coreId) {
+#ifdef __linux__
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(coreId, &cpuset);
+
+    pthread_setaffinity_np(
+        t.native_handle(),
+        sizeof(cpu_set_t),
+        &cpuset
+    );
+#endif
+}
+
+/* ===================== Output ===================== */
+
+void Coordinator::publishResult(
+    const Detection& det,
+    const FusionOutput& out
+) const {
+    std::cout
+        << "[POTHOLE]"
+        << " conf=" << out.finalConfidence
+        << " geo="  << out.geometryConfidence
+        << " tmp="  << out.temporalConfidence
+        << " stride=" << midasStride_
+        << "\n";
 }
 
 } // namespace vigia

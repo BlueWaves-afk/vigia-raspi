@@ -10,7 +10,7 @@
 # Precompiled Headers
 *.gch
 *.pch
-
+build/
 # Linker files
 *.ilk
 
@@ -39,3 +39,7 @@
 
 # debug information files
 *.dwo
+
+*_test
+depth_debug.png
+depth_debug_roi.png

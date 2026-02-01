@@ -1,71 +1,103 @@
 #pragma once
 
+#include <memory>
 #include <atomic>
-#include <chrono>
-#include <cstdint>
+#include <thread>
 #include <mutex>
-#include <optional>
-#include <vector>
+#include <condition_variable>
+#include <chrono>
 
-#include <opencv2/core.hpp>
-
-#include "analytical.hpp"
-#include "fusion.hpp"
 #include "perception.hpp"
-#include "safe_queue.hpp"
+#include "analytical.hpp"
+#include "temporal.hpp"
+#include "fusion.hpp"
 
 namespace vigia {
 
+/* ===================== System Output ===================== */
+
+struct CoordinatorOutput {
+    float finalConfidence = 0.0f;
+    bool isHazard = false;
+
+    // Debug / telemetry
+    float yoloConfidence = 0.0f;
+    float geometryConfidence = 0.0f;
+    float temporalConfidence = 0.0f;
+
+    float depressionScore = 0.0f;
+    float roughness = 0.0f;
+    float persistence = 0.0f;
+    float stability = 0.0f;
+};
+
+/* ===================== Coordinator Config ===================== */
+
 struct CoordinatorConfig {
-    std::size_t frameBufferSize{8};
-    std::size_t initialFrameSkip{1};
-    std::chrono::milliseconds thermalCheckInterval{std::chrono::milliseconds{1000}};
-    float thermalThresholdC{75.0F};
+    // FPS control
+    int targetFPS = 10;
+
+    // Decision threshold
+    float hazardThreshold = 0.65f;
+
+    // Thermal throttling
+    float maxCPUTempC = 80.0f;
+
+    // Threading
+    bool enableAsync = true;
+
+    // Debug
+    bool verbose = false;
 };
 
-class CircularFrameBuffer {
-public:
-    explicit CircularFrameBuffer(std::size_t capacity);
-
-    void insert(const FramePacket& packet);
-    std::optional<FramePacket> fetch(std::uint64_t frameId) const;
-
-private:
-    std::size_t capacity_{0};
-    mutable std::mutex mutex_{};
-    std::vector<FramePacket> frames_;
-};
+/* ===================== Coordinator ===================== */
 
 class Coordinator {
 public:
-    Coordinator(const CoordinatorConfig& config,
-                SafeQueue<FramePacket>& perceptionQueue,
-                SafeQueue<AnalyticalRequest>& analyticalQueue,
-                SafeQueue<PerceptionResult>& perceptionResults,
-                SafeQueue<AnalyticalResult>& analyticalResults,
-                SafeQueue<FusionState>& fusionQueue);
+    explicit Coordinator(const CoordinatorConfig& config);
 
-    void run(std::atomic<bool>& running);
+    /* ----- Dependency Injection ----- */
+    void setPerceptionAgent(std::shared_ptr<PerceptionAgent> agent);
+    void setAnalyticalAgent(std::shared_ptr<AnalyticalAgent> agent);
+    void setTemporalAnalyzer(std::shared_ptr<TemporalAnalyzer> analyzer);
+    void setFusionEngine(std::shared_ptr<FusionEngine> fusion);
 
-    void setFrameSkip(std::size_t skip);
-    std::size_t frameSkip() const;
+    /* ----- Lifecycle ----- */
+    bool initialize();
+    void shutdown();
+
+    /* ----- Main Entry ----- */
+    CoordinatorOutput processFrame(const cv::Mat& frame);
+
+    /* ----- Telemetry ----- */
+    float getCurrentFPS() const;
+    float getLastCPUTemperature() const;
 
 private:
-    void adjustThermals(float temperatureC);
-    std::optional<float> readCpuTemperatureCelsius() const;
-    void dispatchAnalysis(const PerceptionResult& perception);
+    /* ===================== Internal Steps ===================== */
 
-    CoordinatorConfig config_{};
-    SafeQueue<FramePacket>& perceptionQueue_;
-    SafeQueue<AnalyticalRequest>& analyticalQueue_;
-    SafeQueue<PerceptionResult>& perceptionResults_;
-    SafeQueue<AnalyticalResult>& analyticalResults_;
-    SafeQueue<FusionState>& fusionQueue_;
+    void enforceFPSLimit();
+    bool thermalSafe() const;
 
-    CircularFrameBuffer frameBuffer_;
-    std::atomic<std::size_t> frameSkip_{1};
-    std::uint64_t frameCounter_{0};
-    std::chrono::steady_clock::time_point lastThermalSample_{};
+    /* ===================== Internal State ===================== */
+
+    CoordinatorConfig config_;
+
+    std::shared_ptr<PerceptionAgent> perception_;
+    std::shared_ptr<AnalyticalAgent> analytical_;
+    std::shared_ptr<TemporalAnalyzer> temporal_;
+    std::shared_ptr<FusionEngine> fusion_;
+
+    // Timing
+    std::chrono::steady_clock::time_point lastFrameTime_;
+    std::atomic<float> currentFPS_{0.0f};
+
+    // Thermal
+    mutable float lastCPUTempC_ = 0.0f;
+
+    // Thread safety
+    std::mutex mutex_;
+    std::atomic<bool> initialized_{false};
 };
 
 } // namespace vigia
