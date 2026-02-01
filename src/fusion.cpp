@@ -1,58 +1,91 @@
 #include "fusion.hpp"
 
 #include <algorithm>
-#include <chrono>
-#include <iostream>
-#include <thread>
+#include <cmath>
 
 namespace vigia {
 
-FusionEngine::FusionEngine(const FusionWeights& weights)
-    : weights_(weights)
-{
+/* ===================== Helpers ===================== */
+
+static inline float clamp01(float v) {
+    return std::clamp(v, 0.0f, 1.0f);
 }
 
-void FusionEngine::run(SafeQueue<AnalyticalResult>& analyticsQueue,
-                       SafeQueue<FusionState>& fusionQueue,
-                       std::atomic<bool>& running)
-{
-    float persistenceState = 0.0F;
+/* ===================== Constructor ===================== */
 
-    while (running.load()) {
-        auto result = analyticsQueue.try_pop();
-        if (!result) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{2});
-            continue;
-        }
+FusionEngine::FusionEngine() = default;
 
-        float targetPersistence = result->perception.greatestConfidence;
-        constexpr float smoothing = 0.8F;
-        persistenceState = smoothing * persistenceState + (1.0F - smoothing) * targetPersistence;
+/* ===================== Geometry Confidence ===================== */
+/*
+High when:
+- Depression is strong
+- Surface is NOT noisy (low roughness)
+*/
 
-        FusionState state;
-        state.frameId = result->frameId;
-        state.perception = result->perception;
-        state.geometricResidual = result->geometricMagnitude;
-        state.persistence = persistenceState;
-        state.rri = computeRRI(result->perception.greatestConfidence,
-                               result->geometricMagnitude,
-                               state.persistence);
+float FusionEngine::computeGeometryConfidence(
+    float depression,
+    float roughness
+) const {
+    // Normalize depression into [0,1]
+    const float dep = clamp01(depression);
 
-        std::cout << "[Fusion] frame=" << state.frameId
-                  << " geometricResidual=" << state.geometricResidual << '\n';
+    // Penalize rough surfaces (noise ≠ pothole)
+    const float roughPenalty = std::exp(-roughness * 10.0f);
 
-        fusionQueue.push(std::move(state));
-    }
+    return clamp01(dep * roughPenalty);
 }
 
-float FusionEngine::computeRRI(float yoloConfidence,
-                               float geometricMagnitude,
-                               float persistence) const
-{
-    float score = weights_.wConfidence * yoloConfidence
-        + weights_.wGeometry * geometricMagnitude
-        + weights_.wPersistence * persistence;
-    return std::clamp(score, 0.0F, 1.0F);
+/* ===================== Temporal Confidence ===================== */
+/*
+High when:
+- Signal persists
+- Signal is stable
+*/
+
+float FusionEngine::computeTemporalConfidence(
+    float persistence,
+    float stability
+) const {
+    // Persistence already mean/std normalized → squash
+    const float p = std::tanh(persistence * 0.1f);
+
+    // Stability is inverse variance → squash
+    const float s = std::tanh(stability * 0.01f);
+
+    return clamp01(0.5f * p + 0.5f * s);
+}
+
+/* ===================== Public Fusion ===================== */
+
+FusionOutput FusionEngine::fuse(
+    const FusionInput& in
+) const {
+    FusionOutput out{};
+
+    out.geometryConfidence =
+        computeGeometryConfidence(
+            in.depressionScore,
+            in.roughness
+        );
+
+    out.temporalConfidence =
+        computeTemporalConfidence(
+            in.persistence,
+            in.stability
+        );
+
+    // Tunable weights (EXPLICIT BY DESIGN)
+    constexpr float W_DET = 0.40f;
+    constexpr float W_GEO = 0.35f;
+    constexpr float W_TMP = 0.25f;
+
+    out.finalConfidence = clamp01(
+        W_DET * clamp01(in.yoloConfidence) +
+        W_GEO * out.geometryConfidence +
+        W_TMP * out.temporalConfidence
+    );
+
+    return out;
 }
 
 } // namespace vigia
