@@ -37,26 +37,36 @@ public:
         const std::string& modelXmlPath,
         const std::string& device = "CPU"
     );
+    virtual ~AnalyticalAgent() = default;
 
     /* ---------- Phase 1 ---------- */
-    cv::Mat runInference(const cv::Mat& frame);
+    virtual cv::Mat runInference(const cv::Mat& frame);
 
     /* ---------- Phase 2a ---------- */
-    cv::Mat extractDepthROI(
+    virtual cv::Rect scaleROIToDepth(
+        const cv::Rect& roi,
+        const cv::Size& originalSize,
+        const cv::Size& depthSize
+    ) const;
+
+    virtual cv::Mat extractDepthROI(
         const cv::Mat& depthMap,
         const cv::Rect& roi
     ) const;
 
     /* ---------- Phase 2b ---------- */
-    DepthResidualStats computeDepthResiduals(
+    virtual DepthResidualStats computeDepthResiduals(
         const cv::Mat& roiDepth
     ) const;
 
     /* ---------- Phase 3 ---------- */
-    DepthGeometryMetrics computeGeometryMetrics(
+    virtual DepthGeometryMetrics computeGeometryMetrics(
         const cv::Mat& roiDepth,
         const DepthResidualStats& residuals
     );
+
+protected:
+    AnalyticalAgent() = default;
 
 private:
     void loadNetwork(

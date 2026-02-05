@@ -1,4 +1,5 @@
 #include "analytical.hpp"
+#include "roi_utils.hpp"
 
 #include <opencv2/imgproc.hpp>
 #include <cstring>
@@ -91,15 +92,40 @@ cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
     return depthMap;
 }
 
+cv::Rect AnalyticalAgent::scaleROIToDepth(
+    const cv::Rect& roi,
+    const cv::Size& originalSize,
+    const cv::Size& depthSize
+) const {
+    if (originalSize.width <= 0 || originalSize.height <= 0)
+        return {};
+
+    if (depthSize.width <= 0 || depthSize.height <= 0)
+        return {};
+
+    const float scaleX = static_cast<float>(depthSize.width) /
+                         static_cast<float>(originalSize.width);
+    const float scaleY = static_cast<float>(depthSize.height) /
+                         static_cast<float>(originalSize.height);
+
+    cv::Rect scaled(
+        static_cast<int>(std::round(roi.x * scaleX)),
+        static_cast<int>(std::round(roi.y * scaleY)),
+        static_cast<int>(std::round(roi.width * scaleX)),
+        static_cast<int>(std::round(roi.height * scaleY))
+    );
+
+    cv::Rect bounds(0, 0, depthSize.width, depthSize.height);
+    return scaled & bounds;
+}
+
 /* ===================== Phase 2a: ROI Depth Prep ===================== */
 
 cv::Mat AnalyticalAgent::extractDepthROI(
     const cv::Mat& depthMap,
     const cv::Rect& roi
 ) const {
-    cv::Rect boundedROI = roi & cv::Rect(
-        0, 0, depthMap.cols, depthMap.rows
-    );
+    const cv::Rect boundedROI = clampROIToMat(roi, depthMap);
 
     if (boundedROI.empty())
         return {};

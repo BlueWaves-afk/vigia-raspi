@@ -1,11 +1,10 @@
 #include "coordinator.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
-#include <atomic>
 #include <iostream>
 #include <fstream>
-#include <mutex>
 
 #ifdef __linux__
 #include <pthread.h>
@@ -19,6 +18,7 @@ namespace vigia {
 static constexpr std::size_t FRAME_BUFFER_SIZE = 4;
 static constexpr float TEMP_WARN_C = 75.0f;
 static constexpr float TEMP_CRITICAL_C = 85.0f;
+static constexpr std::int32_t POTHOLE_CLASS_ID = 0;
 
 /* ===================== Constructor ===================== */
 
@@ -50,7 +50,7 @@ void Coordinator::start() {
     mainThread_    = std::thread(&Coordinator::processLoop, this);
 
     pinThread(captureThread_, 0); // LITTLE core
-    pinThread(mainThread_,  1);   // BIG core
+    pinThread(mainThread_, 1);    // BIG core
 }
 
 void Coordinator::stop() {
@@ -103,6 +103,7 @@ void Coordinator::processLoop() {
 
 void Coordinator::processFrame() {
     cv::Mat frame;
+    std::uint64_t currentIdx;
 
     {
         std::lock_guard<std::mutex> lock(bufferMutex_);
@@ -110,55 +111,60 @@ void Coordinator::processFrame() {
             return;
 
         frame = frameBuffer_[(frameIndex_ - 1) % FRAME_BUFFER_SIZE];
+        currentIdx = frameIndex_; 
     }
 
-    /* ---------- YOLO ---------- */
+    /* ---------- YOLO (High Priority) ---------- */
+    // Run detection first. If this finds something, we report it regardless of MiDaS.
     auto detections = perception_.runInference(frame);
 
-    const bool runMidas = (frameIndex_ % midasStride_ == 0);
+    /* ---------- MiDaS (Adaptive Stride) ---------- */
+    const bool runMidas = (currentIdx % midasStride_ == 0);
     cv::Mat depthMap;
 
-    if (runMidas)
+    if (runMidas) {
         depthMap = analytical_.runInference(frame);
+    }
 
     for (const auto& det : detections) {
-        if (!det.isPothole())
+        if (det.classId != POTHOLE_CLASS_ID)
             continue;
 
-        if (!runMidas || depthMap.empty())
-            continue;
+        // Initialize output with YOLO's data as the baseline
+        FusionOutput fout{};
+        fout.finalConfidence = det.confidence;
+        fout.geometryConfidence = 0.0f;
+        fout.temporalConfidence = 0.0f;
 
-        cv::Rect depthROI =
-            analytical_.scaleROIToDepth(
-                det.bbox,
+        /* ---------- Optional Verification Stage ---------- */
+        // Only refine the score if MiDaS was triggered AND produced valid data
+        if (runMidas && !depthMap.empty()) {
+            cv::Rect depthROI = analytical_.scaleROIToDepth(
+                det.boundingBox,
                 frame.size(),
                 depthMap.size()
             );
 
-        cv::Mat roiDepth =
-            analytical_.extractDepthROI(depthMap, depthROI);
+            cv::Mat roiDepth = analytical_.extractDepthROI(depthMap, depthROI);
 
-        if (roiDepth.empty())
-            continue;
+            if (!roiDepth.empty()) {
+                auto residuals = analytical_.computeDepthResiduals(roiDepth);
+                auto geom = analytical_.computeGeometryMetrics(roiDepth, residuals);
+                auto temporalMetrics = temporal_.update(geom.depressionScore, geom.roughness);
 
-        auto residuals =
-            analytical_.computeDepthResiduals(roiDepth);
+                FusionInput fin{};
+                fin.yoloConfidence   = det.confidence;
+                fin.depressionScore  = geom.depressionScore;
+                fin.roughness        = geom.roughness;
+                fin.persistence      = temporalMetrics.persistence;
+                fin.stability        = temporalMetrics.stability;
 
-        auto geom =
-            analytical_.computeGeometryMetrics(roiDepth, residuals);
+                // Overwrite fout with the fully fused result
+                fout = fusion_.fuse(fin);
+            }
+        }
 
-        auto temporalMetrics =
-            temporal_.update(geom.depressionScore, geom.roughness);
-
-        FusionInput fin{};
-        fin.yoloConfidence   = det.confidence;
-        fin.depressionScore  = geom.depressionScore;
-        fin.roughness        = geom.roughness;
-        fin.persistence      = temporalMetrics.persistence;
-        fin.stability        = temporalMetrics.stability;
-
-        FusionOutput fout = fusion_.fuse(fin);
-
+        // ALWAYS publish the result. Even if MiDaS didn't run, the visualizer gets the YOLO box.
         publishResult(det, fout);
     }
 }
@@ -175,9 +181,11 @@ void Coordinator::adaptiveControl(long elapsedMs) {
         midasStride_ = 3;
     }
     else if (elapsedMs > targetFrameTimeMs_) {
+        // If processing is slow, skip more MiDaS frames to keep YOLO fluid
         midasStride_ = std::min(midasStride_ + 1, 5);
     }
     else {
+        // If we have overhead, run MiDaS more frequently
         midasStride_ = std::max(1, midasStride_ - 1);
     }
 }
@@ -230,9 +238,9 @@ void Coordinator::publishResult(
 ) const {
     std::cout
         << "[POTHOLE]"
-        << " conf=" << out.finalConfidence
-        << " geo="  << out.geometryConfidence
-        << " tmp="  << out.temporalConfidence
+        << " conf="   << out.finalConfidence
+        << " geo="    << out.geometryConfidence
+        << " tmp="    << out.temporalConfidence
         << " stride=" << midasStride_
         << "\n";
 }

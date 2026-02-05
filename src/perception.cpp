@@ -1,13 +1,22 @@
 #include "perception.hpp"
 #include <algorithm>
 #include <thread>
+#include <iostream>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 
 namespace vigia {
 
 PerceptionAgent::PerceptionAgent(const std::string& modelXmlPath,
-                                 const std::string& device) {
+                                 const std::string& device,
+                                 int cameraIndex)
+    : cameraIndex_(cameraIndex) {
     loadNetwork(modelXmlPath, device);
+}
+
+PerceptionAgent::~PerceptionAgent() {
+    if (camera_.isOpened())
+        camera_.release();
 }
 
 /* ===================== H-HMAS Agent Loop ===================== */
@@ -22,7 +31,6 @@ void PerceptionAgent::run(SafeQueue<FramePacket>& inputQueue,
         }
         FramePacket packet = std::move(*packetOpt);
 
-
         auto detections = runInference(packet.frame);
 
         PerceptionResult result;
@@ -33,30 +41,43 @@ void PerceptionAgent::run(SafeQueue<FramePacket>& inputQueue,
 
         outputQueue.push(std::move(result));
     }
+}
 
+bool PerceptionAgent::captureFrame(cv::Mat& frame) {
+    if (!cameraInitialized_) {
+        cameraInitialized_ = camera_.open(cameraIndex_);
+        if (!cameraInitialized_)
+            return false;
+
+        camera_.set(cv::CAP_PROP_FRAME_WIDTH, 640.0);
+        camera_.set(cv::CAP_PROP_FRAME_HEIGHT, 480.0);
+    }
+
+    if (!camera_.isOpened())
+        return false;
+
+    if (!camera_.read(frame))
+        return false;
+
+    return true;
 }
 
 /* ===================== Network Loading ===================== */
 
 void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
                                   const std::string& device) {
-    // Read model
     auto model = core_.read_model(modelXmlPath);
 
-    // ✅ Explicitly define layout (THIS FIXES YOUR CRASH)
+    // Set layout to NCHW as required by OpenVINO for this model type
     model->get_parameters()[0]->set_layout("NCHW");
-
-    // ✅ Now batch is well-defined
     ov::set_batch(model, 1);
 
-    // Compile with latency-focused config
     compiledModel_ = core_.compile_model(
         model,
         device,
         {
             ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-            ov::hint::num_requests(1),
-            ov::inference_num_threads(2)
+            ov::hint::num_requests(1)
         }
     );
 
@@ -64,79 +85,101 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     outputTensor_ = compiledModel_.output(0);
 
     const auto& inputShape = compiledModel_.input().get_shape();
-    inputHeight_ = inputShape[2];
-    inputWidth_  = inputShape[3];
+    inputHeight_ = static_cast<int>(inputShape[2]);
+    inputWidth_  = static_cast<int>(inputShape[3]);
+
+    std::cout << "[YOLO26] Model Loaded. Input: " << inputWidth_ << "x" << inputHeight_ << "\n";
 }
 
+/* ===================== Core Logic ===================== */
 
-/* ===================== Inference Logic ===================== */
+cv::Mat PerceptionAgent::preprocess(const cv::Mat& frame, Letterbox& lb) {
+    // 1. Convert BGR to RGB
+    cv::Mat rgb;
+    cv::cvtColor(frame, rgb, cv::COLOR_BGR2RGB);
+
+    // 2. Calculate Letterbox (preserves aspect ratio)
+    float r = std::min((float)inputWidth_ / frame.cols, (float)inputHeight_ / frame.rows);
+    int new_unpad_w = std::round(frame.cols * r);
+    int new_unpad_h = std::round(frame.rows * r);
+
+    lb.scale = r;
+    lb.pad_w = (inputWidth_ - new_unpad_w) / 2;
+    lb.pad_h = (inputHeight_ - new_unpad_h) / 2;
+
+    cv::Mat resized;
+    cv::resize(rgb, resized, cv::Size(new_unpad_w, new_unpad_h));
+
+    cv::Mat padded;
+    cv::copyMakeBorder(resized, padded, lb.pad_h, inputHeight_ - new_unpad_h - lb.pad_h,
+                       lb.pad_w, inputWidth_ - new_unpad_w - lb.pad_w,
+                       cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
+
+    // 3. Normalize to [0.0, 1.0]
+    cv::Mat blob;
+    padded.convertTo(blob, CV_32F, 1.0 / 255.0);
+    return blob;
+}
 
 std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
-    std::vector<Detection> detections;
+    Letterbox lb;
+    cv::Mat blob = preprocess(frame, lb);
 
-    /* ---------- Resize ---------- */
-    cv::Mat resized;
-    cv::resize(frame, resized, cv::Size(inputWidth_, inputHeight_));
-
-    /* ---------- Normalize to FP32 ---------- */
-    cv::Mat inputBlob;
-    resized.convertTo(inputBlob, CV_32F, 1.0f / 255.0f); // FP32 [0,1]
-
-    /* ---------- HWC → CHW (FP32) ---------- */
-    std::vector<float> chw(inputWidth_ * inputHeight_ * 3);
-    size_t idx = 0;
+    // HWC to CHW manual transposition
+    ov::Tensor inputTensor(ov::element::f32, {1, 3, (size_t)inputHeight_, (size_t)inputWidth_});
+    float* tensorData = inputTensor.data<float>();
+    float* blobData = blob.ptr<float>();
 
     for (int c = 0; c < 3; ++c) {
-        for (int y = 0; y < inputHeight_; ++y) {
-            for (int x = 0; x < inputWidth_; ++x) {
-                chw[idx++] = inputBlob.at<cv::Vec3f>(y, x)[c];
-            }
+        for (int i = 0; i < inputHeight_ * inputWidth_; ++i) {
+            tensorData[c * inputHeight_ * inputWidth_ + i] = blobData[i * 3 + c];
         }
     }
-
-    /* ---------- Bind Tensor ---------- */
-    ov::Tensor inputTensor(
-        ov::element::f32,
-        {1, 3, inputHeight_, inputWidth_},
-        chw.data()
-    );
 
     inferRequest_.set_input_tensor(inputTensor);
     inferRequest_.infer();
 
-    /* ---------- Postprocessing ---------- */
-    const ov::Tensor output = inferRequest_.get_tensor(outputTensor_);
-    const float* outputData = static_cast<const float*>(output.data());
+    return postprocess(inferRequest_.get_tensor(outputTensor_), lb, frame.size());
+}
 
-    constexpr int ELEMENTS = 6; // cx, cy, w, h, conf, class
-    const int numDetections = static_cast<int>(output.get_shape()[1]);
+std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, const Letterbox& lb, const cv::Size& origSize) {
+    std::vector<Detection> detections;
+    const float* data = output.data<const float>();
+    const auto& shape = output.get_shape(); 
 
-    for (int i = 0; i < numDetections; ++i) {
-        const float confidence = outputData[i * ELEMENTS + 4];
+    // YOLO26 NMS-Free output is typically [1, 300, 6]
+    // Indices: 0:x1, 1:y1, 2:x2, 3:y2, 4:score, 5:class_id
+    int num_detections = static_cast<int>(shape[1]);
+
+    for (int i = 0; i < num_detections; ++i) {
+        const float* row = data + (i * 6);
+        float confidence = row[4];
+
         if (confidence < confThreshold_) continue;
+
+        // Map coordinates back to original frame (removing padding and scaling)
+        float x1 = (row[0] - lb.pad_w) / lb.scale;
+        float y1 = (row[1] - lb.pad_h) / lb.scale;
+        float x2 = (row[2] - lb.pad_w) / lb.scale;
+        float y2 = (row[3] - lb.pad_h) / lb.scale;
+
+        // Clip to original frame boundaries
+        x1 = std::clamp(x1, 0.0f, (float)origSize.width);
+        y1 = std::clamp(y1, 0.0f, (float)origSize.height);
+        x2 = std::clamp(x2, 0.0f, (float)origSize.width);
+        y2 = std::clamp(y2, 0.0f, (float)origSize.height);
 
         Detection det;
         det.confidence = confidence;
-        det.classId = static_cast<int>(outputData[i * ELEMENTS + 5]);
+        det.classId = static_cast<int>(row[5]);
+        det.boundingBox = cv::Rect(cv::Point(static_cast<int>(x1), static_cast<int>(y1)), 
+                                   cv::Point(static_cast<int>(x2), static_cast<int>(y2)));
 
-        float cx = outputData[i * ELEMENTS + 0] * frame.cols;
-        float cy = outputData[i * ELEMENTS + 1] * frame.rows;
-        float w  = outputData[i * ELEMENTS + 2] * frame.cols;
-        float h  = outputData[i * ELEMENTS + 3] * frame.rows;
-
-        det.boundingBox = cv::Rect(
-            static_cast<int>(cx - w / 2),
-            static_cast<int>(cy - h / 2),
-            static_cast<int>(w),
-            static_cast<int>(h)
-        );
-
-        detections.emplace_back(det);
+        detections.push_back(det);
     }
 
     return detections;
 }
-
 
 float PerceptionAgent::aggregateConfidence(const std::vector<Detection>& detections) const {
     float maxConfidence = 0.0F;

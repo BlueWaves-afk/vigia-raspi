@@ -1,11 +1,11 @@
 #pragma once
 
-#include <memory>
-#include <atomic>
+#include <vector>
 #include <thread>
+#include <atomic>
 #include <mutex>
-#include <condition_variable>
-#include <chrono>
+
+#include <opencv2/core.hpp>
 
 #include "perception.hpp"
 #include "analytical.hpp"
@@ -14,90 +14,60 @@
 
 namespace vigia {
 
-/* ===================== System Output ===================== */
-
-struct CoordinatorOutput {
-    float finalConfidence = 0.0f;
-    bool isHazard = false;
-
-    // Debug / telemetry
-    float yoloConfidence = 0.0f;
-    float geometryConfidence = 0.0f;
-    float temporalConfidence = 0.0f;
-
-    float depressionScore = 0.0f;
-    float roughness = 0.0f;
-    float persistence = 0.0f;
-    float stability = 0.0f;
-};
-
-/* ===================== Coordinator Config ===================== */
-
-struct CoordinatorConfig {
-    // FPS control
-    int targetFPS = 10;
-
-    // Decision threshold
-    float hazardThreshold = 0.65f;
-
-    // Thermal throttling
-    float maxCPUTempC = 80.0f;
-
-    // Threading
-    bool enableAsync = true;
-
-    // Debug
-    bool verbose = false;
-};
-
-/* ===================== Coordinator ===================== */
-
 class Coordinator {
 public:
-    explicit Coordinator(const CoordinatorConfig& config);
+    /* ===================== Constructor ===================== */
+    Coordinator(
+        PerceptionAgent& perception,
+        AnalyticalAgent& analytical,
+        TemporalAnalyzer& temporal,
+        FusionEngine& fusion,
+        int targetFps
+    );
 
-    /* ----- Dependency Injection ----- */
-    void setPerceptionAgent(std::shared_ptr<PerceptionAgent> agent);
-    void setAnalyticalAgent(std::shared_ptr<AnalyticalAgent> agent);
-    void setTemporalAnalyzer(std::shared_ptr<TemporalAnalyzer> analyzer);
-    void setFusionEngine(std::shared_ptr<FusionEngine> fusion);
-
-    /* ----- Lifecycle ----- */
-    bool initialize();
-    void shutdown();
-
-    /* ----- Main Entry ----- */
-    CoordinatorOutput processFrame(const cv::Mat& frame);
-
-    /* ----- Telemetry ----- */
-    float getCurrentFPS() const;
-    float getLastCPUTemperature() const;
+    /* ===================== Lifecycle ===================== */
+    void start();
+    void stop();
 
 private:
-    /* ===================== Internal Steps ===================== */
+    /* ===================== Threads ===================== */
+    void captureLoop();
+    void processLoop();
 
-    void enforceFPSLimit();
-    bool thermalSafe() const;
+    /* ===================== Core Logic ===================== */
+    void processFrame();
+    void adaptiveControl(long elapsedMs);
+    void frameLimiter(long elapsedMs) const;
 
-    /* ===================== Internal State ===================== */
+    /* ===================== Utilities ===================== */
+    float readTemperature() const;
+    void pinThread(std::thread& t, int coreId);
 
-    CoordinatorConfig config_;
+    /* ===================== Output ===================== */
+    void publishResult(const Detection& det, const FusionOutput& out) const;
 
-    std::shared_ptr<PerceptionAgent> perception_;
-    std::shared_ptr<AnalyticalAgent> analytical_;
-    std::shared_ptr<TemporalAnalyzer> temporal_;
-    std::shared_ptr<FusionEngine> fusion_;
+private:
+    /* ===================== Dependencies ===================== */
+    PerceptionAgent& perception_;
+    AnalyticalAgent& analytical_;
+    TemporalAnalyzer& temporal_;
+    FusionEngine& fusion_;
 
-    // Timing
-    std::chrono::steady_clock::time_point lastFrameTime_;
-    std::atomic<float> currentFPS_{0.0f};
+    /* ===================== Timing ===================== */
+    long targetFrameTimeMs_;
 
-    // Thermal
-    mutable float lastCPUTempC_ = 0.0f;
+    /* ===================== Threading ===================== */
+    std::atomic<bool> running_;
+    std::thread captureThread_;
+    std::thread mainThread_;
 
-    // Thread safety
-    std::mutex mutex_;
-    std::atomic<bool> initialized_{false};
+    /* ===================== Frame Buffer ===================== */
+    std::vector<cv::Mat> frameBuffer_;
+    std::mutex bufferMutex_;
+    std::size_t frameIndex_;
+
+    /* ===================== Adaptive Control ===================== */
+    int midasStride_;
 };
 
 } // namespace vigia

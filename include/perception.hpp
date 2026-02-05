@@ -7,13 +7,13 @@
 #include <vector>
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 #include <openvino/openvino.hpp>
 
 #include "safe_queue.hpp"
 
 namespace vigia {
-
-/* ===================== Data Structures ===================== */
 
 struct FramePacket {
     std::uint64_t frameId{0};
@@ -34,34 +34,51 @@ struct PerceptionResult {
     std::chrono::steady_clock::time_point timestamp{};
 };
 
-/* ===================== Perception Agent ===================== */
+/**
+ * @brief Helper for Ultralytics-style Letterboxing to maintain aspect ratio
+ */
+struct Letterbox {
+    float scale;
+    int pad_w;
+    int pad_h;
+};
 
 class PerceptionAgent {
 public:
     PerceptionAgent(const std::string& modelXmlPath,
-                    const std::string& device = "CPU");
+                    const std::string& device = "CPU",
+                    int cameraIndex = 0);
+    virtual ~PerceptionAgent();
+
+    virtual bool captureFrame(cv::Mat& frame);
+    virtual std::vector<Detection> runInference(const cv::Mat& frame);
 
     void run(SafeQueue<FramePacket>& inputQueue,
              SafeQueue<PerceptionResult>& outputQueue,
              std::atomic<bool>& running);
 
+protected:
+    PerceptionAgent() = default;
+
 private:
-    /* ---------- OpenVINO ---------- */
-    void loadNetwork(const std::string& modelXmlPath,
-                     const std::string& device);
-
-    std::vector<Detection> runInference(const cv::Mat& frame);
+    void loadNetwork(const std::string& modelXmlPath, const std::string& device);
     float aggregateConfidence(const std::vector<Detection>& detections) const;
+    
+    // Core Logic
+    cv::Mat preprocess(const cv::Mat& frame, Letterbox& lb);
+    std::vector<Detection> postprocess(const ov::Tensor& output, const Letterbox& lb, const cv::Size& origSize);
 
-    /* ---------- Runtime ---------- */
     ov::Core core_;
     ov::CompiledModel compiledModel_;
     ov::InferRequest inferRequest_;
     ov::Output<const ov::Node> outputTensor_;
 
-    /* ---------- Model Metadata ---------- */
-    std::size_t inputWidth_{320};
-    std::size_t inputHeight_{320};
+    int cameraIndex_{0};
+    bool cameraInitialized_{false};
+    cv::VideoCapture camera_;
+
+    int inputWidth_{320};
+    int inputHeight_{320};
     float confThreshold_{0.4f};
 };
 

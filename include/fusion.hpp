@@ -25,8 +25,9 @@ struct FusionOutput {
 class FusionEngine {
 public:
     FusionEngine();
+    virtual ~FusionEngine() = default;
 
-    FusionOutput fuse(const FusionInput& in) const;
+    virtual FusionOutput fuse(const FusionInput& in) const;
 
 private:
     float computeGeometryConfidence(

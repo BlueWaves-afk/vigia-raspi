@@ -17,8 +17,9 @@ struct TemporalMetrics {
 class TemporalAnalyzer {
 public:
     explicit TemporalAnalyzer(std::size_t historySize = 10);
+    virtual ~TemporalAnalyzer() = default;
 
-    TemporalMetrics update(float depressionScore, float roughness);
+    virtual TemporalMetrics update(float depressionScore, float roughness);
     void reset();
 
 private:
