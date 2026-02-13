@@ -1,6 +1,6 @@
 <div align="center">
 
-#  VIGIA
+#  VIGIA-ARM
 
 **ARM-Based Real-Time Road Hazard Detection System**
 
@@ -23,7 +23,7 @@ VIGIA is a real-time, ARM-optimized road hazard detection system designed for ed
 The project demonstrates a **hardware–software co-design** approach that maximizes performance on constrained ARM edge hardware while maintaining deterministic real-time behavior.
 
 ---
-
+![VigiaSense MultiModal System.](vigia_700p_final.gif)
 ## Table of Contents
 
 - [Objective](#objective)
