@@ -49,6 +49,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <deque>
 #include <exception>
 #include <fstream>
@@ -66,6 +67,12 @@
 #include <array>
 #include <vector>
 #include <ctime>
+
+#ifdef __linux__
+#include <unistd.h>                    // write(), _exit(), STDERR_FILENO
+#elif defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/ocl.hpp>
@@ -928,6 +935,26 @@ void logDeviceCapabilities(ov::Core& core, const std::string& device) {
 } // namespace vigia
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  SIGBUS signal handler — catches unaligned access / mmap faults
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static volatile const char* g_currentStep = "(not started)";
+
+static void sigbusHandler(int sig) {
+    // Only async-signal-safe calls here: write() + _exit()
+    const char prefix[] = "\n[FATAL] Caught SIGBUS (Bus error) during step: ";
+    const char suffix[] = "\n[FATAL] This typically indicates memory-mapped I/O failure on SD-card\n";
+    // POSIX write() is async-signal-safe
+    (void)::write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
+    // g_currentStep is a pointer to a string literal — safe to read
+    const volatile char* p = g_currentStep;
+    size_t len = 0;
+    while (p[len] != '\0') ++len;
+    (void)::write(STDERR_FILENO, (const char*)p, len);
+    (void)::write(STDERR_FILENO, suffix, sizeof(suffix) - 1);
+    ::_exit(128 + sig);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  main()
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -991,6 +1018,12 @@ int main(int argc, char** argv) {
         : videoPath;
 
     try {
+        // ── Install SIGBUS handler ─────────────────────────────────────
+        // Catches unaligned access / mmap page faults on ARM64.
+        // Prints which step was in progress before crashing.
+        std::signal(SIGBUS, sigbusHandler);
+        std::cout << "[TRACE] SIGBUS handler installed" << std::flush << std::endl;
+
         // ── OpenCV threading configuration ──────────────────────────────
         // cv::setNumThreads(0) = let TBB decide (uses all available cores).
         // This unlocks KleidiCV HAL multi-threaded dispatch for cv::resize,
@@ -1002,19 +1035,50 @@ int main(int argc, char** argv) {
         // Pin UI/main thread to Core 3 (Linux/Raspberry Pi)
         pinCurrentThreadToCore(3);
 
-        // ── Shared ov::Core ─────────────────────────────────────────────
-        // Single ov::Core avoids duplicate plugin discovery, device
-        // enumeration, and cache init (~50–100 ms saved on Pi 4).
-        std::cout << "[TRACE] >>> ov::Core construction BEGIN" << std::flush << std::endl;
-        ov::Core core;
-        std::cout << "[TRACE] <<< ov::Core construction END (success)" << std::flush << std::endl;
+        // ── Shared ov::Core (heap-allocated for guaranteed alignment) ───
+        // std::make_shared ensures the ov::Core object lives on the heap
+        // with proper alignment, avoiding potential stack alignment issues
+        // on ARM64.  Also avoids duplicate plugin discovery (~50–100 ms
+        // saved on Pi 4).
+        g_currentStep = "ov::Core construction";
+        std::cout << "[TRACE] >>> ov::Core construction BEGIN (heap via make_shared)" << std::flush << std::endl;
+        auto corePtr = std::make_shared<ov::Core>();
+        std::cout << "[TRACE] <<< ov::Core construction END (success, addr=" << static_cast<void*>(corePtr.get()) << ")" << std::flush << std::endl;
+        ov::Core& core = *corePtr;
         const std::string device = "CPU";
+
+        // ── Force FP32 precision ────────────────────────────────────────
+        // Prevents FP16 alignment traps on Cortex-A72 (Pi 4).
+        // Some OpenVINO builds default to FP16 on ARM which can trigger
+        // SIGBUS on unaligned 16-bit float access.
+        g_currentStep = "Setting FP32 inference precision";
+        std::cout << "[TRACE] >>> Setting inference_precision to FP32" << std::flush << std::endl;
+        try {
+            core.set_property("CPU", ov::hint::inference_precision(ov::element::f32));
+            std::cout << "[TRACE] <<< inference_precision(FP32) set successfully" << std::flush << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[TRACE] WARNING: Could not set FP32 precision: " << e.what() << std::flush << std::endl;
+        }
+
+        // ── Disable mmap at ov::Core level ──────────────────────────────
+        // Prevents SIGBUS from SD-card mmap page faults.
+        g_currentStep = "Disabling mmap on shared ov::Core";
+        std::cout << "[TRACE] >>> Disabling mmap on shared ov::Core" << std::flush << std::endl;
+        try {
+            core.set_property("CPU", ov::enable_mmap(false));
+            std::cout << "[TRACE] <<< ov::enable_mmap(false) set on shared core" << std::flush << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[TRACE] WARNING: Could not disable mmap on shared core: " << e.what() << std::flush << std::endl;
+        }
+
+        g_currentStep = "logDeviceCapabilities";
         std::cout << "[TRACE] >>> logDeviceCapabilities BEGIN" << std::flush << std::endl;
         logDeviceCapabilities(core, device);
         std::cout << "[TRACE] <<< logDeviceCapabilities END" << std::flush << std::endl;
 
         InstrumentationBus bus;
         std::unique_ptr<InstrumentedPerceptionAgent> perceptionHolder;
+        g_currentStep = "PerceptionAgent construction (YOLO26 model load + compile)";
         std::cout << "[TRACE] >>> PerceptionAgent construction BEGIN (model=" << yoloModel << ")" << std::flush << std::endl;
         try {
             if (useCamera)
@@ -1033,6 +1097,7 @@ int main(int argc, char** argv) {
         std::cout << "[TRACE] <<< PerceptionAgent construction END (success)" << std::flush << std::endl;
 
         InstrumentedPerceptionAgent& perception = *perceptionHolder;
+        g_currentStep = "AnalyticalAgent construction (MiDaS model load + compile)";
         std::cout << "[TRACE] >>> AnalyticalAgent construction BEGIN (model=" << midasModel << ")" << std::flush << std::endl;
         std::unique_ptr<InstrumentedAnalyticalAgent> analyticalHolder;
         try {
@@ -1046,6 +1111,7 @@ int main(int argc, char** argv) {
             throw;
         }
         std::cout << "[TRACE] <<< AnalyticalAgent construction END (success)" << std::flush << std::endl;
+        g_currentStep = "Post-construction (coordinator + main loop)";
         InstrumentedAnalyticalAgent& analytical = *analyticalHolder;
         InstrumentedTemporalAnalyzer temporal(bus, perception);
         InstrumentedFusionEngine fusion(bus, perception);

@@ -212,7 +212,8 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
             device,
             {
                 ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-                ov::hint::num_requests(1)
+                ov::hint::num_requests(1),
+                ov::hint::inference_precision(ov::element::f32)
             }
         );
     } catch (const ov::Exception& e) {
