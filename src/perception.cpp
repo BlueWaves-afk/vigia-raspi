@@ -78,20 +78,51 @@ bool PerceptionAgent::captureFrame(cv::Mat& frame) {
 
 void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
                                   const std::string& device) {
-    auto model = core_->read_model(modelXmlPath);
+    // Derive .bin path for trace logging
+    std::string modelBinPath = modelXmlPath;
+    {
+        auto pos = modelBinPath.rfind(".xml");
+        if (pos != std::string::npos)
+            modelBinPath.replace(pos, 4, ".bin");
+    }
+    std::cout << "[TRACE] >>> core_->read_model() BEGIN" << std::flush << std::endl;
+    std::cout << "[TRACE]     .xml = " << modelXmlPath << std::flush << std::endl;
+    std::cout << "[TRACE]     .bin = " << modelBinPath << std::flush << std::endl;
+
+    std::shared_ptr<ov::Model> model;
+    try {
+        model = core_->read_model(modelXmlPath);
+    } catch (const ov::Exception& e) {
+        std::cerr << "[TRACE] !!! ov::Exception in read_model: " << e.what() << std::flush << std::endl;
+        throw;
+    } catch (const std::exception& e) {
+        std::cerr << "[TRACE] !!! std::exception in read_model: " << e.what() << std::flush << std::endl;
+        throw;
+    }
+    std::cout << "[TRACE] <<< core_->read_model() END (success)" << std::flush << std::endl;
 
     // Set layout to NCHW as required by OpenVINO for this model type
     model->get_parameters()[0]->set_layout("NCHW");
     ov::set_batch(model, 1);
 
-    compiledModel_ = core_->compile_model(
-        model,
-        device,
-        {
-            ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-            ov::hint::num_requests(1)
-        }
-    );
+    std::cout << "[TRACE] >>> core_->compile_model() BEGIN (device=" << device << ")" << std::flush << std::endl;
+    try {
+        compiledModel_ = core_->compile_model(
+            model,
+            device,
+            {
+                ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
+                ov::hint::num_requests(1)
+            }
+        );
+    } catch (const ov::Exception& e) {
+        std::cerr << "[TRACE] !!! ov::Exception in compile_model: " << e.what() << std::flush << std::endl;
+        throw;
+    } catch (const std::exception& e) {
+        std::cerr << "[TRACE] !!! std::exception in compile_model: " << e.what() << std::flush << std::endl;
+        throw;
+    }
+    std::cout << "[TRACE] <<< core_->compile_model() END (success)" << std::flush << std::endl;
 
     inferRequest_ = compiledModel_.create_infer_request();
     outputTensor_ = compiledModel_.output(0);
@@ -100,12 +131,14 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     inputHeight_ = static_cast<int>(inputShape[2]);
     inputWidth_  = static_cast<int>(inputShape[3]);
 
+    std::cout << "[TRACE] >>> input tensor pre-allocation BEGIN (" << inputWidth_ << "x" << inputHeight_ << ")" << std::flush << std::endl;
     // Pre-allocate a persistent input tensor — avoids malloc/free every frame
     inputTensor_ = ov::Tensor(ov::element::f32,
                               {1, 3,
                                static_cast<std::size_t>(inputHeight_),
                                static_cast<std::size_t>(inputWidth_)});
     inferRequest_.set_input_tensor(inputTensor_);
+    std::cout << "[TRACE] <<< input tensor pre-allocation END (success)" << std::flush << std::endl;
 
     std::cout << "[YOLO26] Model Loaded. Input: " << inputWidth_ << "x" << inputHeight_ << "\n";
 }
@@ -146,9 +179,13 @@ std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
 
     // ── HWC → CHW transposition ──────────────────────────────────
     // Write directly into the pre-allocated input tensor.
+    std::cout << "[TRACE] >>> inputTensor_.data<float>() BEGIN (tensor addr=" << static_cast<void*>(&inputTensor_) << ")" << std::flush << std::endl;
     float* tensorData = inputTensor_.data<float>();
+    std::cout << "[TRACE]     tensorData ptr = " << static_cast<void*>(tensorData) << std::flush << std::endl;
     const float* blobData = blob.ptr<float>();
+    std::cout << "[TRACE]     blobData   ptr = " << static_cast<const void*>(blobData) << std::flush << std::endl;
     const int planeSize = inputHeight_ * inputWidth_;
+    std::cout << "[TRACE]     planeSize = " << planeSize << " (" << inputWidth_ << "x" << inputHeight_ << ")" << std::flush << std::endl;
 
     float* dst_r = tensorData;
     float* dst_g = tensorData + planeSize;
@@ -181,8 +218,19 @@ std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
 
     // ── Async inference (OpenVINO 2025) ───────────────────────────
     // Input tensor is already bound via set_input_tensor in loadNetwork.
-    inferRequest_.start_async();
-    inferRequest_.wait();
+    std::cout << "[TRACE] >>> HWC->CHW transposition DONE, start_async() BEGIN" << std::flush << std::endl;
+    try {
+        inferRequest_.start_async();
+        std::cout << "[TRACE]     start_async() returned, waiting..." << std::flush << std::endl;
+        inferRequest_.wait();
+        std::cout << "[TRACE] <<< inferRequest_.wait() returned (success)" << std::flush << std::endl;
+    } catch (const ov::Exception& e) {
+        std::cerr << "[TRACE] !!! ov::Exception during inference: " << e.what() << std::flush << std::endl;
+        throw;
+    } catch (const std::exception& e) {
+        std::cerr << "[TRACE] !!! std::exception during inference: " << e.what() << std::flush << std::endl;
+        throw;
+    }
 
     return postprocess(inferRequest_.get_tensor(outputTensor_), lb, frame.size());
 }

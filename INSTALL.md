@@ -280,25 +280,28 @@ sudo make install
 ## 7. Build VIGIA
 
 ```bash
-git clone https://github.com/<your-org>/vigia.git
-cd vigia
+cd ~
+git clone https://github.com/BlueWaves-afk/vigia-raspi.git
+cd vigia-raspi
 
-# 1. Initialize OpenVINO paths (Critical for CMake to find OpenVINO)
+# Sourcing OpenVINO 2025 setup script
 source /opt/intel/openvino_2025/setupvars.sh
 
 # 2. Create and enter build directory
-mkdir build && cd build
+# Create a dedicated build directory
+mkdir -p build && cd build
 
-# 3. Configure the project
-# This step checks for your KleidiCV-linked OpenCV and OpenVINO
+# Configure the project with CMake
+# This will check for your KleidiCV-optimized OpenCV and OpenVINO 2025
 cmake ..
 
-# 4. Compile using all 4 CPU cores
-# Keep an eye on heat; use -j2 if the Pi throttles
-make -j$(nproc)
+# Compile the visual test specifically using all 4 cores
+make system_visual_test -j$(nproc)
+# Set CPU governor to maximum performance
+echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 
-# 5. Run the visual test (assuming hazard.mp4 is present)
-./system_visual_test --video hazard.mp4
+# Run the test (assuming hazard.mp4 and models/ are in your project root)
+./system_visual_test
 ```
 
 ---

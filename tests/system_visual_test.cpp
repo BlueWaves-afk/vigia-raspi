@@ -971,7 +971,7 @@ int main(int argc, char** argv) {
 
     const std::string yoloModel = (argIndex < argc)
         ? argv[argIndex++]
-        : "models/yolo26/yolo26_model0.xml";
+        : "models/yolo26/yolo26_model.xml";
     const std::string midasModel = (argIndex < argc)
         ? argv[argIndex++]
         : "models/midasv21/openvino_midas_v21_small_256.xml";
@@ -1005,21 +1005,48 @@ int main(int argc, char** argv) {
         // ── Shared ov::Core ─────────────────────────────────────────────
         // Single ov::Core avoids duplicate plugin discovery, device
         // enumeration, and cache init (~50–100 ms saved on Pi 4).
+        std::cout << "[TRACE] >>> ov::Core construction BEGIN" << std::flush << std::endl;
         ov::Core core;
+        std::cout << "[TRACE] <<< ov::Core construction END (success)" << std::flush << std::endl;
         const std::string device = "CPU";
+        std::cout << "[TRACE] >>> logDeviceCapabilities BEGIN" << std::flush << std::endl;
         logDeviceCapabilities(core, device);
+        std::cout << "[TRACE] <<< logDeviceCapabilities END" << std::flush << std::endl;
 
         InstrumentationBus bus;
         std::unique_ptr<InstrumentedPerceptionAgent> perceptionHolder;
-        if (useCamera)
-            perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(
-                core, yoloModel, device, cameraIndex, bus);
-        else
-            perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(
-                core, yoloModel, device, videoPath, bus);
+        std::cout << "[TRACE] >>> PerceptionAgent construction BEGIN (model=" << yoloModel << ")" << std::flush << std::endl;
+        try {
+            if (useCamera)
+                perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(
+                    core, yoloModel, device, cameraIndex, bus);
+            else
+                perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(
+                    core, yoloModel, device, videoPath, bus);
+        } catch (const ov::Exception& e) {
+            std::cerr << "[TRACE] !!! ov::Exception during PerceptionAgent construction: " << e.what() << std::flush << std::endl;
+            throw;
+        } catch (const std::exception& e) {
+            std::cerr << "[TRACE] !!! std::exception during PerceptionAgent construction: " << e.what() << std::flush << std::endl;
+            throw;
+        }
+        std::cout << "[TRACE] <<< PerceptionAgent construction END (success)" << std::flush << std::endl;
 
         InstrumentedPerceptionAgent& perception = *perceptionHolder;
-        InstrumentedAnalyticalAgent analytical(core, midasModel, device, bus, perception);
+        std::cout << "[TRACE] >>> AnalyticalAgent construction BEGIN (model=" << midasModel << ")" << std::flush << std::endl;
+        std::unique_ptr<InstrumentedAnalyticalAgent> analyticalHolder;
+        try {
+            analyticalHolder = std::make_unique<InstrumentedAnalyticalAgent>(
+                core, midasModel, device, bus, perception);
+        } catch (const ov::Exception& e) {
+            std::cerr << "[TRACE] !!! ov::Exception during AnalyticalAgent construction: " << e.what() << std::flush << std::endl;
+            throw;
+        } catch (const std::exception& e) {
+            std::cerr << "[TRACE] !!! std::exception during AnalyticalAgent construction: " << e.what() << std::flush << std::endl;
+            throw;
+        }
+        std::cout << "[TRACE] <<< AnalyticalAgent construction END (success)" << std::flush << std::endl;
+        InstrumentedAnalyticalAgent& analytical = *analyticalHolder;
         InstrumentedTemporalAnalyzer temporal(bus, perception);
         InstrumentedFusionEngine fusion(bus, perception);
 
