@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <thread>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 
@@ -78,13 +80,54 @@ bool PerceptionAgent::captureFrame(cv::Mat& frame) {
 
 void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
                                   const std::string& device) {
-    // Derive .bin path for trace logging
+    // ── 1. Derive .bin path ─────────────────────────────────────────
     std::string modelBinPath = modelXmlPath;
     {
         auto pos = modelBinPath.rfind(".xml");
         if (pos != std::string::npos)
             modelBinPath.replace(pos, 4, ".bin");
     }
+
+    // ── 2. Model Integrity: verify .xml and .bin are readable & non-empty
+    auto validateFile = [](const std::string& path, const std::string& label) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) {
+            std::cerr << "[YOLO26] FATAL: Cannot open " << label << ": " << path << std::flush << std::endl;
+            throw std::runtime_error("Cannot open model file: " + path);
+        }
+        const auto size = f.tellg();
+        if (size <= 0) {
+            std::cerr << "[YOLO26] FATAL: " << label << " is empty (0 bytes): " << path << std::flush << std::endl;
+            throw std::runtime_error("Model file is empty: " + path);
+        }
+        std::cout << "[YOLO26] " << label << " OK  size=" << size << " bytes  path=" << path << std::flush << std::endl;
+    };
+    validateFile(modelXmlPath, ".xml");
+    validateFile(modelBinPath, ".bin");
+
+    // ── 3. RAM availability: read /proc/meminfo before heavy allocations
+#ifdef __linux__
+    {
+        std::ifstream meminfo("/proc/meminfo");
+        if (meminfo.is_open()) {
+            std::string line;
+            std::cout << "[YOLO26] /proc/meminfo snapshot before model load:" << std::flush << std::endl;
+            while (std::getline(meminfo, line)) {
+                if (line.rfind("MemTotal", 0) == 0 ||
+                    line.rfind("MemFree", 0) == 0 ||
+                    line.rfind("MemAvailable", 0) == 0 ||
+                    line.rfind("SwapTotal", 0) == 0 ||
+                    line.rfind("SwapFree", 0) == 0) {
+                    std::cout << "[YOLO26]   " << line << std::flush << std::endl;
+                }
+            }
+        } else {
+            std::cerr << "[YOLO26] WARNING: Could not open /proc/meminfo" << std::flush << std::endl;
+        }
+    }
+#endif
+
+    // ── 4. read_model ───────────────────────────────────────────────
     std::cout << "[TRACE] >>> core_->read_model() BEGIN" << std::flush << std::endl;
     std::cout << "[TRACE]     .xml = " << modelXmlPath << std::flush << std::endl;
     std::cout << "[TRACE]     .bin = " << modelBinPath << std::flush << std::endl;
@@ -105,7 +148,64 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     model->get_parameters()[0]->set_layout("NCHW");
     ov::set_batch(model, 1);
 
+    // ── 5. Explicit plugin inspection: check CPU supported properties
+    //    and log whether ACL backend is available.
+    std::cout << "[TRACE] >>> Inspecting CPU plugin supported_properties" << std::flush << std::endl;
+    try {
+        auto props = core_->get_property(device, ov::supported_properties);
+        bool foundAcl = false;
+        for (const auto& prop : props) {
+            const std::string name = prop;
+            if (name.find("ACL") != std::string::npos ||
+                name.find("arm_compute") != std::string::npos) {
+                foundAcl = true;
+            }
+        }
+        std::cout << "[YOLO26] CPU plugin properties (" << props.size() << " entries)."
+                  << (foundAcl ? " ACL reference found." : " No explicit ACL property.")
+                  << std::flush << std::endl;
+
+        // Also log the full device name — this is the most reliable ACL indicator
+        const std::string fullName = core_->get_property(device, ov::device::full_name);
+        std::cout << "[YOLO26] Device full_name: " << fullName << std::flush << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[YOLO26] WARNING: Could not query CPU properties: " << e.what() << std::flush << std::endl;
+    }
+
+    // ── 6. Disable mmap: forces standard RAM allocation instead of
+    //    memory-mapping the .bin weights file.  Fixes SIGBUS on SD-card
+    //    based systems (Raspberry Pi) where mmap pages can fault if the
+    //    filesystem returns EIO.
+    std::cout << "[TRACE] >>> Disabling mmap for CPU plugin" << std::flush << std::endl;
+    try {
+        core_->set_property("CPU", ov::enable_mmap(false));
+        std::cout << "[TRACE] <<< ov::enable_mmap(false) set successfully" << std::flush << std::endl;
+    } catch (const std::exception& e) {
+        // enable_mmap may not exist on older OpenVINO builds — non-fatal
+        std::cerr << "[YOLO26] WARNING: Could not set enable_mmap(false): " << e.what()
+                  << " (continuing without it)" << std::flush << std::endl;
+    }
+
+    // ── 7. compile_model ────────────────────────────────────────────
     std::cout << "[TRACE] >>> core_->compile_model() BEGIN (device=" << device << ")" << std::flush << std::endl;
+
+    // Print available RAM again right before compilation — this is where
+    // SIGBUS typically fires on a memory-starved Pi.
+#ifdef __linux__
+    {
+        std::ifstream meminfo("/proc/meminfo");
+        if (meminfo.is_open()) {
+            std::string line;
+            while (std::getline(meminfo, line)) {
+                if (line.rfind("MemAvailable", 0) == 0) {
+                    std::cout << "[YOLO26] PRE-COMPILE " << line << std::flush << std::endl;
+                    break;
+                }
+            }
+        }
+    }
+#endif
+
     try {
         compiledModel_ = core_->compile_model(
             model,
