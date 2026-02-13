@@ -56,7 +56,19 @@ Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) and select:
 ```bash
 sudo raspi-config
 ```
+### 1.3 CPU scaling governer
+CPU Scaling Governor: "Performance" Mode
+By default, the Pi 4 uses the ondemand governor, which scales the CPU clock speed up and down to save power. For real-time AI, this introduces latency as the CPU "wakes up" to process each frame.
 
+The Fix: Force the CPU to stay at its maximum clock speed (1.5GHz or 1.8GHz).
+```bash
+
+# Set to performance mode (lasts until next reboot)
+echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+
+# Check if it worked
+cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+```
 Set the following options:
 
 | Setting | Path |
@@ -65,30 +77,27 @@ Set the following options:
 | Expand Filesystem | Advanced Options → Expand Filesystem |
 | Enable Camera | Interface Options → Enable Camera *(if using Pi Camera)* |
 
-Reboot afterward.
+Reboot afterward. 
 
 ---
+## 2. Optimizations
+Purge Bloat: Remove unnecessary background services that eat RAM and CPU cycles:
 
+```bash
+sudo apt purge wolfram-engine libreoffice* -y
+sudo apt autoremove -y
+```
 ## 2. Memory Optimization
 
 > **Mandatory for on-device builds.** Compiling OpenVINO and OpenCV on the Pi requires additional swap.
 
 ```bash
-sudo dphys-swapfile swapoff
-sudo nano /etc/dphys-swapfile
-```
-
-Set the swap size:
-
-```text
-CONF_SWAPSIZE=2048
-```
-
-Then activate:
-
-```bash
-sudo dphys-swapfile setup
-sudo dphys-swapfile swapon
+# 2. Increase Swap Space (Required for compiling OpenCV/OpenVINO on Pi 4)
+# Default 100MB is too small; increasing to 2GB to prevent 'Out of Memory' crashes
+# Increase Swap to 2GB for Debian Trixie (Modern rpi-swap service)
+sudo mkdir -p /etc/rpi/swap.conf.d/
+echo -e "[File]\nFixedSizeMiB=2048" | sudo tee /etc/rpi/swap.conf.d/80-use-swapfile.conf
+sudo reboot
 ```
 
 > **Tip:** If builds fail due to memory, increase `CONF_SWAPSIZE` to `8192`.
@@ -98,14 +107,39 @@ sudo dphys-swapfile swapon
 ## 3. System Dependencies
 
 ```bash
-sudo apt update && sudo apt upgrade -y
+# 1. Fix System Time (Critical for GPG signatures and repository access)
+# Manually set the clock to current time to avoid 'Not live until' errors
+sudo date -s "$(wget -qSO- --max-redirect=0 google.com 2>&1 | grep Date: | cut -d' ' -f5-8)Z"
+
+# 3. Refresh Repositories & Full System Upgrade
+# Use 'full-upgrade' for Debian Trixie to properly resolve dependency shifts
+sudo apt update && sudo apt full-upgrade -y
+
+# 4. Install Build Tools and High-Performance Libraries
+# Includes libtbb-dev for threading and libopenblas for Arm optimization
 sudo apt install -y \
-  build-essential cmake git pkg-config \
-  libjpeg-dev libpng-dev libtiff-dev \
-  libavcodec-dev libavformat-dev libswscale-dev \
-  libv4l-dev libgtk-3-dev \
-  libatlas-base-dev gfortran \
-  python3-dev wget unzip
+  build-essential \
+  cmake \
+  git \
+  pkg-config \
+  libjpeg-dev \
+  libpng-dev \
+  libtiff-dev \
+  libavcodec-dev \
+  libavformat-dev \
+  libswscale-dev \
+  libv4l-dev \
+  libgtk-3-dev \
+  libopenblas-dev \
+  liblapack-dev \
+  libtbb-dev \
+  gfortran \
+  python3-dev \
+  python3-pip \
+  python3-venv \
+  wget \
+  unzip
+
 ```
 
 ---
@@ -114,52 +148,68 @@ sudo apt install -y \
 
 KleidiAI provides highly optimized NEON SIMD micro-kernels used by modern AI frameworks on ARM.
 
+To speed up image pre-processing (resizing/filtering), we build the KleidiCV kernels and link them to OpenCV.
+### 4.1. Optimized Computer Vision (KleidiCV)
 ```bash
-git clone https://gitlab.arm.com/kleidi/kleidiai.git
-cd kleidiai
-cmake -DCMAKE_BUILD_TYPE=Release -S . -B build
-cmake --build build --parallel $(nproc)
-```
+# 1. Clone the repository
+git clone https://gitlab.arm.com/kleidi/kleidicv.git
+cd kleidicv
 
-- ✅ Enables optimized matrix multiplication paths on Cortex-A72
-- ✅ Used indirectly by OpenVINO and OpenCV
+# 2. Configure with RPi 4 specific optimizations
+# -mcpu=cortex-a72: Targets the Pi 4's specific CPU cores
+cmake -S . -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_FLAGS="-mcpu=cortex-a72" \
+      -DCMAKE_C_FLAGS="-mcpu=cortex-a72"
+
+# 3. Build using all 4 cores
+cmake --build build --parallel $(nproc)
+
+# 4. Install headers and libraries to system paths
+sudo cmake --install build
+```
 
 ---
-
-## 5. OpenCV 4.11+ with KleidiCV
-
-OpenCV 4.11+ integrates **KleidiCV**, offering up to **4× faster** vision kernels on ARM.
-
-### 5.1 Download
-
+## OpenCV with KleidiCV Support
+Regardless of the OpenVINO choice, OpenCV must be built with the WITH_KLEIDICV flag to utilize the kernels we installed in Step 2.
+In this step, we explicitly point KLEIDICV_DIR to your clone folder so OpenCV can find the specific Hardware Abstraction Layer (HAL) files it needs to "bridge" to the Arm kernels.
 ```bash
-wget -O opencv.zip https://github.com/opencv/opencv/archive/4.11.0.zip
-unzip opencv.zip
-cd opencv-4.11.0
-mkdir build && cd build
-```
+# 1. Clone both main and contrib modules (contrib contains extra optimization paths)
+# Navigate to your home or workspace
+cd ~
+sudo apt update
+sudo apt install -y python3-dev python3-numpy python3-setuptools
+git clone --branch 4.x https://github.com/opencv/opencv.git
+git clone --branch 4.x https://github.com/opencv/opencv_contrib.git
+# 2. The Optimized Build Configuration
+mkdir -p opencv/build && cd opencv/build
 
-### 5.2 Configure for ARMv8
+cmake -D CMAKE_BUILD_TYPE=RELEASE \
+      -D CMAKE_INSTALL_PREFIX=/usr/local \
+      -D OPENCV_EXTRA_MODULES_PATH=../../opencv_contrib/modules \
+      -D WITH_KLEIDICV=ON \
+      -D KLEIDICV_DIR=~/kleidicv \
+      -D PYTHON3_EXECUTABLE=$(which python3) \
+      -D PYTHON3_INCLUDE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_path('include'))") \
+      -D PYTHON3_PACKAGES_PATH=$(python3 -c "import site; print(site.getsitepackages()[0])") \
+      -D BUILD_opencv_python3=ON \
+      -D CPU_BASELINE=DETECT \
+      -D WITH_TBB=ON \
+      -D WITH_V4L=ON \
+      -D WITH_OPENGL=ON \
+      -D BUILD_EXAMPLES=OFF \
+      -D BUILD_TESTS=OFF \
+      -D OPENCV_ENABLE_NONFREE=ON \
+      -D CMAKE_CXX_FLAGS="-mcpu=cortex-a72 -O3 -ftree-vectorize" \
+      -D CMAKE_C_FLAGS="-mcpu=cortex-a72 -O3 -ftree-vectorize" ..
 
-```bash
-cmake \
-  -D CMAKE_BUILD_TYPE=RELEASE \
-  -D CMAKE_INSTALL_PREFIX=/usr/local \
-  -D ENABLE_NEON=ON \
-  -D CPU_BASELINE=NEON \
-  -D OPENCV_GENERATE_PKGCONFIG=ON \
-  ..
-```
 
-### 5.3 Compile & Install
-
-```bash
+# 4. Build and Install (This will take 1-2 hours)
+#Parallel build using all CPU cores
 make -j$(nproc)
 sudo make install
 sudo ldconfig
 ```
-
----
 
 ## 6. OpenVINO Runtime (ARM64 CPU Plugin)
 
@@ -169,46 +219,86 @@ OpenVINO is the preferred inference backend for VIGIA on ARM because it:
 - Leverages the **Arm Compute Library (ACL)**
 - Optimizes kernels at runtime for Cortex-A72
 
+Option A: Pre-compiled Archive (Fastest Setup)
+Best if you want to get running quickly. Includes standard Arm Compute Library (ACL) optimizations.
+
+Pros: Instant install.
+
+Cons: Misses the latest KleidiAI micro-kernel tweaks for INT8.
+
 ### 6.1 Download
 
 ```bash
-wget https://storage.openvinotoolkit.org/repositories/openvino/packages/2024.6/linux/l_openvino_toolkit_debian9_2024.6_arm64.tgz
-```
+# Download the latest OpenVINO ARM archive from the official GitHub releases
+# 1. Download the verified 2025.0 ARM64 archive
+wget https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.0/linux/openvino_toolkit_ubuntu20_2025.0.0.17942.1f68be9f594_arm64.tgz -O openvino_2025.tgz
 
-### 6.2 Install
-
-```bash
+# 2. Extract into the recommended /opt/intel path
 sudo mkdir -p /opt/intel
-sudo tar -xvf l_openvino_toolkit_*_arm64.tgz -C /opt/intel
-```
+sudo mkdir -p /opt/intel/openvino_2025
+sudo tar -xf openvino_2025.tgz -C /opt/intel/openvino_2025 --strip-components=1
 
-### 6.3 Install Dependencies
+# 3. Run the dependency installer for Linux
+# 1. Navigate to the dependencies folder
+cd /opt/intel/openvino_2025/install_dependencies
 
-```bash
-cd /opt/intel/openvino
-sudo -E ./install_dependencies/install_openvino_dependencies.sh
-```
+# 2. Use sed to swap the OS check from 'ubuntu22.04' to 'debian13' inside the script
+sudo sed -i "s/ubuntu22.04/debian13/g" ./install_openvino_dependencies.sh
 
-### 6.4 Environment Setup
+# 3. Run the script again
+sudo -E ./install_openvino_dependencies.sh
 
-```bash
-echo "source /opt/intel/openvino/setupvars.sh" >> ~/.bashrc
+# 4. Finalize environment setup
+echo "source /opt/intel/openvino_2025/setupvars.sh" >> ~/.bashrc
 source ~/.bashrc
+
+```
+Option B: Build from Source with KleidiAI (Max Performance)
+Highly recommended for INT8 models. This links OpenVINO directly to KleidiAI micro-kernels, which are optimized for quantized matrix multiplication on Cortex-A72.
+
+```bash
+# 1. Clone KleidiAI
+git clone https://gitlab.arm.com/kleidi/kleidiai.git
+cd kleidiai
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel $(nproc)
+export KLEIDIAI_DIR=$(pwd)/build
+
+# 2. Build OpenVINO
+cd ..
+git clone --recursive https://github.com/openvinotoolkit/openvino.git
+mkdir openvino/build && cd openvino/build
+cmake -DENABLE_KLEIDIAI=ON -DKleidiai_DIR=$KLEIDIAI_DIR \
+      -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+sudo make install
 ```
 
 ---
+
 
 ## 7. Build VIGIA
 
 ```bash
 git clone https://github.com/<your-org>/vigia.git
 cd vigia
+
+# 1. Initialize OpenVINO paths (Critical for CMake to find OpenVINO)
+source /opt/intel/openvino_2025/setupvars.sh
+
+# 2. Create and enter build directory
 mkdir build && cd build
 
-cmake .. \
-  -DCMAKE_BUILD_TYPE=Release
+# 3. Configure the project
+# This step checks for your KleidiCV-linked OpenCV and OpenVINO
+cmake ..
 
+# 4. Compile using all 4 CPU cores
+# Keep an eye on heat; use -j2 if the Pi throttles
 make -j$(nproc)
+
+# 5. Run the visual test (assuming hazard.mp4 is present)
+./system_visual_test --video hazard.mp4
 ```
 
 ---

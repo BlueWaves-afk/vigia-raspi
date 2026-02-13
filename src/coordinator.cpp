@@ -116,14 +116,16 @@ void Coordinator::processFrame() {
 
     /* ---------- YOLO (High Priority) ---------- */
     // Run detection first. If this finds something, we report it regardless of MiDaS.
-    auto detections = perception_.runInference(frame);
+    // std::move avoids deep-copying the vector + cv::Rect objects across the memory bus.
+    auto detections = std::move(perception_.runInference(frame));
 
     /* ---------- MiDaS (Adaptive Stride) ---------- */
     const bool runMidas = (currentIdx % midasStride_ == 0);
     cv::Mat depthMap;
 
     if (runMidas) {
-        depthMap = analytical_.runInference(frame);
+        // std::move elides the cv::Mat refcount atomic on the returned temporary.
+        depthMap = std::move(analytical_.runInference(frame));
     }
 
     for (const auto& det : detections) {
@@ -172,7 +174,13 @@ void Coordinator::processFrame() {
 /* ===================== Adaptive Control ===================== */
 
 void Coordinator::adaptiveControl(long elapsedMs) {
-    const float temp = readTemperature();
+    // Throttle sysfs temperature reads to once per second
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastTempReadTs_ >= std::chrono::seconds(1)) {
+        cachedTemp_ = readTemperature();
+        lastTempReadTs_ = now;
+    }
+    const float temp = cachedTemp_;
 
     if (temp > TEMP_CRITICAL_C) {
         midasStride_ = 5;

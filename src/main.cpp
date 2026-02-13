@@ -1,17 +1,17 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <thread>
-#include <utility>
 
-#include <opencv2/core.hpp>
+#include <openvino/openvino.hpp>
 
-#include "analytical.hpp"
 #include "coordinator.hpp"
-#include "fusion.hpp"
 #include "perception.hpp"
-#include "safe_queue.hpp"
+#include "analytical.hpp"
+#include "temporal.hpp"
+#include "fusion.hpp"
 
 namespace {
 
@@ -22,114 +22,98 @@ void signalHandler(int)
     g_running.store(false);
 }
 
-#ifdef __linux__
-#include <pthread.h>
-#include <sched.h>
-
-void pinThreadToCore(std::thread& thread, int coreId)
+/// Log available CPU optimizations reported by OpenVINO.
+/// On Raspberry Pi 4 with OpenVINO 2025, the CPU plugin should report
+/// Arm Compute Library (ACL) as its backend for NEON/fp16 acceleration.
+void logDeviceCapabilities(ov::Core& core, const std::string& device)
 {
-    cpu_set_t cpuSet;
-    CPU_ZERO(&cpuSet);
-    CPU_SET(coreId, &cpuSet);
-    int result = pthread_setaffinity_np(thread.native_handle(), sizeof(cpu_set_t), &cpuSet);
-    if (result != 0) {
-        std::cerr << "Unable to pin thread to core " << coreId << ": " << result << '\n';
+    std::cout << "[vigia] OpenVINO device: " << device << '\n';
+
+    try {
+        const std::string fullName =
+            core.get_property(device, ov::device::full_name);
+        std::cout << "[vigia]   Full name  : " << fullName << '\n';
+    } catch (...) {}
+
+    try {
+        const std::vector<std::string> caps =
+            core.get_property(device, ov::device::capabilities);
+        std::cout << "[vigia]   Capabilities:";
+        for (const auto& cap : caps)
+            std::cout << ' ' << cap;
+        std::cout << '\n';
+    } catch (...) {}
+
+    // Check for Arm Compute Library (ACL) backend
+#if defined(__aarch64__) || defined(__ARM_NEON)
+    try {
+        const std::string fullName =
+            core.get_property(device, ov::device::full_name);
+        // OpenVINO 2025 CPU plugin on ARM reports ACL in the full_name string
+        if (fullName.find("ACL") != std::string::npos ||
+            fullName.find("arm_compute") != std::string::npos ||
+            fullName.find("Arm") != std::string::npos) {
+            std::cout << "[vigia]   ACL backend : DETECTED (NEON-accelerated inference)\n";
+        } else {
+            std::cerr << "[vigia]   WARNING: ACL backend NOT detected. "
+                         "CPU inference may not be NEON-optimized.\n"
+                         "[vigia]   Ensure OpenVINO was built with "
+                         "-DENABLE_ARM_COMPUTE_CMAKE=ON\n";
+        }
+    } catch (...) {
+        std::cerr << "[vigia]   WARNING: Could not query device properties "
+                     "for ACL detection.\n";
     }
-}
-#else
-void pinThreadToCore(std::thread&, int)
-{
-    // Thread pinning is not available on this platform.
-}
 #endif
-
-template <typename Fn>
-std::thread spawnPinnedThread(Fn&& fn, int coreId)
-{
-    std::thread worker(std::forward<Fn>(fn));
-    pinThreadToCore(worker, coreId);
-    return worker;
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
-    std::signal(SIGINT, signalHandler);
+    std::signal(SIGINT,  signalHandler);
     std::signal(SIGTERM, signalHandler);
 
-    const std::string yoloXml = (argc > 1) ? argv[1] : "models/yolo11n.xml";
-    const std::string yoloBin = (argc > 2) ? argv[2] : "models/yolo11n.bin";
-    const std::string midasXml = (argc > 3) ? argv[3] : "models/midas_v21_small.xml";
-    const std::string midasBin = (argc > 4) ? argv[4] : "models/midas_v21_small.bin";
+    const std::string yoloModel  = (argc > 1)
+        ? argv[1]
+        : "models/yolo26/yolo26_model.xml";
+    const std::string midasModel = (argc > 2)
+        ? argv[2]
+        : "models/midasv21/openvino_midas_v21_small_256.xml";
+    const int targetFps   = (argc > 3) ? std::max(1, std::atoi(argv[3])) : 30;
+    const int cameraIndex = (argc > 4) ? std::atoi(argv[4]) : 0;
+    const std::string device = "CPU";
 
-    SafeQueue<vigia::FramePacket> perceptionQueue;
-    SafeQueue<vigia::AnalyticalRequest> analyticalQueue;
-    SafeQueue<vigia::PerceptionResult> perceptionResults;
-    SafeQueue<vigia::AnalyticalResult> analyticalResults;
-    SafeQueue<vigia::FusionState> fusionQueue;
+    try {
+        // Single ov::Core shared across all agents — avoids duplicate plugin
+        // discovery, device enumeration, and cache initialization (~50-100 ms
+        // saved on Raspberry Pi 4).
+        ov::Core core;
+        logDeviceCapabilities(core, device);
 
-    vigia::CoordinatorConfig coordinatorConfig;
-    coordinatorConfig.frameBufferSize = 16;
-    coordinatorConfig.initialFrameSkip = 1;
-    coordinatorConfig.thermalCheckInterval = std::chrono::milliseconds{750};
-    coordinatorConfig.thermalThresholdC = 75.0F;
+        vigia::PerceptionAgent perception(core, yoloModel, device, cameraIndex);
+        vigia::AnalyticalAgent analytical(core, midasModel, device);
+        vigia::TemporalAnalyzer temporal;
+        vigia::FusionEngine     fusion;
 
-    vigia::Coordinator coordinator(coordinatorConfig,
-                                   perceptionQueue,
-                                   analyticalQueue,
-                                   perceptionResults,
-                                   analyticalResults,
-                                   fusionQueue);
+        vigia::Coordinator coordinator(
+            perception, analytical, temporal, fusion, targetFps
+        );
 
-    vigia::PerceptionAgent perception(yoloXml, yoloBin, "CPU");
+        coordinator.start();
 
-    // Camera intrinsics tuned for 256x256 downsampled frames.
-    vigia::CameraIntrinsics intrinsics{425.0F, 425.0F, 128.0F, 128.0F};
-    vigia::RansacParameters ransacParams{300, 0.04F, 0.55F};
-    vigia::AnalyticalAgent analytical(intrinsics, ransacParams);
+        std::cout << "[vigia] Pipeline running (FPS target: "
+                  << targetFps << "). Press Ctrl+C to stop.\n";
 
-    vigia::FusionWeights weights{0.5F, 0.35F, 0.15F};
-    vigia::FusionEngine fusion(weights);
+        while (g_running.load())
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    std::thread coordinatorThread = spawnPinnedThread([&]() { coordinator.run(g_running); }, 0);
-    std::thread perceptionThread = spawnPinnedThread([
-                                                        &]() {
-        perception.run(perceptionQueue, perceptionResults, g_running);
-    }, 1);
-    std::thread analyticalThread = spawnPinnedThread([
-                                                       &]() {
-        analytical.run(analyticalQueue, analyticalResults, g_running);
-    }, 2);
-    std::thread fusionThread = spawnPinnedThread([
-                                                    &]() {
-        fusion.run(analyticalResults, fusionQueue, g_running);
-    }, 3);
+        std::cout << "\n[vigia] Shutting down...\n";
+        coordinator.stop();
 
-    while (g_running.load()) {
-        if (auto fused = fusionQueue.try_pop()) {
-            std::cout << "[RRI] frame=" << fused->frameId << " score=" << fused->rri
-                      << " residual=" << fused->geometricResidual
-                      << " persistence=" << fused->persistence << '\n';
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds{10});
-        }
-    }
-
-    perceptionQueue.push({});
-    analyticalQueue.push({});
-
-    if (coordinatorThread.joinable()) {
-        coordinatorThread.join();
-    }
-    if (perceptionThread.joinable()) {
-        perceptionThread.join();
-    }
-    if (analyticalThread.joinable()) {
-        analyticalThread.join();
-    }
-    if (fusionThread.joinable()) {
-        fusionThread.join();
+    } catch (const std::exception& ex) {
+        std::cerr << "[vigia] Fatal: " << ex.what() << '\n';
+        return 1;
     }
 
     return 0;

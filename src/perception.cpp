@@ -5,12 +5,24 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 
+#if defined(__aarch64__) || defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 namespace vigia {
 
 PerceptionAgent::PerceptionAgent(const std::string& modelXmlPath,
                                  const std::string& device,
                                  int cameraIndex)
-    : cameraIndex_(cameraIndex) {
+    : core_(&ownedCore_), cameraIndex_(cameraIndex) {
+    loadNetwork(modelXmlPath, device);
+}
+
+PerceptionAgent::PerceptionAgent(ov::Core& sharedCore,
+                                 const std::string& modelXmlPath,
+                                 const std::string& device,
+                                 int cameraIndex)
+    : core_(&sharedCore), cameraIndex_(cameraIndex) {
     loadNetwork(modelXmlPath, device);
 }
 
@@ -66,13 +78,13 @@ bool PerceptionAgent::captureFrame(cv::Mat& frame) {
 
 void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
                                   const std::string& device) {
-    auto model = core_.read_model(modelXmlPath);
+    auto model = core_->read_model(modelXmlPath);
 
     // Set layout to NCHW as required by OpenVINO for this model type
     model->get_parameters()[0]->set_layout("NCHW");
     ov::set_batch(model, 1);
 
-    compiledModel_ = core_.compile_model(
+    compiledModel_ = core_->compile_model(
         model,
         device,
         {
@@ -87,6 +99,13 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     const auto& inputShape = compiledModel_.input().get_shape();
     inputHeight_ = static_cast<int>(inputShape[2]);
     inputWidth_  = static_cast<int>(inputShape[3]);
+
+    // Pre-allocate a persistent input tensor — avoids malloc/free every frame
+    inputTensor_ = ov::Tensor(ov::element::f32,
+                              {1, 3,
+                               static_cast<std::size_t>(inputHeight_),
+                               static_cast<std::size_t>(inputWidth_)});
+    inferRequest_.set_input_tensor(inputTensor_);
 
     std::cout << "[YOLO26] Model Loaded. Input: " << inputWidth_ << "x" << inputHeight_ << "\n";
 }
@@ -125,19 +144,45 @@ std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
     Letterbox lb;
     cv::Mat blob = preprocess(frame, lb);
 
-    // HWC to CHW manual transposition
-    ov::Tensor inputTensor(ov::element::f32, {1, 3, (size_t)inputHeight_, (size_t)inputWidth_});
-    float* tensorData = inputTensor.data<float>();
-    float* blobData = blob.ptr<float>();
+    // ── HWC → CHW transposition ──────────────────────────────────
+    // Write directly into the pre-allocated input tensor.
+    float* tensorData = inputTensor_.data<float>();
+    const float* blobData = blob.ptr<float>();
+    const int planeSize = inputHeight_ * inputWidth_;
 
-    for (int c = 0; c < 3; ++c) {
-        for (int i = 0; i < inputHeight_ * inputWidth_; ++i) {
-            tensorData[c * inputHeight_ * inputWidth_ + i] = blobData[i * 3 + c];
-        }
+    float* dst_r = tensorData;
+    float* dst_g = tensorData + planeSize;
+    float* dst_b = tensorData + planeSize * 2;
+
+#if defined(__aarch64__) || defined(__ARM_NEON)
+    // NEON vld3q deinterleave: loads 4 RGB pixels (12 floats) at once,
+    // splits into 3 contiguous channel planes.  ~4× faster than scalar.
+    int i = 0;
+    const int simdEnd = planeSize - (planeSize % 4);
+    for (; i < simdEnd; i += 4) {
+        float32x4x3_t rgb = vld3q_f32(blobData + i * 3);
+        vst1q_f32(dst_r + i, rgb.val[0]);
+        vst1q_f32(dst_g + i, rgb.val[1]);
+        vst1q_f32(dst_b + i, rgb.val[2]);
     }
+    // Scalar tail for non-multiple-of-4 remainder
+    for (; i < planeSize; ++i) {
+        dst_r[i] = blobData[i * 3 + 0];
+        dst_g[i] = blobData[i * 3 + 1];
+        dst_b[i] = blobData[i * 3 + 2];
+    }
+#else
+    for (int i = 0; i < planeSize; ++i) {
+        dst_r[i] = blobData[i * 3 + 0];
+        dst_g[i] = blobData[i * 3 + 1];
+        dst_b[i] = blobData[i * 3 + 2];
+    }
+#endif
 
-    inferRequest_.set_input_tensor(inputTensor);
-    inferRequest_.infer();
+    // ── Async inference (OpenVINO 2025) ───────────────────────────
+    // Input tensor is already bound via set_input_tensor in loadNetwork.
+    inferRequest_.start_async();
+    inferRequest_.wait();
 
     return postprocess(inferRequest_.get_tensor(outputTensor_), lb, frame.size());
 }

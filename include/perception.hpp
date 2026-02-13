@@ -48,6 +48,10 @@ public:
     PerceptionAgent(const std::string& modelXmlPath,
                     const std::string& device = "CPU",
                     int cameraIndex = 0);
+    PerceptionAgent(ov::Core& sharedCore,
+                    const std::string& modelXmlPath,
+                    const std::string& device = "CPU",
+                    int cameraIndex = 0);
     virtual ~PerceptionAgent();
 
     virtual bool captureFrame(cv::Mat& frame);
@@ -68,9 +72,11 @@ private:
     cv::Mat preprocess(const cv::Mat& frame, Letterbox& lb);
     std::vector<Detection> postprocess(const ov::Tensor& output, const Letterbox& lb, const cv::Size& origSize);
 
-    ov::Core core_;
+    ov::Core ownedCore_;                  // used when no shared core is provided
+    ov::Core* core_;                       // points to ownedCore_ or external shared core
     ov::CompiledModel compiledModel_;
     ov::InferRequest inferRequest_;
+    ov::Tensor inputTensor_;              // pre-allocated, reused every frame
     ov::Output<const ov::Node> outputTensor_;
 
     int cameraIndex_{0};

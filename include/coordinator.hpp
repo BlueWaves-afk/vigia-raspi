@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -64,10 +66,12 @@ private:
     /* ===================== Frame Buffer ===================== */
     std::vector<cv::Mat> frameBuffer_;
     std::mutex bufferMutex_;
-    std::size_t frameIndex_;
+    std::uint64_t frameIndex_;
 
     /* ===================== Adaptive Control ===================== */
     int midasStride_;
+    float cachedTemp_{0.0f};
+    std::chrono::steady_clock::time_point lastTempReadTs_{};
 };
 
 } // namespace vigia

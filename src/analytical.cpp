@@ -14,7 +14,15 @@ namespace vigia {
 AnalyticalAgent::AnalyticalAgent(
     const std::string& modelXmlPath,
     const std::string& device
-) {
+) : core_(&ownedCore_) {
+    loadNetwork(modelXmlPath, device);
+}
+
+AnalyticalAgent::AnalyticalAgent(
+    ov::Core& sharedCore,
+    const std::string& modelXmlPath,
+    const std::string& device
+) : core_(&sharedCore) {
     loadNetwork(modelXmlPath, device);
 }
 
@@ -24,12 +32,12 @@ void AnalyticalAgent::loadNetwork(
     const std::string& modelXmlPath,
     const std::string& device
 ) {
-    auto model = core_.read_model(modelXmlPath);
+    auto model = core_->read_model(modelXmlPath);
 
     model->get_parameters()[0]->set_layout("NCHW");
     ov::set_batch(model, 1);
 
-    compiledModel_ = core_.compile_model(
+    compiledModel_ = core_->compile_model(
         model,
         device,
         {
@@ -45,6 +53,8 @@ void AnalyticalAgent::loadNetwork(
     const auto& inputShape = compiledModel_.input().get_shape();
     inputHeight_ = inputShape[2];
     inputWidth_ = inputShape[3];
+
+    chwBuffer_.resize(inputWidth_ * inputHeight_ * 3);
 }
 
 /* ===================== Phase 1: MiDaS Inference ===================== */
@@ -56,7 +66,7 @@ cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
     cv::Mat inputBlob;
     resized.convertTo(inputBlob, CV_32F, 1.0f / 255.0f);
 
-    std::vector<float> chw(inputWidth_ * inputHeight_ * 3);
+    float* const chw = chwBuffer_.data();
     size_t idx = 0;
 
     for (int c = 0; c < 3; ++c)
@@ -67,7 +77,7 @@ cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
     ov::Tensor inputTensor(
         ov::element::f32,
         {1, 3, inputHeight_, inputWidth_},
-        chw.data()
+        chw
     );
 
     inferRequest_.set_input_tensor(inputTensor);
@@ -242,52 +252,7 @@ DepthGeometryMetrics AnalyticalAgent::computeGeometryMetrics(
 
     metrics.roughness = residuals.stdResidual;
 
-    /* Temporal update */
-    updateTemporalBuffers(
-        metrics.depressionScore,
-        metrics.roughness
-    );
-
-    metrics.persistence = computePersistenceScore();
-
     return metrics;
-}
-
-/* ===================== Temporal Helpers ===================== */
-
-void AnalyticalAgent::updateTemporalBuffers(
-    float depression,
-    float roughness
-) {
-    depressionHistory_.push_back(depression);
-    roughnessHistory_.push_back(roughness);
-
-    if (depressionHistory_.size() > kHistorySize)
-        depressionHistory_.pop_front();
-
-    if (roughnessHistory_.size() > kHistorySize)
-        roughnessHistory_.pop_front();
-}
-
-float AnalyticalAgent::computePersistenceScore() const {
-    if (depressionHistory_.size() < 2)
-        return 0.0f;
-
-    const float mean =
-        std::accumulate(
-            depressionHistory_.begin(),
-            depressionHistory_.end(),
-            0.0f
-        ) / depressionHistory_.size();
-
-    float var = 0.0f;
-    for (float v : depressionHistory_)
-        var += (v - mean) * (v - mean);
-
-    var /= depressionHistory_.size();
-
-    const float stddev = std::sqrt(var);
-    return mean / (stddev + 1e-4f);
 }
 
 } // namespace vigia

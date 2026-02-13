@@ -1,50 +1,3 @@
-/**
- * @file system_visual_test.cpp
- * @brief VIGIA full-pipeline visual integration test
- *
- * Optimized for Raspberry Pi 4 (Cortex-A72 / aarch64 / Debian Trixie)
- *   • OpenCV 4.14  — KleidiCV 0.7.0 HAL + TBB parallel backend
- *   • OpenVINO 2025 — CPU plugin with Arm Compute Library (ACL)
- *
- * Optimization map (keyed to user requirements):
- *
- *  ┌──────────────────────────────┬──────────────────────────────────────────┐
- *  │ Requirement                  │ Implementation                           │
- *  ├──────────────────────────────┼──────────────────────────────────────────┤
- *  │ OpenVINO Async API           │ Base classes (perception.cpp,            │
- *  │                              │ analytical.cpp) already use              │
- *  │                              │ start_async()+wait() with pre-allocated  │
- *  │                              │ ov::Tensor. Inherited transparently.     │
- *  ├──────────────────────────────┼──────────────────────────────────────────┤
- *  │ KleidiCV HAL pre-processing  │ cv::resize / cv::cvtColor /             │
- *  │                              │ cv::normalize / cv::applyColorMap kept   │
- *  │                              │ as standard calls → KleidiCV NEON HAL   │
- *  │                              │ dispatches automatically.                │
- *  │                              │ cv::setNumThreads(0) lets TBB use all   │
- *  │                              │ cores for internal parallelism.          │
- *  ├──────────────────────────────┼──────────────────────────────────────────┤
- *  │ Zero-copy / Memory           │ Shared ov::Core across both agents.      │
- *  │                              │ beginFrame() uses shallow cv::Mat copy   │
- *  │                              │ (refcount) instead of .clone().          │
- *  │                              │ drawDetections() writes into a           │
- *  │                              │ pre-allocated canvas, no per-frame       │
- *  │                              │ heap allocation.                         │
- *  │                              │ Dashboard panel compositing uses         │
- *  │                              │ cv::resize directly into sub-ROI.        │
- *  ├──────────────────────────────┼──────────────────────────────────────────┤
- *  │ TBB parallel_for_            │ drawDetections wraps the per-detection   │
- *  │                              │ rendering loop in cv::parallel_for_.     │
- *  ├──────────────────────────────┼──────────────────────────────────────────┤
- *  │ Performance Metrics          │ Dedicated PerfTracker: EMA-smoothed FPS  │
- *  │                              │ (α = 0.1), latency min/max/avg, and     │
- *  │                              │ time-to-first-inference-result timer     │
- *  │                              │ printed at startup and shown on HUD.     │
- *  ├──────────────────────────────┼──────────────────────────────────────────┤
- *  │ ov::hint::PerformanceMode    │ Set in base class loadNetwork()         │
- *  │ ::LATENCY + num_requests(1)  │ (perception.cpp / analytical.cpp).      │
- *  └──────────────────────────────┴──────────────────────────────────────────┘
- */
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -67,13 +20,10 @@
 #include <vector>
 #include <ctime>
 
-#include <opencv2/core.hpp>
 #include <opencv2/core/ocl.hpp>
-#include <opencv2/core/utility.hpp>    // cv::parallel_for_ + TBB
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
-#include <openvino/openvino.hpp>
 
 #include "analytical.hpp"
 #include "coordinator.hpp"
@@ -103,10 +53,6 @@ static constexpr int kDashboardHeight = 900;
 static constexpr int kIdleBackoffMs = 10;
 static constexpr int kRenderIntervalMs = 66; // ~15 FPS UI cap
 
-// EMA smoothing factor for the FPS counter.
-// α = 0.1 → heavily smoothed, stable readout on the HUD.
-static constexpr double kFpsEmaAlpha = 0.1;
-
 #ifdef __linux__
 #include <pthread.h>
 #include <sched.h>
@@ -119,62 +65,7 @@ inline void pinCurrentThreadToCore(int coreId) {
 #else
 inline void pinCurrentThreadToCore(int) {}
 #endif
-} // namespace
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  PerfTracker — Lightweight FPS + Latency Tracker
- *
- *  • EMA-smoothed FPS (α = 0.1) — stable HUD readout, zero deque overhead.
- *  • Captures time-to-first-inference-result for startup analysis.
- *  • Single-pass cumulative average latency (no history buffer).
- *  • Min/max latency tracking.
- * ═══════════════════════════════════════════════════════════════════════════ */
-class PerfTracker {
-public:
-    PerfTracker() : startTs_(std::chrono::steady_clock::now()) {}
-
-    /// Call once per completed frame with its end-to-end latency.
-    void recordFrame(double latencyMs) {
-        if (latencyMs <= 0.0)
-            return;
-
-        const double instantFps = 1000.0 / latencyMs;
-
-        if (frameCount_ == 0) {
-            emaFps_ = instantFps;
-            firstInferenceLatencyMs_ =
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - startTs_
-                ).count();
-        } else {
-            emaFps_ = kFpsEmaAlpha * instantFps + (1.0 - kFpsEmaAlpha) * emaFps_;
-        }
-
-        cumulativeLatencyMs_ += latencyMs;
-        ++frameCount_;
-
-        if (latencyMs < minLatencyMs_) minLatencyMs_ = latencyMs;
-        if (latencyMs > maxLatencyMs_) maxLatencyMs_ = latencyMs;
-    }
-
-    double smoothedFps()    const { return emaFps_; }
-    double avgLatencyMs()   const { return frameCount_ > 0 ? cumulativeLatencyMs_ / frameCount_ : 0.0; }
-    double minLatencyMs()   const { return minLatencyMs_; }
-    double maxLatencyMs()   const { return maxLatencyMs_ == 0.0 ? 0.0 : maxLatencyMs_; }
-    double firstInferMs()   const { return firstInferenceLatencyMs_; }
-    std::uint64_t frames()  const { return frameCount_; }
-
-private:
-    std::chrono::steady_clock::time_point startTs_;
-    double emaFps_{0.0};
-    double cumulativeLatencyMs_{0.0};
-    double firstInferenceLatencyMs_{0.0};
-    double minLatencyMs_{std::numeric_limits<double>::max()};
-    double maxLatencyMs_{0.0};
-    std::uint64_t frameCount_{0};
-};
-
-/* ═══════════════════════════════════════════════════════════════════════════ */
+}
 
 struct FusionTelemetry {
     Detection detection{};
@@ -195,16 +86,6 @@ struct FrameSnapshot {
     float maxConfidence{0.0f};
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  InstrumentationBus — Ring buffer connecting the processing pipeline
- *  to the UI thread.
- *
- *  Memory optimisation vs. original:
- *    • beginFrame() stores a shallow cv::Mat copy (refcount bump, ~20 ns)
- *      instead of .clone() (~300 μs for 640×480 BGR).  The frame is only
- *      deep-copied later in the main loop when we need a mutable canvas.
- *    • makeSnapshot() transfers vectors via std::move where possible.
- * ═══════════════════════════════════════════════════════════════════════════ */
 class InstrumentationBus {
 public:
     InstrumentationBus() = default;
@@ -220,10 +101,7 @@ public:
         }
 
         slot.frameIndex = frameIndex;
-        // Shallow copy — shares the pixel buffer with the capture thread.
-        // Safe because the coordinator's frameBuffer_ ring already .clone()'d
-        // the capture output, so this Mat won't be overwritten under us.
-        slot.frameBgr = frame;
+        slot.frameBgr = frame.clone();
         slot.startTs = std::chrono::steady_clock::now();
         slot.totalDetections = 0;
         slot.allDetections.clear();
@@ -285,7 +163,6 @@ public:
         if (slot.frameIndex != frameIndex)
             return;
 
-        // Shallow copy — depth map is a fresh Mat returned from analytical
         slot.depthMap = depth;
         slot.depthValid = true;
 
@@ -401,17 +278,15 @@ private:
         double latencyMs{0.0};
     };
 
-    static FrameSnapshot makeSnapshot(FrameSlot& slot) {
+    static FrameSnapshot makeSnapshot(const FrameSlot& slot) {
         FrameSnapshot snapshot;
         snapshot.frameIndex = slot.frameIndex;
         snapshot.latencyMs = slot.latencyMs;
         snapshot.observedStride = slot.observedStride;
-        // Shallow cv::Mat copies — the slot is about to be reset anyway
         snapshot.frameBgr = slot.frameBgr;
         snapshot.depthMap = slot.depthMap;
         snapshot.depthValid = slot.depthValid;
-        // Move the vectors out of the slot to avoid deep-copying Detection/FusionTelemetry
-        snapshot.fusions = std::move(slot.fusionTelemetry);
+        snapshot.fusions = slot.fusionTelemetry;
         snapshot.totalDetections = slot.totalDetections;
         snapshot.maxConfidence = slot.maxConfidence;
         return snapshot;
@@ -466,22 +341,14 @@ private:
     bool lastFrameSeen_{false};
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  VideoPerceptionAgent — video/camera capture with pause/step support.
- *
- *  Now accepts an ov::Core& to share the single core instance, matching
- *  the production main.cpp pattern.  Saves ~50–100 ms on Pi 4 by avoiding
- *  duplicate plugin discovery and device enumeration.
- * ═══════════════════════════════════════════════════════════════════════════ */
 class VideoPerceptionAgent : public PerceptionAgent {
 public:
-    VideoPerceptionAgent(ov::Core& sharedCore,
-                         const std::string& modelXmlPath,
+    VideoPerceptionAgent(const std::string& modelXmlPath,
                          const std::string& device,
                          std::string videoPath,
                          InstrumentationBus& bus,
                          int cameraIndex = 0)
-        : PerceptionAgent(sharedCore, modelXmlPath, device, cameraIndex),
+        : PerceptionAgent(modelXmlPath, device, cameraIndex),
           videoPath_(std::move(videoPath)),
           bus_(bus),
           cameraIndex_(cameraIndex),
@@ -494,12 +361,11 @@ public:
         frameInterval_ = std::chrono::duration<double>(1.0 / videoFps_);
     }
 
-    VideoPerceptionAgent(ov::Core& sharedCore,
-                         const std::string& modelXmlPath,
+    VideoPerceptionAgent(const std::string& modelXmlPath,
                          const std::string& device,
                          InstrumentationBus& bus,
                          int cameraIndex)
-        : PerceptionAgent(sharedCore, modelXmlPath, device, cameraIndex),
+        : PerceptionAgent(modelXmlPath, device, cameraIndex),
           bus_(bus),
           cameraIndex_(cameraIndex),
           useCamera_(true) {
@@ -636,33 +502,22 @@ private:
     bool useCamera_{false};
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  InstrumentedPerceptionAgent
- *
- *  runInference() delegates to PerceptionAgent::runInference() which
- *  already uses:
- *    • Pre-allocated ov::Tensor (zero per-frame allocation)
- *    • NEON vld3q_f32 HWC→CHW transpose
- *    • start_async() + wait() (OpenVINO async API)
- *    • ov::hint::PerformanceMode::LATENCY + num_requests(1)
- * ═══════════════════════════════════════════════════════════════════════════ */
 class InstrumentedPerceptionAgent final : public VideoPerceptionAgent {
 public:
-    InstrumentedPerceptionAgent(ov::Core& sharedCore,
-                                const std::string& modelXmlPath,
+    InstrumentedPerceptionAgent(const std::string& modelXmlPath,
                                 const std::string& device,
                                 std::string videoPath,
                                 InstrumentationBus& bus)
-        : VideoPerceptionAgent(sharedCore, modelXmlPath, device, std::move(videoPath), bus) {}
+        : VideoPerceptionAgent(modelXmlPath, device, std::move(videoPath), bus) {}
 
-    InstrumentedPerceptionAgent(ov::Core& sharedCore,
-                                const std::string& modelXmlPath,
+    InstrumentedPerceptionAgent(const std::string& modelXmlPath,
                                 const std::string& device,
                                 int cameraIndex,
                                 InstrumentationBus& bus)
-        : VideoPerceptionAgent(sharedCore, modelXmlPath, device, bus, cameraIndex) {}
+        : VideoPerceptionAgent(modelXmlPath, device, bus, cameraIndex) {}
 
     /// Thread-safe accessor for the last resolved frame index.
+    /// Downstream instrumented agents should use this instead of g_activeFrameIndex.
     std::uint64_t resolvedFrameIndex() const {
         return resolvedFrameIndex_.load(std::memory_order_acquire);
     }
@@ -692,7 +547,7 @@ public:
             std::lock_guard<std::mutex> lock(frameIndexMutex_);
             if (!pendingFrameIndices_.empty()) {
                 frameIndex = pendingFrameIndices_.back();
-                pendingFrameIndices_.clear();
+                pendingFrameIndices_.clear(); // drop stale indices to stay aligned with latest frame
             }
         }
 
@@ -726,24 +581,19 @@ public:
             bus().storeDetections(frameIndex, detections);
         return detections;
     }
-
 private:
     std::mutex frameIndexMutex_;
     std::vector<std::uint64_t> pendingFrameIndices_;
     std::atomic<std::uint64_t> resolvedFrameIndex_{0};
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════ */
-
 class InstrumentedAnalyticalAgent final : public AnalyticalAgent {
 public:
-    InstrumentedAnalyticalAgent(ov::Core& sharedCore,
-                                const std::string& modelXmlPath,
+    InstrumentedAnalyticalAgent(const std::string& modelXmlPath,
                                 const std::string& device,
                                 InstrumentationBus& bus,
                                 const InstrumentedPerceptionAgent& perception)
-        : AnalyticalAgent(sharedCore, modelXmlPath, device),
-          bus_(bus), perception_(perception) {}
+        : AnalyticalAgent(modelXmlPath, device), bus_(bus), perception_(perception) {}
 
     cv::Mat runInference(const cv::Mat& frame) override {
         cv::Mat depth = AnalyticalAgent::runInference(frame);
@@ -757,8 +607,6 @@ private:
     InstrumentationBus& bus_;
     const InstrumentedPerceptionAgent& perception_;
 };
-
-/* ═══════════════════════════════════════════════════════════════════════════ */
 
 class InstrumentedTemporalAnalyzer final : public TemporalAnalyzer {
 public:
@@ -779,8 +627,6 @@ private:
     const InstrumentedPerceptionAgent& perception_;
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════ */
-
 class InstrumentedFusionEngine final : public FusionEngine {
 public:
     InstrumentedFusionEngine(InstrumentationBus& bus,
@@ -800,10 +646,6 @@ private:
     const InstrumentedPerceptionAgent& perception_;
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  Utility
- * ═══════════════════════════════════════════════════════════════════════════ */
-
 inline float readCPUTemperature() {
 #ifdef __linux__
     std::ifstream file("/sys/class/thermal/thermal_zone0/temp");
@@ -817,70 +659,48 @@ inline float readCPUTemperature() {
 #endif
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  drawDetections — TBB-parallel bounding box + label renderer
- *
- *  Uses cv::parallel_for_ to distribute per-detection rendering across
- *  TBB worker threads.  Each detection writes to a non-overlapping region
- *  of the canvas (its bounding box area + label strip), so no
- *  synchronisation is required.
- *
- *  Writes into the provided `canvas` in-place instead of cloning
- *  snapshot.frameBgr each time — caller is responsible for providing a
- *  mutable canvas (e.g. via .clone() once, then reuse across renders that
- *  share the same base frame).
- * ═══════════════════════════════════════════════════════════════════════════ */
-void drawDetections(cv::Mat& canvas,
-                    const FrameSnapshot& snapshot) {
-    if (canvas.empty() || snapshot.fusions.empty())
-        return;
+cv::Mat drawDetections(const FrameSnapshot& snapshot) {
+    cv::Mat canvas = snapshot.frameBgr.empty() ? cv::Mat{} : snapshot.frameBgr.clone();
+    if (canvas.empty())
+        return canvas;
 
-    const int numFusions = static_cast<int>(snapshot.fusions.size());
+    for (const auto& tele : snapshot.fusions) {
+        const cv::Rect& box = tele.detection.boundingBox;
+        const cv::Scalar boxColor(0, 165, 255);
+        cv::rectangle(canvas, box, boxColor, 2);
 
-    // cv::parallel_for_ dispatches to TBB when OpenCV is built with TBB.
-    // For ≤2 detections the overhead is negligible; for 10+ it wins on 4 cores.
-    cv::parallel_for_(cv::Range(0, numFusions), [&](const cv::Range& range) {
-        for (int i = range.start; i < range.end; ++i) {
-            const auto& tele = snapshot.fusions[static_cast<std::size_t>(i)];
-            const cv::Rect& box = tele.detection.boundingBox;
-            const cv::Scalar boxColor(0, 165, 255);
-            cv::rectangle(canvas, box, boxColor, 2);
+        std::ostringstream label;
+        label << std::fixed << std::setprecision(2)
+              << "Y:" << tele.input.yoloConfidence
+              << " F:" << tele.output.finalConfidence
+              << " S:" << snapshot.observedStride;
+        cv::putText(canvas,
+                    label.str(),
+                    cv::Point(box.x, std::max(box.y - 8, 12)),
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    boxColor,
+                    1,
+                    cv::LINE_8);
 
-            // Upper label: YOLO / Fusion / Stride
-            std::ostringstream label;
-            label << std::fixed << std::setprecision(2)
-                  << "Y:" << tele.input.yoloConfidence
-                  << " F:" << tele.output.finalConfidence
-                  << " S:" << snapshot.observedStride;
-            cv::putText(canvas,
-                        label.str(),
-                        cv::Point(box.x, std::max(box.y - 8, 12)),
-                        cv::FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        boxColor,
-                        1,
-                        cv::LINE_8);
+        const bool hazard = tele.output.finalConfidence >= HAZARD_THRESHOLD;
+        cv::putText(canvas,
+                    hazard ? "HAZARD" : "SAFE",
+                    cv::Point(box.x, box.y + box.height + 18),
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    hazard ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 200, 0),
+                    2,
+                    cv::LINE_8);
+    }
 
-            // Lower label: HAZARD / SAFE
-            const bool hazard = tele.output.finalConfidence >= HAZARD_THRESHOLD;
-            cv::putText(canvas,
-                        hazard ? "HAZARD" : "SAFE",
-                        cv::Point(box.x, box.y + box.height + 18),
-                        cv::FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        hazard ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 200, 0),
-                        2,
-                        cv::LINE_8);
-        }
-    });
+    return canvas;
 }
 
 cv::Mat makeDepthVisualization(const FrameSnapshot& snapshot) {
     if (!snapshot.depthValid || snapshot.depthMap.empty())
         return {};
 
-    // cv::normalize and cv::applyColorMap dispatch through KleidiCV HAL
-    // when built with TBB — no manual parallel_for_ needed.
     cv::Mat depthNorm;
     cv::normalize(snapshot.depthMap, depthNorm, 0.0, 255.0, cv::NORM_MINMAX);
     depthNorm.convertTo(depthNorm, CV_8U);
@@ -889,47 +709,8 @@ cv::Mat makeDepthVisualization(const FrameSnapshot& snapshot) {
     return depthColor;
 }
 
-/// Log OpenVINO device capabilities (mirrors main.cpp's logDeviceCapabilities).
-void logDeviceCapabilities(ov::Core& core, const std::string& device) {
-    std::cout << "[vigia-test] OpenVINO device: " << device << '\n';
-
-    try {
-        const std::string fullName =
-            core.get_property(device, ov::device::full_name);
-        std::cout << "[vigia-test]   Full name  : " << fullName << '\n';
-    } catch (...) {}
-
-    try {
-        const std::vector<std::string> caps =
-            core.get_property(device, ov::device::capabilities);
-        std::cout << "[vigia-test]   Capabilities:";
-        for (const auto& cap : caps)
-            std::cout << ' ' << cap;
-        std::cout << '\n';
-    } catch (...) {}
-
-#if defined(__aarch64__) || defined(__ARM_NEON)
-    try {
-        const std::string fullName =
-            core.get_property(device, ov::device::full_name);
-        if (fullName.find("ACL") != std::string::npos ||
-            fullName.find("arm_compute") != std::string::npos ||
-            fullName.find("Arm") != std::string::npos) {
-            std::cout << "[vigia-test]   ACL backend : DETECTED (NEON-accelerated inference)\n";
-        } else {
-            std::cerr << "[vigia-test]   WARNING: ACL backend NOT detected. "
-                         "CPU inference may not be NEON-optimized.\n";
-        }
-    } catch (...) {}
-#endif
-}
-
 } // namespace viz
 } // namespace vigia
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  main()
- * ═══════════════════════════════════════════════════════════════════════════ */
 
 int main(int argc, char** argv) {
     using namespace vigia;
@@ -991,43 +772,32 @@ int main(int argc, char** argv) {
         : videoPath;
 
     try {
-        // ── OpenCV threading configuration ──────────────────────────────
-        // cv::setNumThreads(0) = let TBB decide (uses all available cores).
-        // This unlocks KleidiCV HAL multi-threaded dispatch for cv::resize,
-        // cv::cvtColor, cv::GaussianBlur etc.  The old value of 1 was
-        // crippling the TBB backend to a single core.
-        cv::setNumThreads(0);
+        // Force deterministic OpenCV behavior on ARM: single-threaded, no OpenCL
+        cv::setNumThreads(1);
         cv::ocl::setUseOpenCL(false);
 
         // Pin UI/main thread to Core 3 (Linux/Raspberry Pi)
         pinCurrentThreadToCore(3);
 
-        // ── Shared ov::Core ─────────────────────────────────────────────
-        // Single ov::Core avoids duplicate plugin discovery, device
-        // enumeration, and cache init (~50–100 ms saved on Pi 4).
-        ov::Core core;
-        const std::string device = "CPU";
-        logDeviceCapabilities(core, device);
-
         InstrumentationBus bus;
         std::unique_ptr<InstrumentedPerceptionAgent> perceptionHolder;
         if (useCamera)
-            perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(
-                core, yoloModel, device, cameraIndex, bus);
+            perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(yoloModel, "CPU", cameraIndex, bus);
         else
-            perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(
-                core, yoloModel, device, videoPath, bus);
+            perceptionHolder = std::make_unique<InstrumentedPerceptionAgent>(yoloModel, "CPU", videoPath, bus);
 
         InstrumentedPerceptionAgent& perception = *perceptionHolder;
-        InstrumentedAnalyticalAgent analytical(core, midasModel, device, bus, perception);
+        InstrumentedAnalyticalAgent analytical(midasModel, "CPU", bus, perception);
         InstrumentedTemporalAnalyzer temporal(bus, perception);
         InstrumentedFusionEngine fusion(bus, perception);
 
         Coordinator coordinator(perception, analytical, temporal, fusion, targetFps);
         coordinator.start();
 
-        // ── Performance tracker ─────────────────────────────────────────
-        PerfTracker perf;
+        std::deque<double> latencyHistory;
+        constexpr std::size_t MAX_HISTORY = 32;
+        double cumulativeLatency = 0.0;
+        std::size_t latencySamples = 0;
 
         bool shouldQuit = false;
         bool paused = false;
@@ -1132,21 +902,27 @@ int main(int argc, char** argv) {
 
         while (!shouldQuit) {
             FrameSnapshot snapshot;
+            bool updatedFrame = false;
             if (bus.tryPopFrame(snapshot)) {
+                updatedFrame = true;
                 needsRender = true;
+                const double latency = snapshot.latencyMs;
+                latencyHistory.push_back(latency);
+                if (latencyHistory.size() > MAX_HISTORY)
+                    latencyHistory.pop_front();
 
-                // ── Feed PerfTracker ────────────────────────────────────
-                perf.recordFrame(snapshot.latencyMs);
-                lastSmoothedFps = perf.smoothedFps();
-                lastAvgLatency  = perf.avgLatencyMs();
+                double latencyAvgWindow = std::accumulate(latencyHistory.begin(), latencyHistory.end(), 0.0) /
+                                          static_cast<double>(latencyHistory.size());
+                const double smoothedFps = latencyAvgWindow > 0.0 ? 1000.0 / latencyAvgWindow : 0.0;
 
-                // Print time-to-first-inference once
-                if (perf.frames() == 1) {
-                    std::cout << "[vigia-test] Time to first inference result: "
-                              << std::fixed << std::setprecision(1)
-                              << perf.firstInferMs() << " ms\n";
-                }
+                cumulativeLatency += latency;
+                latencySamples++;
+                const double avgLatency = latencySamples > 0
+                    ? cumulativeLatency / static_cast<double>(latencySamples)
+                    : latency;
 
+                lastSmoothedFps = smoothedFps;
+                lastAvgLatency = avgLatency;
                 lastObservedStride = snapshot.observedStride;
                 lastMaxConfidence = snapshot.maxConfidence;
                 lastDepthValid = snapshot.depthValid && !snapshot.depthMap.empty();
@@ -1171,14 +947,11 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                // Deep-copy the base frame ONCE, then draw detections in-place.
-                // Replaces the original pattern of cloning inside drawDetections()
-                // every call — saving one full-frame memcpy per pop.
-                if (!snapshot.frameBgr.empty()) {
-                    currentDetectionsCanvas = snapshot.frameBgr.clone();
-                    drawDetections(currentDetectionsCanvas, snapshot);
+                cv::Mat detCanvas = drawDetections(snapshot);
+                if (!detCanvas.empty()) {
+                    currentDetectionsCanvas = detCanvas;
                     if (!snapshot.fusions.empty())
-                        lastPotholeCanvas = currentDetectionsCanvas;
+                        lastPotholeCanvas = detCanvas;
                 }
 
                 if constexpr (!kArmProfile) {
@@ -1193,7 +966,7 @@ int main(int argc, char** argv) {
                     std::cout << std::fixed << std::setprecision(2)
                               << "[FRAME " << snapshot.frameIndex << "] latency=" << snapshot.latencyMs
                               << "ms stride=" << snapshot.observedStride
-                              << " fps=" << lastSmoothedFps
+                              << " fps=" << smoothedFps
                               << " detections=" << snapshot.fusions.size()
                               << " maxY=" << snapshot.maxConfidence
                               << '\n';
@@ -1307,15 +1080,14 @@ int main(int argc, char** argv) {
                 return panel;
             };
 
-            // ── Detection Feed panel ──
             cv::Mat detPanel = setupPanel(detRect, "Detection Feed");
             const int detContentHeight = std::max(0, detPanel.rows - panelHeaderHeight);
             if (detContentHeight > 0) {
                 cv::Mat detContent = detPanel(cv::Rect(0, panelHeaderHeight, detPanel.cols, detContentHeight));
                 if (!currentDetectionsCanvas.empty()) {
-                    // Resize directly into the dashboard sub-ROI — no intermediate
-                    // allocation.  KleidiCV HAL accelerates cv::resize via NEON.
-                    cv::resize(currentDetectionsCanvas, detContent, detContent.size());
+                    cv::Mat resized;
+                    cv::resize(currentDetectionsCanvas, resized, detContent.size());
+                    resized.copyTo(detContent);
                     if constexpr (!kArmProfile) {
                         cv::Mat tint(detContent.size(), detContent.type(), cv::Scalar(14, 14, 22));
                         cv::addWeighted(detContent, 0.88, tint, 0.12, 0.0, detContent);
@@ -1396,14 +1168,14 @@ int main(int argc, char** argv) {
                             cv::LINE_8);
             }
 
-            // ── Depth Map panel ──
             cv::Mat depthPanel = setupPanel(depthRect, lastDepthValid ? "Depth Map" : "Depth Map (pending)");
             const int depthContentHeight = std::max(0, depthPanel.rows - panelHeaderHeight);
             if (depthContentHeight > 0) {
                 cv::Mat depthContent = depthPanel(cv::Rect(0, panelHeaderHeight, depthPanel.cols, depthContentHeight));
                 if (!lastDepthCanvas.empty()) {
-                    // Resize directly into dashboard sub-ROI — zero intermediate alloc
-                    cv::resize(lastDepthCanvas, depthContent, depthContent.size());
+                    cv::Mat resized;
+                    cv::resize(lastDepthCanvas, resized, depthContent.size());
+                    resized.copyTo(depthContent);
                 } else {
                     const int fallbackY = panelHeaderHeight + depthContentHeight / 2;
                     renderTextBlock(depthPanel,
@@ -1414,14 +1186,14 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // ── Last Pothole Frame panel ──
             cv::Mat snapshotPanel = setupPanel(snapshotRect, "Last Pothole Frame");
             const int snapshotContentHeight = std::max(0, snapshotPanel.rows - panelHeaderHeight);
             if (snapshotContentHeight > 0) {
                 cv::Mat snapshotContent = snapshotPanel(cv::Rect(0, panelHeaderHeight, snapshotPanel.cols, snapshotContentHeight));
                 if (!lastPotholeCanvas.empty()) {
-                    // Resize directly into dashboard sub-ROI — zero intermediate alloc
-                    cv::resize(lastPotholeCanvas, snapshotContent, snapshotContent.size());
+                    cv::Mat resized;
+                    cv::resize(lastPotholeCanvas, resized, snapshotContent.size());
+                    resized.copyTo(snapshotContent);
                     if constexpr (!kArmProfile) {
                         cv::Mat tint(snapshotContent.size(), snapshotContent.type(), cv::Scalar(18, 18, 32));
                         cv::addWeighted(snapshotContent, 0.9, tint, 0.1, 0.0, snapshotContent);
@@ -1436,19 +1208,17 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // ── Operational Insights panel (with PerfTracker metrics) ──
             cv::Mat insightsPanel = setupPanel(insightsRect, "Operational Insights");
             std::vector<std::string> insightLines;
             insightLines.emplace_back("Latency avg: " + (lastAvgLatency > 0.0 ? formatDouble(lastAvgLatency) + " ms" : std::string("n/a")));
-            insightLines.emplace_back("Latency min: " + (perf.frames() > 0 ? formatDouble(perf.minLatencyMs()) + " ms" : std::string("n/a")));
-            insightLines.emplace_back("Latency max: " + (perf.frames() > 0 ? formatDouble(perf.maxLatencyMs()) + " ms" : std::string("n/a")));
-            insightLines.emplace_back("FPS (EMA): " + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a")));
+            insightLines.emplace_back("FPS smooth: " + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a")));
             insightLines.emplace_back("MiDaS stride: " + std::to_string(lastObservedStride));
             insightLines.emplace_back("YOLO max: " + formatDouble(static_cast<double>(lastMaxConfidence)));
+            insightLines.emplace_back("YOLO peak: " + formatDouble(lastYoloPeak));
             insightLines.emplace_back("Fusion peak: " + formatDouble(lastFusionPeak));
             insightLines.emplace_back("Hazard state: " + std::string(lastHazardTriggered ? "ACTIVE" : "nominal"));
             insightLines.emplace_back("CPU temp: " + (std::isnan(lastCpuTemp) ? std::string("n/a") : formatDouble(lastCpuTemp) + " C"));
-            insightLines.emplace_back("1st infer: " + formatDouble(perf.firstInferMs()) + " ms");
+            insightLines.emplace_back("Events buffered: " + std::to_string(potholeLog.size()));
             renderTextBlock(insightsPanel, insightLines, textColor, panelHeaderHeight + 32, 26);
             if (lastHazardTriggered) {
                 cv::putText(insightsPanel,
@@ -1461,7 +1231,6 @@ int main(int argc, char** argv) {
                             cv::LINE_8);
             }
 
-            // ── Pothole Event Log panel ──
             cv::Mat logPanel = setupPanel(logRect, "Pothole Event Log");
             const int maxVisibleEvents = std::max(1, (logRect.height - (panelHeaderHeight + 28)) / 22);
             std::vector<std::string> logLines;
@@ -1529,12 +1298,6 @@ int main(int argc, char** argv) {
                       << (static_cast<double>(summary.depthExecutions) /
                           static_cast<double>(summary.processedFrames))
                       << "\n";
-        std::cout << "──────── Performance Metrics ────────\n";
-        std::cout << "FPS (EMA-smoothed): " << perf.smoothedFps() << "\n";
-        std::cout << "Latency avg: " << perf.avgLatencyMs() << " ms\n";
-        std::cout << "Latency min: " << perf.minLatencyMs() << " ms\n";
-        std::cout << "Latency max: " << perf.maxLatencyMs() << " ms\n";
-        std::cout << "Time to 1st inference: " << perf.firstInferMs() << " ms\n";
         std::cout << "======================================\n";
 
     } catch (const std::exception& ex) {

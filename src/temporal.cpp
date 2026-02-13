@@ -1,6 +1,6 @@
 #include "temporal.hpp"
 
-#include <numeric>
+#include <algorithm>
 #include <cmath>
 
 namespace vigia {
@@ -55,20 +55,17 @@ float TemporalAnalyzer::computePersistence() const {
     if (depressionHistory_.size() < 2)
         return 0.0f;
 
-    const float mean =
-        std::accumulate(
-            depressionHistory_.begin(),
-            depressionHistory_.end(),
-            0.0f
-        ) / depressionHistory_.size();
-
-    float var = 0.0f;
-    for (float v : depressionHistory_)
-        var += (v - mean) * (v - mean);
-
-    var /= depressionHistory_.size();
-
-    const float stddev = std::sqrt(var);
+    // Single-pass mean + variance (halves cache misses on deque nodes)
+    const float n = static_cast<float>(depressionHistory_.size());
+    float sum = 0.0f;
+    float sumSq = 0.0f;
+    for (const float v : depressionHistory_) {
+        sum   += v;
+        sumSq += v * v;
+    }
+    const float mean = sum / n;
+    const float var  = (sumSq / n) - (mean * mean);
+    const float stddev = std::sqrt(std::max(0.0f, var));
 
     // Mean dominates, but unstable signals get penalized
     return mean / (stddev + 1e-4f);
@@ -86,20 +83,17 @@ float TemporalAnalyzer::computeStability() const {
     if (roughnessHistory_.size() < 2)
         return 0.0f;
 
-    const float mean =
-        std::accumulate(
-            roughnessHistory_.begin(),
-            roughnessHistory_.end(),
-            0.0f
-        ) / roughnessHistory_.size();
-
-    float var = 0.0f;
-    for (float v : roughnessHistory_)
-        var += (v - mean) * (v - mean);
-
-    var /= roughnessHistory_.size();
-
-    const float stddev = std::sqrt(var);
+    // Single-pass mean + variance (halves cache misses on deque nodes)
+    const float n = static_cast<float>(roughnessHistory_.size());
+    float sum = 0.0f;
+    float sumSq = 0.0f;
+    for (const float v : roughnessHistory_) {
+        sum   += v;
+        sumSq += v * v;
+    }
+    const float mean = sum / n;
+    const float var  = (sumSq / n) - (mean * mean);
+    const float stddev = std::sqrt(std::max(0.0f, var));
 
     // Inverse variance → higher means more stable
     return 1.0f / (stddev + 1e-4f);

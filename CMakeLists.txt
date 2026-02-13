@@ -1,77 +1,107 @@
+################################################################################
+#  VIGIA-RASPI — Multi-Agent Road Intelligence System
+#  Target: Raspberry Pi 4 (Cortex-A72 / aarch64 / Debian Trixie)
+#
+#  Build:
+#    mkdir -p build && cd build
+#    cmake .. && make -j$(nproc)
+################################################################################
+
 cmake_minimum_required(VERSION 3.16)
-project(vigia LANGUAGES CXX)
+project(VIGIA-RASPI
+    VERSION   1.0.0
+    LANGUAGES CXX
+)
 
-# --------------------
-# Global settings
-# --------------------
-set(CMAKE_CXX_STANDARD 17)
+# ── C++ Standard ──────────────────────────────────────────────────────────────
+set(CMAKE_CXX_STANDARD          17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_EXTENSIONS        OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # clangd / IDE support
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
+# ── Cortex-A72 Optimization Flags ────────────────────────────────────────────
+# -mcpu=cortex-a72   : schedule for the Pi 4's quad-core A72
+# -O3                : aggressive optimisation (auto-vectorise, inline, unroll)
+# -ftree-vectorize   : ensure NEON auto-vectorisation even if -O2 is overridden
+# -Wall -Wextra      : catch common mistakes at compile time
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=cortex-a72 -O3 -ftree-vectorize")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-unused-parameter")
 
-# --------------------
-# Output directories
-# --------------------
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# ── Dependency Discovery ─────────────────────────────────────────────────────
+include(cmake/Dependencies.cmake)
 
-# --------------------
-# Warnings (safe)
-# --------------------
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
-endif()
-
-# --------------------
-# Dependencies
-# --------------------
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(Dependencies)
-
-# --------------------
-# Include paths
-# --------------------
-include_directories(
-    ${PROJECT_SOURCE_DIR}/include
-)
-
-# --------------------
-# Core library
-# --------------------
-add_library(vigia_core
-    src/analytical.cpp
-    src/temporal.cpp
-    src/fusion.cpp
-    src/coordinator.cpp
+# ── Core Library (vigia_lib) ─────────────────────────────────────────────────
+# Every agent / engine source file in src/, excluding main.cpp.
+set(VIGIA_LIB_SOURCES
     src/perception.cpp
+    src/analytical.cpp
+    src/coordinator.cpp
+    src/fusion.cpp
+    src/temporal.cpp
 )
 
-target_link_libraries(vigia_core
-    OpenCV_LIBS
-    openvino::runtime
-    pthread
+add_library(vigia_lib STATIC ${VIGIA_LIB_SOURCES})
+
+target_include_directories(vigia_lib
+    PUBLIC
+        ${CMAKE_SOURCE_DIR}/include        # project headers (perception.hpp …)
+        ${OpenCV_INCLUDE_DIRS}
 )
 
-# --------------------
-# Tests
-# --------------------
-enable_testing()
+target_link_libraries(vigia_lib
+    PUBLIC
+        ${OpenCV_LIBS}
+        openvino::runtime
+        Threads::Threads                   # -pthread (POSIX threads)
+        ${CMAKE_DL_LIBS}                   # -ldl     (dlopen / plugin loading)
+)
 
-add_executable(analytical_test tests/analytical_test.cpp)
-target_link_libraries(analytical_test vigia_core)
+# ── Main Executable (vigia_app) ──────────────────────────────────────────────
+add_executable(vigia_app src/main.cpp)
 
-add_executable(temporal_test tests/temporal_test.cpp)
-target_link_libraries(temporal_test vigia_core)
+target_link_libraries(vigia_app
+    PRIVATE
+        vigia_lib
+)
 
-add_executable(fusion_test tests/fusion_test.cpp)
-target_link_libraries(fusion_test vigia_core)
+# ── Test Executables (one per .cpp in tests/) ────────────────────────────────
+file(GLOB TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/*.cpp")
 
-add_executable(coordinator_test tests/coordinator_test.cpp)
-target_link_libraries(coordinator_test vigia_core)
+foreach(test_src ${TEST_SOURCES})
+    # tests/system_visual_test.cpp  →  system_visual_test
+    get_filename_component(test_name ${test_src} NAME_WE)
 
-add_test(NAME analytical_test COMMAND analytical_test)
-add_test(NAME temporal_test COMMAND temporal_test)
-add_test(NAME fusion_test COMMAND fusion_test)
-add_test(NAME coordinator_test COMMAND coordinator_test)
+    add_executable(${test_name} ${test_src})
+
+    target_link_libraries(${test_name}
+        PRIVATE
+            vigia_lib
+    )
+endforeach()
+
+# ── Asset Symlinks (models + test video) ─────────────────────────────────────
+# Symlink rather than copy — avoids doubling storage of large .bin / .mp4 files
+# on the Pi's SD card.  Works on Linux and macOS.
+add_custom_command(
+    TARGET vigia_app POST_BUILD
+    COMMENT "[vigia] Symlinking assets → ${CMAKE_BINARY_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "${CMAKE_SOURCE_DIR}/models"
+        "${CMAKE_BINARY_DIR}/models"
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "${CMAKE_SOURCE_DIR}/hazard.mp4"
+        "${CMAKE_BINARY_DIR}/hazard.mp4"
+)
+
+# ── Build Summary ────────────────────────────────────────────────────────────
+message(STATUS "")
+message(STATUS "╔══════════════════════════════════════════════════════════╗")
+message(STATUS "║  VIGIA-RASPI  v${PROJECT_VERSION}                                  ║")
+message(STATUS "╠══════════════════════════════════════════════════════════╣")
+message(STATUS "║  C++ Standard  : ${CMAKE_CXX_STANDARD}                                     ║")
+message(STATUS "║  CXX Flags     : ${CMAKE_CXX_FLAGS}")
+message(STATUS "║  OpenCV        : ${OpenCV_VERSION}")
+message(STATUS "║  OpenVINO      : found")
+message(STATUS "║  Targets       : vigia_app + ${TEST_SOURCES}")
+message(STATUS "╚══════════════════════════════════════════════════════════╝")
+message(STATUS "")

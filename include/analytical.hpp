@@ -2,7 +2,6 @@
 
 #include <string>
 #include <vector>
-#include <deque>
 
 #include <opencv2/core.hpp>
 #include <openvino/openvino.hpp>
@@ -34,6 +33,11 @@ struct DepthGeometryMetrics {
 class AnalyticalAgent {
 public:
     explicit AnalyticalAgent(
+        const std::string& modelXmlPath,
+        const std::string& device = "CPU"
+    );
+    AnalyticalAgent(
+        ov::Core& sharedCore,
         const std::string& modelXmlPath,
         const std::string& device = "CPU"
     );
@@ -74,16 +78,10 @@ private:
         const std::string& device
     );
 
-    void updateTemporalBuffers(
-        float depression,
-        float roughness
-    );
-
-    float computePersistenceScore() const;
-
 private:
     /* ---------- OpenVINO ---------- */
-    ov::Core core_;
+    ov::Core ownedCore_;                   // used when no shared core is provided
+    ov::Core* core_;                        // points to ownedCore_ or external shared core
     ov::CompiledModel compiledModel_;
     ov::InferRequest inferRequest_;
     ov::Output<const ov::Node> outputTensor_;
@@ -91,10 +89,8 @@ private:
     std::size_t inputWidth_{256};
     std::size_t inputHeight_{256};
 
-    /* ---------- Temporal State (Phase 3) ---------- */
-    static constexpr std::size_t kHistorySize = 5;
-    std::deque<float> depressionHistory_;
-    std::deque<float> roughnessHistory_;
+    /* ---------- Preallocated Buffers ---------- */
+    std::vector<float> chwBuffer_;
 };
 
 } // namespace vigia
