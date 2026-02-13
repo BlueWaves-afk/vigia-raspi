@@ -1,4 +1,5 @@
 <div align="center">
+<img width="3780" height="1890" alt="Tech Event Banner" src="https://github.com/user-attachments/assets/d63b593e-f2de-4e2b-943c-11587d8ac253" />
 
 #  VIGIA-ARM
 
