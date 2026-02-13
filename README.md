@@ -1,7 +1,6 @@
 <div align="center">
-![Tech Event Banner](https://github.com/user-attachments/assets/5ffa15c5-388b-45e3-a8a0-6fe4d8910291)
-
-
+    
+![Tech Event Banner](https://github.com/user-attachments/assets/c7995ac9-c551-4ad8-b5b0-ea759cf8a63f)
 #  VIGIA-ARM
 
 **ARM-Based Real-Time Road Hazard Detection System**
