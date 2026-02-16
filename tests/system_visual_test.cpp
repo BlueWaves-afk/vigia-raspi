@@ -100,7 +100,7 @@ constexpr float HAZARD_THRESHOLD = 0.55f;
 #if defined(__aarch64__) || defined(__ARM_NEON)
 static constexpr bool kArmProfile = true;
 static constexpr int kDashboardWidth = 1024;
-static constexpr int kDashboardHeight = 600;
+static constexpr int kDashboardHeight = 768;
 #else
 static constexpr bool kArmProfile = false;
 static constexpr int kDashboardWidth = 1440;
@@ -1304,17 +1304,17 @@ int main(int argc, char** argv) {
         const cv::Rect insightsRect(margin, bottomY, bottomPanelWidth, bottomRowHeight);
         const cv::Rect logRect(margin + bottomPanelWidth + gap, bottomY, bottomPanelWidth, bottomRowHeight);
 
-        const cv::Scalar backgroundColor(18, 18, 26);
-        const cv::Scalar panelColor(30, 28, 44);
-        const cv::Scalar panelOverlay(48, 46, 68);
-        const cv::Scalar headerColor(42, 40, 64);
-        const cv::Scalar accentColor(186, 236, 255);
-        const cv::Scalar subtitleColor(140, 200, 220);
-        const cv::Scalar borderColor(58, 82, 128);
-        const cv::Scalar textColor(210, 238, 242);
-        const cv::Scalar warningColor(112, 190, 255);
-        const cv::Scalar hazardAccent(32, 92, 240);
-        const cv::Scalar okAccent(120, 232, 188);
+        const cv::Scalar backgroundColor(22, 18, 24);      // near-black
+        const cv::Scalar panelColor(32, 26, 38);              // dark brown panel
+        const cv::Scalar panelOverlay(52, 38, 58);            // maroon header strip
+        const cv::Scalar headerColor(48, 32, 56);             // title bar maroon
+        const cv::Scalar accentColor(220, 220, 230);          // bright cream titles
+        const cv::Scalar subtitleColor(180, 180, 195);        // muted cream
+        const cv::Scalar borderColor(68, 48, 74);             // subtle maroon border
+        const cv::Scalar textColor(210, 210, 215);            // cream text
+        const cv::Scalar warningColor(112, 190, 255);         // blue warning
+        const cv::Scalar hazardAccent(32, 32, 220);           // red hazard
+        const cv::Scalar okAccent(120, 220, 160);             // green OK
 
         auto appendPotholeLog = [&](const FrameSnapshot& snap) {
             if (snap.fusions.empty())
@@ -1334,7 +1334,7 @@ int main(int argc, char** argv) {
                 potholeLog.pop_front();
         };
 
-        auto renderTextBlock = [panelHeaderHeight](cv::Mat& panel,
+        auto renderTextBlock = [](cv::Mat& panel,
                                                   const std::vector<std::string>& lines,
                                                   const cv::Scalar& color,
                                                   int startY = -1,
@@ -1410,6 +1410,7 @@ int main(int argc, char** argv) {
                 // every call — saving one full-frame memcpy per pop.
                 if (!snapshot.frameBgr.empty()) {
                     currentDetectionsCanvas = snapshot.frameBgr.clone();
+                    // [DRAW] diagnostic — only on desktop to avoid Pi console spam
                     if constexpr (!kArmProfile) {
                         std::cout << "[DRAW] frame=" << snapshot.frameIndex
                                   << " fusions=" << snapshot.fusions.size()
@@ -1427,7 +1428,7 @@ int main(int argc, char** argv) {
                         lastPotholeCanvas = currentDetectionsCanvas;
                 }
 
-                if constexpr (!kArmProfile) {
+                {
                     cv::Mat depthCanvas = makeDepthVisualization(snapshot);
                     if (!depthCanvas.empty())
                         lastDepthCanvas = depthCanvas;
@@ -1457,44 +1458,8 @@ int main(int argc, char** argv) {
 
             if (renderDue) {
 
-            if constexpr (kArmProfile) {
-                // ── Lightweight ARM display: detection canvas + minimal HUD ──
-                if (!currentDetectionsCanvas.empty()) {
-                    cv::Mat& display = currentDetectionsCanvas;
-                    // Dark HUD bar for readability
-                    if (display.rows > 52) {
-                        cv::Mat hudBar = display(cv::Rect(0, 0, display.cols, 52));
-                        hudBar.setTo(cv::Scalar(18, 18, 26));
-                    }
-                    const std::string hud =
-                        "FPS " + formatDouble(lastSmoothedFps) +
-                        "  |  Lat " + formatDouble(lastAvgLatency) + "ms"
-                        "  |  Stride " + std::to_string(lastObservedStride) +
-                        "  |  " + (lastHazardTriggered ? "HAZARD" : "OK");
-                    cv::putText(display, hud, cv::Point(12, 20),
-                                cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                                lastHazardTriggered ? cv::Scalar(64, 64, 240)
-                                                    : cv::Scalar(200, 230, 200),
-                                1, cv::LINE_8);
-                    const std::string detLine =
-                        "Det " + std::to_string(static_cast<int>(lastMaxConfidence > 0)) +
-                        "  |  MaxY " + formatDouble(static_cast<double>(lastMaxConfidence)) +
-                        "  |  Fusion " + formatDouble(lastFusionPeak) +
-                        "  |  " + sourceLabel;
-                    cv::putText(display, detLine, cv::Point(12, 42),
-                                cv::FONT_HERSHEY_SIMPLEX, 0.45,
-                                cv::Scalar(140, 200, 220),
-                                1, cv::LINE_8);
-                    if (paused) {
-                        cv::putText(display, "PAUSED",
-                                    cv::Point(display.cols / 2 - 60, display.rows / 2),
-                                    cv::FONT_HERSHEY_SIMPLEX, 0.8,
-                                    cv::Scalar(112, 190, 255), 2, cv::LINE_8);
-                    }
-                    cv::imshow("VIGIA Dashboard", display);
-                }
-            } else {
-            // ── Full desktop 5-panel dashboard ──
+            {
+            // ── Full 5-panel dashboard (ARM + desktop) ──
             cv::Mat dashboard(dashboardSize, CV_8UC3);
             dashboard.setTo(backgroundColor);
 
@@ -1503,10 +1468,8 @@ int main(int argc, char** argv) {
             cv::circle(dashboard, cv::Point(margin + 38, headerHeight / 2), 7, cv::Scalar(82, 198, 240), cv::FILLED);
             cv::circle(dashboard, cv::Point(margin + 58, headerHeight / 2), 7, cv::Scalar(120, 220, 160), cv::FILLED);
 
-            std::ostringstream headerLabel;
-            headerLabel << "VIGIA RasPi Module";
             cv::putText(dashboard,
-                        headerLabel.str(),
+                        "VIGIA // Road Guardian",
                         cv::Point(margin + 90, headerHeight - 20),
                         cv::FONT_HERSHEY_DUPLEX,
                         0.8,
@@ -1562,7 +1525,7 @@ int main(int argc, char** argv) {
                     // Resize directly into the dashboard sub-ROI — no intermediate
                     // allocation.  KleidiCV HAL accelerates cv::resize via NEON.
                     cv::resize(currentDetectionsCanvas, detContent, detContent.size());
-                    if constexpr (!kArmProfile) {
+                    {
                         cv::Mat tint(detContent.size(), detContent.type(), cv::Scalar(14, 14, 22));
                         cv::addWeighted(detContent, 0.88, tint, 0.12, 0.0, detContent);
                     }
@@ -1593,29 +1556,13 @@ int main(int argc, char** argv) {
                 cv::Mat statusBar = detPanel(statusRect);
                 statusBar.setTo(cv::Scalar(18, 18, 28));
 
-                const std::string fpsLabel = "FPS " + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a"));
-                const std::string latencyLabel = "Latency " + (lastAvgLatency > 0.0 ? formatDouble(lastAvgLatency) + " ms" : std::string("n/a"));
-                const std::string srcLabel = "Source " + sourceLabel;
-
+                const std::string statusLine =
+                    "Source " + sourceLabel +
+                    ".FPS" + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a")) +
+                    " Latency " + (lastAvgLatency > 0.0 ? formatDouble(lastAvgLatency) + " ms" : std::string("n/a"));
                 cv::putText(detPanel,
-                            srcLabel,
+                            statusLine,
                             cv::Point(24, detPanel.rows - 24),
-                            cv::FONT_HERSHEY_DUPLEX,
-                            0.5,
-                            subtitleColor,
-                            1,
-                            cv::LINE_8);
-                cv::putText(detPanel,
-                            fpsLabel,
-                            cv::Point(detPanel.cols / 2 - 80, detPanel.rows - 24),
-                            cv::FONT_HERSHEY_DUPLEX,
-                            0.5,
-                            subtitleColor,
-                            1,
-                            cv::LINE_8);
-                cv::putText(detPanel,
-                            latencyLabel,
-                            cv::Point(detPanel.cols - 220, detPanel.rows - 24),
                             cv::FONT_HERSHEY_DUPLEX,
                             0.5,
                             subtitleColor,
@@ -1668,7 +1615,7 @@ int main(int argc, char** argv) {
                 if (!lastPotholeCanvas.empty()) {
                     // Resize directly into dashboard sub-ROI — zero intermediate alloc
                     cv::resize(lastPotholeCanvas, snapshotContent, snapshotContent.size());
-                    if constexpr (!kArmProfile) {
+                    {
                         cv::Mat tint(snapshotContent.size(), snapshotContent.type(), cv::Scalar(18, 18, 32));
                         cv::addWeighted(snapshotContent, 0.9, tint, 0.1, 0.0, snapshotContent);
                     }
@@ -1686,26 +1633,15 @@ int main(int argc, char** argv) {
             cv::Mat insightsPanel = setupPanel(insightsRect, "Operational Insights");
             std::vector<std::string> insightLines;
             insightLines.emplace_back("Latency avg: " + (lastAvgLatency > 0.0 ? formatDouble(lastAvgLatency) + " ms" : std::string("n/a")));
-            insightLines.emplace_back("Latency min: " + (perf.frames() > 0 ? formatDouble(perf.minLatencyMs()) + " ms" : std::string("n/a")));
-            insightLines.emplace_back("Latency max: " + (perf.frames() > 0 ? formatDouble(perf.maxLatencyMs()) + " ms" : std::string("n/a")));
-            insightLines.emplace_back("FPS (EMA): " + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a")));
+            insightLines.emplace_back("FPS smooth: " + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a")));
             insightLines.emplace_back("MiDaS stride: " + std::to_string(lastObservedStride));
             insightLines.emplace_back("YOLO max: " + formatDouble(static_cast<double>(lastMaxConfidence)));
+            insightLines.emplace_back("YOLO peak: " + formatDouble(lastYoloPeak));
             insightLines.emplace_back("Fusion peak: " + formatDouble(lastFusionPeak));
             insightLines.emplace_back("Hazard state: " + std::string(lastHazardTriggered ? "ACTIVE" : "nominal"));
             insightLines.emplace_back("CPU temp: " + (std::isnan(lastCpuTemp) ? std::string("n/a") : formatDouble(lastCpuTemp) + " C"));
-            insightLines.emplace_back("1st infer: " + formatDouble(perf.firstInferMs()) + " ms");
+            insightLines.emplace_back("Events buffered: " + std::to_string(potholeLog.size()));
             renderTextBlock(insightsPanel, insightLines, textColor, panelHeaderHeight + 32, 26);
-            if (lastHazardTriggered) {
-                cv::putText(insightsPanel,
-                            "HAZARD DETECTED",
-                            cv::Point(22, insightsPanel.rows - 32),
-                            cv::FONT_HERSHEY_DUPLEX,
-                            0.64,
-                            hazardAccent,
-                            1,
-                            cv::LINE_8);
-            }
 
             // ── Pothole Event Log panel ──
             cv::Mat logPanel = setupPanel(logRect, "Pothole Event Log");
@@ -1722,7 +1658,7 @@ int main(int argc, char** argv) {
             renderTextBlock(logPanel, logLines, subtitleColor, panelHeaderHeight + 32, 22);
 
             cv::imshow("VIGIA Dashboard", dashboard);
-            } // desktop dashboard
+            } // 5-panel dashboard
 
             lastRenderTs = renderNow;
             needsRender = false;
