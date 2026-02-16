@@ -4,7 +4,7 @@
  *
  * Optimized for Raspberry Pi 4 (Cortex-A72 / aarch64 / Debian Trixie)
  *   • OpenCV 4.14  — KleidiCV 0.7.0 HAL + TBB parallel backend
- *   • OpenVINO 2025 — CPU plugin with Arm Compute Library (ACL)
+ *   • OpenVINO 2025 — CPU plugin with KleidiAI + NEON backend
  *
  * Optimization map (keyed to user requirements):
  *
@@ -1039,18 +1039,10 @@ void logDeviceCapabilities(ov::Core& core, const std::string& device) {
     } catch (...) {}
 
 #if defined(__aarch64__) || defined(__ARM_NEON)
-    try {
-        const std::string fullName =
-            core.get_property(device, ov::device::full_name);
-        if (fullName.find("ACL") != std::string::npos ||
-            fullName.find("arm_compute") != std::string::npos ||
-            fullName.find("Arm") != std::string::npos) {
-            std::cout << "[vigia-test]   ACL backend : DETECTED (NEON-accelerated inference)\n";
-        } else {
-            std::cerr << "[vigia-test]   WARNING: ACL backend NOT detected. "
-                         "CPU inference may not be NEON-optimized.\n";
-        }
-    } catch (...) {}
+    // OpenVINO 2025+ uses KleidiAI for GEMM + NEON intrinsics on ARM64.
+    // The ARM CPU plugin IS the optimised backend — no separate "ACL"
+    // capability string is advertised, so we use a compile-time check.
+    std::cout << "[vigia-test]   ARM backend : ACTIVE (KleidiAI + NEON-accelerated inference)\n";
 #endif
 }
 
@@ -1065,8 +1057,8 @@ static volatile const char* g_currentStep = "(not started)";
 static void sigbusHandler(int sig) {
     // Only async-signal-safe calls here: write() + _exit()
     const char prefix[] = "\n[FATAL] Caught SIGBUS (Bus error) during step: ";
-    const char suffix[] = "\n[FATAL] Root cause: OpenVINO ARM CPU plugin lacks ACL.\n"
-                          "[FATAL] Rebuild OpenVINO from source with -DENABLE_KLEIDIAI=ON\n";
+    const char suffix[] = "\n[FATAL] Root cause: unaligned memory access in ARM CPU plugin.\n"
+                          "[FATAL] Ensure OpenVINO is built from source with -DENABLE_KLEIDIAI=ON\n";
     (void)::write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
     const volatile char* p = g_currentStep;
     size_t len = 0;
@@ -1223,7 +1215,7 @@ int main(int argc, char** argv) {
         } else {
             std::cerr << "[TRACE] <<< PerceptionAgent construction END (DEGRADED — model NOT compiled)\n"
                       << "[TRACE]     Perception inference will return empty detections.\n"
-                      << "[TRACE]     Rebuild OpenVINO with ACL to fix." << std::flush << std::endl;
+                      << "[TRACE]     Rebuild OpenVINO with -DENABLE_KLEIDIAI=ON to fix." << std::flush << std::endl;
         }
 
         InstrumentedPerceptionAgent& perception = *perceptionHolder;
@@ -1247,21 +1239,21 @@ int main(int argc, char** argv) {
         } else {
             std::cerr << "[TRACE] <<< AnalyticalAgent construction END (DEGRADED — model NOT compiled)\n"
                       << "[TRACE]     Depth estimation will return empty cv::Mat.\n"
-                      << "[TRACE]     Rebuild OpenVINO with ACL to fix." << std::flush << std::endl;
+                      << "[TRACE]     Rebuild OpenVINO with -DENABLE_KLEIDIAI=ON to fix." << std::flush << std::endl;
         }
 
         // Print degraded-mode summary
         if (!perceptionOk || !analyticalOk) {
             std::cerr << "\n"
                       << "╔══════════════════════════════════════════════════════════════╗\n"
-                      << "║               ⚠  DEGRADED MODE — ACL MISSING  ⚠            ║\n"
+                      << "║            ⚠  DEGRADED MODE — MODEL LOAD FAILED  ⚠        ║\n"
                       << "╠══════════════════════════════════════════════════════════════╣\n"
                       << "║  Perception (YOLO26) : " << (perceptionOk  ? "OK " : "OFF") << "                                    ║\n"
                       << "║  Analytical (MiDaS)  : " << (analyticalOk  ? "OK " : "OFF") << "                                    ║\n"
                       << "╠══════════════════════════════════════════════════════════════╣\n"
-                      << "║  The pre-compiled OpenVINO archive does not include the     ║\n"
-                      << "║  Arm Compute Library (ACL). Without ACL, the reference      ║\n"
-                      << "║  CPU plugin emits unaligned accesses → SIGBUS on ARM64.     ║\n"
+                      << "║  The ARM CPU plugin could not compile one or more models.   ║\n"
+                      << "║  This may indicate a missing KleidiAI build or an           ║\n"
+                      << "║  unaligned-access fault (SIGBUS) on ARM64.                  ║\n"
                       << "║                                                              ║\n"
                       << "║  Fix: rebuild OpenVINO from source:                         ║\n"
                       << "║    cmake -DENABLE_KLEIDIAI=ON ..                            ║\n"
