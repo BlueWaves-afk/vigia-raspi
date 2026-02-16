@@ -1310,7 +1310,7 @@ int main(int argc, char** argv) {
 
     const std::string yoloModel = (argIndex < argc)
         ? argv[argIndex++]
-        : "models/yolo26/yolo26_model.xml";
+        : "models/yolo26/yolo26_model0.xml";
     const std::string midasModel = (argIndex < argc)
         ? argv[argIndex++]
         : "models/midasv21/openvino_midas_v21_small_256.xml";

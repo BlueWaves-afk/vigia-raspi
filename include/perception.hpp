@@ -90,7 +90,7 @@ private:
 
     int inputWidth_{320};
     int inputHeight_{320};
-    float confThreshold_{0.4f};
+    float confThreshold_{0.10f};  // Lowered for INT8 quantized models
 
     /// Set to true only after compile_model() succeeds.
     /// If false, runInference() returns an empty vector.
