@@ -543,6 +543,7 @@ public:
         videoFps_ = capture_.get(cv::CAP_PROP_FPS);
         if (videoFps_ <= 1.0)
             videoFps_ = 30.0;
+        frameInterval_ = std::chrono::duration<double>(1.0 / videoFps_);
     }
 
     VideoPerceptionAgent(ov::Core& sharedCore,
@@ -603,8 +604,10 @@ public:
             deliveredFrameIndex_.store(frameIndex, std::memory_order_release);
             frame = lastDecoded_;   // shallow copy — same Mat data
 
-            // No throttle — let grab() race ahead so the processing
-            // thread always gets the freshest possible frame.
+            // Throttle for video files so grab() advances at the
+            // video's native FPS instead of racing through the
+            // entire file in milliseconds.
+            throttleCaptureRate();
 
             if (runOnce) {
                 std::lock_guard<std::mutex> lock(stateMutex_);
@@ -631,8 +634,9 @@ public:
         frame = lastDecoded_;       // shallow copy of the clone
         pendingDecode_.store(true, std::memory_order_release);
 
-        // No throttle — let grab() race ahead so the processing
-        // thread always gets the freshest possible frame.
+        // Throttle for video files so capture advances at the
+        // video's native FPS, not as fast as the CPU can loop.
+        throttleCaptureRate();
 
         if (runOnce) {
             std::lock_guard<std::mutex> lock(stateMutex_);
@@ -693,6 +697,22 @@ protected:
     std::atomic<bool> pendingDecode_{false};
 
 private:
+    void throttleCaptureRate() {
+        if (useCamera_)
+            return;
+        if (frameInterval_.count() <= 0.0)
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (lastCaptureTsValid_) {
+            const auto target = lastCaptureTs_ + frameInterval_;
+            if (now < target)
+                std::this_thread::sleep_for(target - now);
+        }
+        lastCaptureTs_ = std::chrono::steady_clock::now();
+        lastCaptureTsValid_ = true;
+    }
+
     std::string videoPath_;
     InstrumentationBus& bus_;
     cv::VideoCapture capture_;
@@ -709,6 +729,9 @@ private:
     std::atomic<std::uint64_t> deliveredFrameIndex_{0};
     cv::Mat lastDecoded_;                     // last fully decoded frame
     double videoFps_{30.0};
+    std::chrono::steady_clock::time_point lastCaptureTs_{};
+    bool lastCaptureTsValid_{false};
+    std::chrono::duration<double> frameInterval_{};
     int cameraIndex_{0};
     bool useCamera_{false};
 };
