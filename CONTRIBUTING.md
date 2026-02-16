@@ -29,7 +29,7 @@ This guide covers the development environment setup, build instructions, and per
 | Component      | Specification                              |
 |----------------|--------------------------------------------|
 | **Board**      | Raspberry Pi 4B (8 GB strongly recommended) |
-| **OS**         | Raspberry Pi OS Lite (64-bit)              |
+| **OS**         | Raspberry Pi OS Lite (64-bit), Debian 12(Bookworm)              |
 | **CPU**        | ARM Cortex-A72 (ARMv8-A), 4 cores         |
 | **Cooling**    | Active cooling / heatsink required         |
 | **Camera**     | USB webcam or Pi Camera Module (V2 / V3)   |
@@ -38,7 +38,7 @@ This guide covers the development environment setup, build instructions, and per
 
 ## 2. OS Foundation
 
-> **Important:** A minimal OS image is critical for real-time performance. A desktop environment introduces background processes that compete for CPU cycles and increase scheduling jitter.
+> **Important:** A minimal OS image is critical for real-time performance. A desktop environment introduces background processes that compete for CPU cycles and increase scheduling jitter. Look for 64 bit debian 12 version as thats most suitable for this project.
 
 ### 2.1 Flash the OS
 
@@ -234,64 +234,146 @@ sudo ldconfig
 OpenVINO is the preferred inference backend for VIGIA on ARM. It provides:
 
 - **JIT compilation** of model graphs at load time
-- **Arm Compute Library (ACL)** integration for NEON-optimized operators
-- **Runtime kernel selection** tuned for Cortex-A72 microarchitecture
+- **KleidiAI integration** for NEON-optimized GEMM kernels on Cortex-A72
+- **Runtime kernel selection** tuned for ARMv8-A microarchitecture
+- **Async inference API** with pre-allocated tensor buffers
 
-Two installation paths are available:
+### Option A: Pre-compiled Archive (⚠️ Not Recommended)
 
-### Option A: Pre-compiled Archive (Recommended for Quick Setup)
+> **Warning — SIGBUS on Raspberry Pi OS.**
+>
+> As of early 2026, there is **no pre-compiled OpenVINO archive** whose memory
+> alignment assumptions match Raspberry Pi OS (Debian 12 Bookworm, aarch64).
+> The official archives target Ubuntu 20.04/22.04 ARM64, which uses different
+> `mmap` page alignment and library versioning. On Pi OS this manifests as a
+> **SIGBUS (Bus error)** during model compilation — specifically when the ARM
+> CPU plugin attempts unaligned vector loads on weight tensors that were
+> memory-mapped from the `.bin` file.
+>
+> We discovered this during development: the pre-compiled plugin would crash
+> deterministically at `ov::Core::compile_model()` with signal 7 (SIGBUS),
+> even on a clean Debian 12 installation. Disabling `mmap` via
+> `ov::enable_mmap(false)` partially mitigated the crash, but inference was
+> unreliable and significantly slower due to fallback scalar paths.
+>
+> **Use Option B (build from source) instead.** It is the only path that
+> produces a working, optimized binary for Raspberry Pi OS.
 
-Fastest path to a working environment. Includes standard ACL optimizations.
-
-| Pros               | Cons                                        |
-|---------------------|---------------------------------------------|
-| Instant install     | May lack latest KleidiAI INT8 micro-kernels |
+If you still want to try the pre-compiled route (e.g., for a quick feasibility check on Ubuntu ARM64), the commands are:
 
 ```bash
-# Download the latest OpenVINO ARM archive from the official GitHub releases
-# 1. Download the verified 2025.0 ARM64 archive
+# Download an ARM64 archive (may not work on Pi OS — see warning above)
 wget https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.0/linux/openvino_toolkit_ubuntu20_2025.0.0.17942.1f68be9f594_arm64.tgz -O openvino_2025.tgz
 
-# 2. Extract into the recommended /opt/intel path
-sudo mkdir -p /opt/intel
 sudo mkdir -p /opt/intel/openvino_2025
 sudo tar -xf openvino_2025.tgz -C /opt/intel/openvino_2025 --strip-components=1
 
-# 3. Run the dependency installer for Linux
-# 1. Navigate to the dependencies folder
-cd /opt/intel/openvino_2025/install_dependencies
-
-# 2. Use sed to swap the OS check from 'ubuntu22.04' to 'debian13' inside the script
-sudo sed -i "s/ubuntu22.04/debian13/g" ./install_openvino_dependencies.sh
-
-# 3. Run the script again
-sudo -E ./install_openvino_dependencies.sh
-
-# 4. Finalize environment setup
 echo "source /opt/intel/openvino_2025/setupvars.sh" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### Option B: Build from Source with KleidiAI (Maximum Performance)
+### Option B: Build from Source with KleidiAI (Recommended)
 
-Recommended for INT8 quantized models. This links OpenVINO directly to KleidiAI micro-kernels optimized for quantized matrix multiplication on Cortex-A72.
+Building OpenVINO from source is the **only reliable path** on Raspberry Pi OS.
+This compiles the ARM CPU plugin natively, ensuring correct memory alignment,
+and links KleidiAI micro-kernels directly into the plugin for optimized
+GEMM operations on Cortex-A72.
+
+> **Note on KleidiAI:** You do **not** need to clone or build KleidiAI
+> separately. OpenVINO's build system fetches and compiles KleidiAI
+> automatically when `-DENABLE_KLEIDIAI=ON` is set. The KleidiAI source is
+> already bundled as a dependency inside the OpenVINO repository.
+
+#### 7.1 Install Build Prerequisites
 
 ```bash
-# 1. Clone KleidiAI
-git clone https://gitlab.arm.com/kleidi/kleidiai.git
-cd kleidiai
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel $(nproc)
-export KLEIDIAI_DIR=$(pwd)/build
+sudo apt update && sudo apt install -y \
+  build-essential \
+  cmake \
+  git \
+  pkg-config \
+  libprotobuf-dev \
+  protobuf-compiler \
+  libtbb-dev \
+  python3-dev \
+  python3-pip \
+  python3-venv \
+  python3-setuptools \
+  wget \
+  scons
+```
 
-# 2. Build OpenVINO
-cd ..
-git clone --recursive https://github.com/openvinotoolkit/openvino.git
-mkdir openvino/build && cd openvino/build
-cmake -DENABLE_KLEIDIAI=ON -DKleidiai_DIR=$KLEIDIAI_DIR \
-      -DCMAKE_BUILD_TYPE=Release ..
+#### 7.2 Clone OpenVINO
+
+```bash
+cd ~
+git clone --recurse-submodules https://github.com/openvinotoolkit/openvino.git
+cd openvino
+
+# Checkout a known-good release tag
+git checkout 2025.4.2
+git submodule update --init --recursive
+```
+
+#### 7.3 Configure the Build
+
+```bash
+mkdir build && cd build
+
+cmake -DCMAKE_BUILD_TYPE=Release \
+      -DENABLE_KLEIDIAI=ON \
+      -DCMAKE_INSTALL_PREFIX=/opt/intel/openvino_2025 \
+      -DENABLE_INTEL_CPU=OFF \
+      -DENABLE_INTEL_GPU=OFF \
+      -DENABLE_INTEL_NPU=OFF \
+      -DENABLE_SAMPLES=OFF \
+      -DENABLE_TESTS=OFF \
+      -DENABLE_PYTHON=OFF \
+      -DENABLE_WHEEL=OFF \
+      -DTHREADING=TBB \
+      -DCMAKE_CXX_FLAGS="-mcpu=cortex-a72" \
+      -DCMAKE_C_FLAGS="-mcpu=cortex-a72" \
+      ..
+```
+
+> **Flag rationale:**
+> - `ENABLE_KLEIDIAI=ON` — links KleidiAI NEON micro-kernels for INT8/FP32 GEMM
+> - `ENABLE_INTEL_*=OFF` — disables x86-only plugins (GPU, NPU) that don't exist on ARM
+> - `THREADING=TBB` — uses the system TBB for multi-core dispatch
+> - `-mcpu=cortex-a72` — generates code tuned for the Pi 4's specific core
+
+#### 7.4 Build and Install
+
+```bash
+# Build using all 4 cores. This takes ~2–3 hours on a Pi 4 with active cooling.
+# Ensure swap is at least 2 GB (see Section 3).
 make -j$(nproc)
+
+# Install to /opt/intel/openvino_2025
 sudo make install
+```
+
+#### 7.5 Environment Setup
+
+```bash
+# Add OpenVINO libraries to the linker search path
+echo "/opt/intel/openvino_2025/runtime/lib/aarch64" | sudo tee /etc/ld.so.conf.d/openvino.conf
+sudo ldconfig
+
+# Add to your shell profile for CMake discovery
+echo 'export OpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake' >> ~/.bashrc
+source ~/.bashrc
+```
+
+#### 7.6 Verify the Build
+
+```bash
+# Confirm the ARM CPU plugin exists and contains KleidiAI
+ls /opt/intel/openvino_2025/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so
+
+# Verify KleidiAI is linked into the plugin
+strings /opt/intel/openvino_2025/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so | grep -i kleidiai
+# Expected output: kleidiai, MatMulKleidiAIExecutor, etc.
 ```
 
 ---
@@ -303,24 +385,22 @@ cd ~
 git clone https://github.com/BlueWaves-afk/vigia-raspi.git
 cd vigia-raspi
 
-# Sourcing OpenVINO 2025 setup script
-source /opt/intel/openvino_2025/setupvars.sh
-
-# 2. Create and enter build directory
-# Create a dedicated build directory
+# Create and enter build directory
 mkdir -p build && cd build
 
 # Configure the project with CMake
-# This will check for your KleidiCV-optimized OpenCV and OpenVINO 2025
-cmake ..
+# If OpenVINO_DIR is set in your shell (see Section 7.5), CMake finds it automatically.
+# Otherwise, pass it explicitly:
+cmake -DOpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake ..
 
-# Compile the visual test specifically using all 4 cores
+# Compile the visual test using all 4 cores
 make system_visual_test -j$(nproc)
+
 # Set CPU governor to maximum performance
 echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 
 # Run the test (assuming hazard.mp4 and models/ are in your project root)
-./system_visual_test
+./system_visual_test --video ../hazard.mp4
 ```
 
 ---
@@ -350,17 +430,29 @@ sudo raspi-config
 
 ### 9.3 Thread Affinity
 
-VIGIA's `Coordinator` implements core-affinity scheduling to isolate workloads and prevent resource contention:
+VIGIA **automatically pins threads to specific cores** at startup — no manual configuration required. The pinning is implemented in two places:
 
-| Thread               | Core   | Rationale                      |
-|----------------------|--------|--------------------------------|
-| Capture              | Core 0 | Isolates camera I/O            |
-| Coordinator          | Core 0 | Manages frame dispatch         |
-| Perception (YOLO)    | Core 1 | Dedicated inference core       |
-| Analytical (MiDaS)   | Core 2 | Dedicated depth analysis core  |
-| Fusion               | Core 3 | Risk index computation         |
+- **`Coordinator::captureLoop()`** and **`Coordinator::processLoop()`** in `src/coordinator.cpp` — pin themselves via `pthread_setaffinity_np` at the top of each function, plus `Coordinator::start()` calls `pinThread()` on both threads after launch.
+- **`main()`** in `tests/system_visual_test.cpp` — pins the UI/dashboard thread via `pinCurrentThreadToCore(3)`.
 
-This pinning strategy prevents camera I/O from competing with inference workloads.
+All pinning is guarded by `#if defined(__linux__) && defined(__aarch64__)` so it compiles as a no-op on macOS.
+
+#### Core Assignment Map
+
+| Thread                     | Core   | Rationale                                            |
+|----------------------------|--------|------------------------------------------------------|
+| Capture (`captureLoop`)    | Core 0 | Dedicated to camera I/O and frame decode             |
+| Process (`processLoop`)    | Core 1 | Runs YOLO + MiDaS inference + fusion sequentially    |
+| TBB workers (OpenVINO)     | Core 2 | Left unassigned — TBB scheduler uses available cores |
+| UI / Dashboard (`main`)    | Core 3 | Rendering, dashboard compositing, keyboard input     |
+
+> **Why 4 threads on 4 cores?** The Pi 4 has four identical Cortex-A72 cores.
+> Pinning eliminates cross-core migration, which would flush the L1/L2 cache
+> and add ~1–2 ms of jitter per migration. Core 2 is intentionally left
+> unpinned so that OpenVINO's internal TBB threads can use it for parallel
+> operator execution without competing with the capture or UI threads.
+
+This pinning strategy ensures deterministic scheduling and prevents camera I/O from competing with inference workloads.
 
 ---
 
@@ -392,7 +484,7 @@ This pinning strategy prevents camera I/O from competing with inference workload
 
 | Framework        | ARM CPU Efficiency | Notes                                   |
 |------------------|--------------------|-----------------------------------------|
-| **OpenVINO**     | ⭐⭐⭐⭐⭐             | JIT + ACL + NEON — best determinism     |
+| **OpenVINO**     | ⭐⭐⭐⭐⭐             | JIT + KleidiAI + NEON — best determinism|
 | TFLite           | ⭐⭐⭐⭐              | Good, but less runtime optimization     |
 | ONNX Runtime     | ⭐⭐⭐               | Limited ARM-specific tuning             |
 
