@@ -33,6 +33,7 @@ This guide covers the development environment setup, build instructions, and per
 | **CPU**        | ARM Cortex-A72 (ARMv8-A), 4 cores         |
 | **Cooling**    | Active cooling / heatsink required         |
 | **Camera**     | USB webcam or Pi Camera Module (V2 / V3)   |
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/fce7fb6b-8b3d-47c0-95e1-278481f6c9cf" />
 
 ---
 
