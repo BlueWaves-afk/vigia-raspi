@@ -13,9 +13,7 @@
 #include <arm_neon.h>
 #endif
 
-#ifdef __linux__
 #include <unistd.h>
-#endif
 
 /* ── SIGBUS recovery for compile_model() ─────────────────────────────────
  * On ARM64 without ACL, OpenVINO's reference CPU plugin may emit
@@ -411,7 +409,14 @@ std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
 
 std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, const Letterbox& lb, const cv::Size& origSize) {
     std::vector<Detection> detections;
-    const float* data = output.data<const float>();
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    const float* data = output.data<float>();
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
     const auto& shape = output.get_shape(); 
 
     // YOLO26 NMS-Free output is typically [1, 300, 6]

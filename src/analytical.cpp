@@ -12,9 +12,7 @@
 #include <cmath>
 #include <numeric>
 
-#ifdef __linux__
 #include <unistd.h>
-#endif
 
 /* ── SIGBUS recovery for compile_model() ─────────────────────────────────
  * On ARM64 without ACL, OpenVINO's reference CPU plugin may emit
@@ -297,8 +295,14 @@ cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
     std::cout << "[TRACE] <<< MiDaS inferRequest_.infer() END (success)" << std::flush << std::endl;
 
     const ov::Tensor output = inferRequest_.get_tensor(outputTensor_);
-    const float* depthData =
-        static_cast<const float*>(output.data());
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    const float* depthData = output.data<float>();
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
     cv::Mat depthMap(
         static_cast<int>(inputHeight_),
