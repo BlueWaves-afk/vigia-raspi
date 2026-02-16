@@ -108,9 +108,9 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 
 ### 4. Temporal Module
 
-- Cross-frame consistency analysis
-- Hazard persistence tracking via exponential moving average
-- Jitter suppression to eliminate single-frame false positives
+- Cross-frame consistency analysis over a sliding window (default 10 frames)
+- Hazard persistence tracking via signal-to-noise ratio (mean / stddev) over the depression history
+- Jitter suppression to eliminate single-frame false positives — transient spikes yield near-zero persistence
 
 ### 5. Fusion Engine
 

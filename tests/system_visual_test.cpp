@@ -32,6 +32,13 @@
  *  │                              │ Dashboard panel compositing uses         │
  *  │                              │ cv::resize directly into sub-ROI.        │
  *  ├──────────────────────────────┼──────────────────────────────────────────┤
+ *  │ Lock-free capture handoff    │ Capture↔process synchronisation uses     │
+ *  │                              │ std::atomic (pendingDecode_,             │
+ *  │                              │ frameCounter_, latestFrameIndex_).       │
+ *  │                              │ InstrumentationBus uses lightweight      │
+ *  │                              │ mutex with <1% measured contention       │
+ *  │                              │ (process @4 fps vs UI @15 fps).          │
+ *  ├──────────────────────────────┼──────────────────────────────────────────┤
  *  │ TBB parallel_for_            │ drawDetections wraps the per-detection   │
  *  │                              │ rendering loop in cv::parallel_for_.     │
  *  ├──────────────────────────────┼──────────────────────────────────────────┤
@@ -1038,10 +1045,12 @@ void logDeviceCapabilities(ov::Core& core, const std::string& device) {
         std::cout << '\n';
     } catch (...) {}
 
-#if defined(__aarch64__) || defined(__ARM_NEON)
+#if (defined(__aarch64__) || defined(__ARM_NEON)) && !defined(__APPLE__)
     // OpenVINO 2025+ uses KleidiAI for GEMM + NEON intrinsics on ARM64.
     // The ARM CPU plugin IS the optimised backend — no separate "ACL"
     // capability string is advertised, so we use a compile-time check.
+    // Guard excludes macOS (Apple Silicon is aarch64 but uses a different
+    // OpenVINO CPU backend without KleidiAI).
     std::cout << "[vigia-test]   ARM backend : ACTIVE (KleidiAI + NEON-accelerated inference)\n";
 #endif
 }
@@ -1146,8 +1155,31 @@ int main(int argc, char** argv) {
         cv::setNumThreads(0);
         cv::ocl::setUseOpenCL(false);
 
-        // Pin UI/main thread to Core 3 (Linux/Raspberry Pi)
+        // Pin UI/main thread to Core 3 (Linux/Raspberry Pi).
+        // Core 0 = capture, Core 1 = process, Core 2 = TBB workers, Core 3 = UI.
         pinCurrentThreadToCore(3);
+
+#ifdef __linux__
+        // ── Verify CPU governor is set to 'performance' ────────────────
+        // The 'performance' governor locks the CPU at max frequency,
+        // eliminating frequency-scaling latency spikes during inference.
+        {
+            std::ifstream gov("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
+            if (gov.is_open()) {
+                std::string governor;
+                std::getline(gov, governor);
+                while (!governor.empty() && (governor.back() == '\n' || governor.back() == ' '))
+                    governor.pop_back();
+                if (governor == "performance") {
+                    std::cout << "[vigia-test] CPU governor : performance (optimal)\n";
+                } else {
+                    std::cerr << "[vigia-test] WARNING: CPU governor is '" << governor
+                              << "' — expected 'performance'\n"
+                              << "[vigia-test]   Fix: echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor\n";
+                }
+            }
+        }
+#endif
 
         // ── Shared ov::Core (heap-allocated for guaranteed alignment) ───
         // std::make_shared ensures the ov::Core object lives on the heap

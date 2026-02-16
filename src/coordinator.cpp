@@ -76,6 +76,18 @@ void Coordinator::stop() {
 /* ===================== Capture Loop ===================== */
 
 void Coordinator::captureLoop() {
+#if defined(__linux__) && defined(__aarch64__)
+    // Pin capture thread to Core 0 — dedicated to frame acquisition.
+    // Avoids cross-core migration and keeps L1/L2 cache warm for
+    // VideoCapture decode operations.
+    {
+        cpu_set_t cpuSet;
+        CPU_ZERO(&cpuSet);
+        CPU_SET(0, &cpuSet);
+        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuSet);
+    }
+#endif
+
     try {
         while (running_) {
             cv::Mat frame;
@@ -107,6 +119,18 @@ void Coordinator::captureLoop() {
 /* ===================== Processing Loop ===================== */
 
 void Coordinator::processLoop() {
+#if defined(__linux__) && defined(__aarch64__)
+    // Pin process thread to Core 1 — dedicated to YOLO + MiDaS inference.
+    // Core 2 is left free for OpenVINO's TBB worker threads.
+    // Core 3 is pinned to the UI/main thread (in system_visual_test.cpp).
+    {
+        cpu_set_t cpuSet;
+        CPU_ZERO(&cpuSet);
+        CPU_SET(1, &cpuSet);
+        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuSet);
+    }
+#endif
+
     using clock = std::chrono::steady_clock;
 
     try {
