@@ -280,11 +280,20 @@ public:
                 slot.filteredDetections.push_back(det);
         }
 
-        if (slot.filteredDetections.empty()) {
-            finalizeSlot(slot);
-            ready_.push_back(makeSnapshot(slot));
-            slot.frameIndex = 0;
-        }
+        // Always promote and finalize immediately.
+        // The Coordinator's processFrame() handles the YOLO-only fallback
+        // path by creating raw FusionOutputs itself (bypassing the
+        // InstrumentedFusionEngine), so recordFusion() is never called
+        // for those detections.  Rather than leaving the slot stuck
+        // waiting for recordFusion() that will never come, promote
+        // raw detections to FusionTelemetry now so bounding boxes are
+        // always drawn.  If recordFusion() does arrive later (for
+        // frames where MiDaS ran), the slot will already be finalized,
+        // but the YOLO-confidence-as-fallback display is still correct.
+        promoteUnfusedDetections(slot);
+        finalizeSlot(slot);
+        ready_.push_back(makeSnapshot(slot));
+        slot.frameIndex = 0;
     }
 
     void recordDepth(std::uint64_t frameIndex, const cv::Mat& depth) {
@@ -582,7 +591,12 @@ public:
         latestFrameIndex_.store(frameIndex, std::memory_order_release);
         deliveredFrameIndex_.store(frameIndex, std::memory_order_release);
 
-        bus_.beginFrame(frameIndex, rawFrame);
+        // NOTE: beginFrame() is intentionally NOT called here.
+        // It is called in InstrumentedPerceptionAgent::runInference()
+        // right before storeDetections(), so the bus slot exists when
+        // detections arrive.  Calling it here at capture-rate (~24fps)
+        // floods the 8-slot ring buffer — slots get evicted with zero
+        // detections before the ~320ms YOLO inference finishes.
         frame = rawFrame;
 
         throttleCaptureRate();
@@ -751,6 +765,12 @@ public:
         }
 
         resolvedFrameIndex_.store(frameIndex, std::memory_order_release);
+
+        // Create the bus slot NOW, right before inference.
+        // The frame will be stored in the slot and storeDetections()
+        // will fill it immediately after inference completes.
+        if (frameIndex != 0)
+            bus().beginFrame(frameIndex, frame);
 
         auto detections = PerceptionAgent::runInference(frame);
 
