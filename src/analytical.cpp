@@ -12,6 +12,10 @@
 #include <cmath>
 #include <numeric>
 
+#if defined(__aarch64__) || defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 #include <unistd.h>
 
 /* ── SIGBUS recovery for compile_model() ─────────────────────────────────
@@ -265,34 +269,63 @@ cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
     cv::Mat inputBlob;
     resized.convertTo(inputBlob, CV_32F, 1.0f / 255.0f);
 
+    // ── HWC → CHW transposition ──────────────────────────────────
+    // Write directly into the pre-allocated CHW buffer.
     float* const chw = chwBuffer_.data();
-    size_t idx = 0;
+    const float* blobData = inputBlob.ptr<float>();
+    const int planeSize = static_cast<int>(inputHeight_ * inputWidth_);
 
-    for (int c = 0; c < 3; ++c)
-        for (int y = 0; y < static_cast<int>(inputHeight_); ++y)
-            for (int x = 0; x < static_cast<int>(inputWidth_); ++x)
-                chw[idx++] = inputBlob.at<cv::Vec3f>(y, x)[c];
+    float* dst_r = chw;
+    float* dst_g = chw + planeSize;
+    float* dst_b = chw + planeSize * 2;
 
-    std::cout << "[TRACE] >>> MiDaS ov::Tensor creation BEGIN (chwBuffer_ addr=" << static_cast<void*>(chw) << ")" << std::flush << std::endl;
-    ov::Tensor inputTensor(
-        ov::element::f32,
-        {1, 3, inputHeight_, inputWidth_},
-        chw
-    );
-    std::cout << "[TRACE] <<< MiDaS ov::Tensor creation END" << std::flush << std::endl;
+#if defined(__aarch64__) || defined(__ARM_NEON)
+    // NEON vld3q deinterleave: loads 4 RGB pixels (12 floats) at once,
+    // splits into 3 contiguous channel planes.  ~4× faster than scalar.
+    int i = 0;
+    const int simdEnd = planeSize - (planeSize % 4);
+    for (; i < simdEnd; i += 4) {
+        float32x4x3_t rgb = vld3q_f32(blobData + i * 3);
+        vst1q_f32(dst_r + i, rgb.val[0]);
+        vst1q_f32(dst_g + i, rgb.val[1]);
+        vst1q_f32(dst_b + i, rgb.val[2]);
+    }
+    // Scalar tail for non-multiple-of-4 remainder
+    for (; i < planeSize; ++i) {
+        dst_r[i] = blobData[i * 3 + 0];
+        dst_g[i] = blobData[i * 3 + 1];
+        dst_b[i] = blobData[i * 3 + 2];
+    }
+#else
+    for (int i = 0; i < planeSize; ++i) {
+        dst_r[i] = blobData[i * 3 + 0];
+        dst_g[i] = blobData[i * 3 + 1];
+        dst_b[i] = blobData[i * 3 + 2];
+    }
+#endif
 
-    std::cout << "[TRACE] >>> MiDaS inferRequest_.infer() BEGIN" << std::flush << std::endl;
+    // ── Pre-allocated tensor wrapping chwBuffer_ ──────────────────
+    // Wraps the existing buffer without copying.  set_input_tensor
+    // is only called once (when inputTensorBound_ is false).
+    if (!inputTensorBound_) {
+        midasInputTensor_ = ov::Tensor(
+            ov::element::f32,
+            {1, 3, inputHeight_, inputWidth_},
+            chw
+        );
+        inferRequest_.set_input_tensor(midasInputTensor_);
+        inputTensorBound_ = true;
+    }
+
     try {
-        inferRequest_.set_input_tensor(inputTensor);
         inferRequest_.infer();
     } catch (const ov::Exception& e) {
-        std::cerr << "[TRACE] !!! ov::Exception during MiDaS infer: " << e.what() << std::flush << std::endl;
+        std::cerr << "[MiDaS] ov::Exception during infer: " << e.what() << std::endl;
         throw;
     } catch (const std::exception& e) {
-        std::cerr << "[TRACE] !!! std::exception during MiDaS infer: " << e.what() << std::flush << std::endl;
+        std::cerr << "[MiDaS] std::exception during infer: " << e.what() << std::endl;
         throw;
     }
-    std::cout << "[TRACE] <<< MiDaS inferRequest_.infer() END (success)" << std::flush << std::endl;
 
     const ov::Tensor output = inferRequest_.get_tensor(outputTensor_);
 #if defined(__clang__) || defined(__GNUC__)

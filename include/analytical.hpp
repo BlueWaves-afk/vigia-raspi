@@ -91,6 +91,8 @@ private:
 
     /* ---------- Preallocated Buffers ---------- */
     std::vector<float> chwBuffer_;
+    ov::Tensor midasInputTensor_;       // pre-allocated, wraps chwBuffer_
+    bool       inputTensorBound_{false}; // true after first set_input_tensor
 
     /// Set to true only after compile_model() succeeds.
     /// If false, runInference() returns an empty cv::Mat.

@@ -280,20 +280,18 @@ public:
                 slot.filteredDetections.push_back(det);
         }
 
-        // Always promote and finalize immediately.
-        // The Coordinator's processFrame() handles the YOLO-only fallback
-        // path by creating raw FusionOutputs itself (bypassing the
-        // InstrumentedFusionEngine), so recordFusion() is never called
-        // for those detections.  Rather than leaving the slot stuck
-        // waiting for recordFusion() that will never come, promote
-        // raw detections to FusionTelemetry now so bounding boxes are
-        // always drawn.  If recordFusion() does arrive later (for
-        // frames where MiDaS ran), the slot will already be finalized,
-        // but the YOLO-confidence-as-fallback display is still correct.
-        promoteUnfusedDetections(slot);
-        finalizeSlot(slot);
-        ready_.push_back(makeSnapshot(slot));
-        slot.frameIndex = 0;
+        // If no pothole detections, finalize immediately (nothing to fuse).
+        // Otherwise, leave the slot open for recordDepth() + recordFusion()
+        // which arrive from the SAME processFrame() call microseconds later.
+        // Safety nets for frames where fusion is skipped:
+        //   1. finalizeOlderFrames() on the next processFrame() call
+        //   2. tryPopFrame() 100ms timeout
+        if (slot.filteredDetections.empty()) {
+            finalizeSlot(slot);
+            ready_.push_back(makeSnapshot(slot));
+            slot.frameIndex = 0;
+        }
+        // else: slot stays open → recordDepth/recordFusion will fill it
     }
 
     void recordDepth(std::uint64_t frameIndex, const cv::Mat& depth) {
@@ -361,7 +359,7 @@ public:
                 slot.fusionTelemetry.size() < slot.filteredDetections.size()) {
                 const double waitMs = std::chrono::duration<double, std::milli>(
                     now - slot.startTs).count();
-                if (waitMs > 500.0) {
+                if (waitMs > 100.0) {
                     promoteUnfusedDetections(slot);
                     finalizeSlot(slot);
                     ready_.push_back(makeSnapshot(slot));
@@ -581,8 +579,44 @@ public:
         if (finished_.load())
             return false;
 
+        // ── Grab-only optimisation ────────────────────────────────────
+        // On Pi 4, H.264 decode (capture_.read / retrieve) takes ~2-4ms
+        // per frame.  The processing thread only consumes ~4 fps, so 80%+
+        // of decodes are wasted.  We call the cheap grab() to advance the
+        // demuxer, and only decode (retrieve) when:
+        //   • Live camera — every frame must be decoded.
+        //   • The processing thread has consumed the previous frame
+        //     (pendingDecode_ is false, set by InstrumentedPerceptionAgent
+        //     after calling runInference).
+        //   • No decoded frame is waiting yet (pendingDecode_ is false).
+        if (!capture_.grab()) {
+            finished_.store(true);
+            return false;
+        }
+
+        // Always decode for live camera; for video files, only decode
+        // when the processing thread is ready for a new frame.
+        if (!useCamera_ && pendingDecode_.load(std::memory_order_acquire)) {
+            // Already have an un-consumed decoded frame → skip decode.
+            // Advance frame counter so the coordinator's ring buffer index
+            // advances, but return the last decoded frame (shallow copy).
+            const std::uint64_t frameIndex = frameCounter_.fetch_add(1) + 1;
+            latestFrameIndex_.store(frameIndex, std::memory_order_release);
+            deliveredFrameIndex_.store(frameIndex, std::memory_order_release);
+            frame = lastDecoded_;   // shallow copy — same Mat data
+
+            throttleCaptureRate();
+
+            if (runOnce) {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                paused_ = true;
+            }
+            return true;
+        }
+
+        // Full decode (retrieve the grabbed frame).
         cv::Mat rawFrame;
-        if (!capture_.read(rawFrame) || rawFrame.empty()) {
+        if (!capture_.retrieve(rawFrame) || rawFrame.empty()) {
             finished_.store(true);
             return false;
         }
@@ -591,13 +625,9 @@ public:
         latestFrameIndex_.store(frameIndex, std::memory_order_release);
         deliveredFrameIndex_.store(frameIndex, std::memory_order_release);
 
-        // NOTE: beginFrame() is intentionally NOT called here.
-        // It is called in InstrumentedPerceptionAgent::runInference()
-        // right before storeDetections(), so the bus slot exists when
-        // detections arrive.  Calling it here at capture-rate (~24fps)
-        // floods the 8-slot ring buffer — slots get evicted with zero
-        // detections before the ~320ms YOLO inference finishes.
         frame = rawFrame;
+        lastDecoded_ = rawFrame;    // shallow copy for skip path
+        pendingDecode_.store(true, std::memory_order_release);
 
         throttleCaptureRate();
 
@@ -656,6 +686,9 @@ protected:
 
     InstrumentationBus& bus() { return bus_; }
 
+    /// Set to true after a full decode, cleared when runInference consumes it.
+    std::atomic<bool> pendingDecode_{false};
+
 private:
     void throttleCaptureRate() {
         if (useCamera_)
@@ -687,6 +720,7 @@ private:
     std::atomic<std::uint64_t> frameCounter_{0};
     std::atomic<std::uint64_t> latestFrameIndex_{0};
     std::atomic<std::uint64_t> deliveredFrameIndex_{0};
+    cv::Mat lastDecoded_;                     // last fully decoded frame
     double videoFps_{30.0};
     std::chrono::steady_clock::time_point lastCaptureTs_{};
     bool lastCaptureTsValid_{false};
@@ -746,6 +780,10 @@ public:
     }
 
     std::vector<Detection> runInference(const cv::Mat& frame) override {
+        // Signal capture thread: we've consumed the decoded frame,
+        // so next capture can do a full decode again.
+        pendingDecode_.store(false, std::memory_order_release);
+
         std::uint64_t frameIndex = 0;
         {
             std::lock_guard<std::mutex> lock(frameIndexMutex_);
@@ -1365,7 +1403,7 @@ int main(int argc, char** argv) {
                 // every call — saving one full-frame memcpy per pop.
                 if (!snapshot.frameBgr.empty()) {
                     currentDetectionsCanvas = snapshot.frameBgr.clone();
-                    if constexpr (kArmProfile) {
+                    if constexpr (!kArmProfile) {
                         std::cout << "[DRAW] frame=" << snapshot.frameIndex
                                   << " fusions=" << snapshot.fusions.size()
                                   << " totalDet=" << snapshot.totalDetections

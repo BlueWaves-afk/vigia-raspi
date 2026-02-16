@@ -351,13 +351,9 @@ std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
 
     // ── HWC → CHW transposition ──────────────────────────────────
     // Write directly into the pre-allocated input tensor.
-    std::cout << "[TRACE] >>> inputTensor_.data<float>() BEGIN (tensor addr=" << static_cast<void*>(&inputTensor_) << ")" << std::flush << std::endl;
     float* tensorData = inputTensor_.data<float>();
-    std::cout << "[TRACE]     tensorData ptr = " << static_cast<void*>(tensorData) << std::flush << std::endl;
     const float* blobData = blob.ptr<float>();
-    std::cout << "[TRACE]     blobData   ptr = " << static_cast<const void*>(blobData) << std::flush << std::endl;
     const int planeSize = inputHeight_ * inputWidth_;
-    std::cout << "[TRACE]     planeSize = " << planeSize << " (" << inputWidth_ << "x" << inputHeight_ << ")" << std::flush << std::endl;
 
     float* dst_r = tensorData;
     float* dst_g = tensorData + planeSize;
@@ -390,17 +386,14 @@ std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
 
     // ── Async inference (OpenVINO 2025) ───────────────────────────
     // Input tensor is already bound via set_input_tensor in loadNetwork.
-    std::cout << "[TRACE] >>> HWC->CHW transposition DONE, start_async() BEGIN" << std::flush << std::endl;
     try {
         inferRequest_.start_async();
-        std::cout << "[TRACE]     start_async() returned, waiting..." << std::flush << std::endl;
         inferRequest_.wait();
-        std::cout << "[TRACE] <<< inferRequest_.wait() returned (success)" << std::flush << std::endl;
     } catch (const ov::Exception& e) {
-        std::cerr << "[TRACE] !!! ov::Exception during inference: " << e.what() << std::flush << std::endl;
+        std::cerr << "[YOLO] ov::Exception during inference: " << e.what() << std::endl;
         throw;
     } catch (const std::exception& e) {
-        std::cerr << "[TRACE] !!! std::exception during inference: " << e.what() << std::flush << std::endl;
+        std::cerr << "[YOLO] std::exception during inference: " << e.what() << std::endl;
         throw;
     }
 
