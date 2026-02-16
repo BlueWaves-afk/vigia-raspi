@@ -470,6 +470,7 @@ This pinning strategy ensures deterministic scheduling and prevents camera I/O f
 ```bash
 ./system_visual_test --video road.mp4
 ```
+<img width="1440" height="867" alt="image" src="https://github.com/user-attachments/assets/770f6d3d-62bc-4e51-8e25-66b1935a8685" />
 
 **Expected console output indicators:**
 
