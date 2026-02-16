@@ -1345,6 +1345,18 @@ int main(int argc, char** argv) {
                 // every call — saving one full-frame memcpy per pop.
                 if (!snapshot.frameBgr.empty()) {
                     currentDetectionsCanvas = snapshot.frameBgr.clone();
+                    if constexpr (kArmProfile) {
+                        std::cout << "[DRAW] frame=" << snapshot.frameIndex
+                                  << " fusions=" << snapshot.fusions.size()
+                                  << " totalDet=" << snapshot.totalDetections
+                                  << " maxConf=" << snapshot.maxConfidence;
+                        if (!snapshot.fusions.empty()) {
+                            const auto& box = snapshot.fusions[0].detection.boundingBox;
+                            std::cout << " box0=[" << box.x << "," << box.y
+                                      << " " << box.width << "x" << box.height << "]";
+                        }
+                        std::cout << "\n";
+                    }
                     drawDetections(currentDetectionsCanvas, snapshot);
                     if (!snapshot.fusions.empty())
                         lastPotholeCanvas = currentDetectionsCanvas;
