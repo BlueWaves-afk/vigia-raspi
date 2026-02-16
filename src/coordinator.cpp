@@ -158,6 +158,11 @@ void Coordinator::processFrame() {
 
     if (runMidas) {
         // std::move elides the cv::Mat refcount atomic on the returned temporary.
+        // NOTE: This calls InstrumentedAnalyticalAgent::runInference() which
+        // records the depth map into the InstrumentationBus slot via
+        // recordDepth(). The slot was opened by beginFrame() inside
+        // perception_.runInference() above, so the depth data lands in the
+        // correct slot BEFORE storeDetections() can finalize it.
         depthMap = std::move(analytical_.runInference(frame));
     }
 
@@ -202,6 +207,11 @@ void Coordinator::processFrame() {
         // ALWAYS publish the result. Even if MiDaS didn't run, the visualizer gets the YOLO box.
         publishResult(det, fout);
     }
+
+    // Notify the instrumentation bus that processing is complete for this
+    // frame.  This finalizes no-pothole slots (depth data is already stored)
+    // and slots where all fusions have been recorded.
+    perception_.notifyProcessingComplete(currentIdx);
 }
 
 /* ===================== Adaptive Control ===================== */

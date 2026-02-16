@@ -280,18 +280,31 @@ public:
                 slot.filteredDetections.push_back(det);
         }
 
-        // If no pothole detections, finalize immediately (nothing to fuse).
-        // Otherwise, leave the slot open for recordDepth() + recordFusion()
-        // which arrive from the SAME processFrame() call microseconds later.
-        // Safety nets for frames where fusion is skipped:
-        //   1. finalizeOlderFrames() on the next processFrame() call
-        //   2. tryPopFrame() 100ms timeout
-        if (slot.filteredDetections.empty()) {
+        // Don't finalize here — depth data from MiDaS may arrive
+        // via recordDepth() AFTER this call.  The coordinator calls
+        // notifyProcessingComplete() once both YOLO and MiDaS have
+        // finished, which finalizes slots that have no fusions pending.
+    }
+
+    /// Called by the coordinator after YOLO + MiDaS have both finished
+    /// for a given frame.  Finalizes any slot whose potholes are all
+    /// fused (or that had no potholes at all).
+    void notifyProcessingComplete(std::uint64_t frameIndex) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        FrameSlot& slot = slots_[frameIndex % MAX_INFLIGHT];
+        if (slot.frameIndex != frameIndex || slot.completed)
+            return;
+
+        // If no potholes, or all potholes are already fused, finalize now.
+        if (slot.filteredDetections.empty() ||
+            slot.fusionTelemetry.size() >= slot.filteredDetections.size()) {
+            if (slot.filteredDetections.empty())
+                promoteUnfusedDetections(slot);
             finalizeSlot(slot);
             ready_.push_back(makeSnapshot(slot));
             slot.frameIndex = 0;
         }
-        // else: slot stays open → recordDepth/recordFusion will fill it
+        // else: slot stays open → recordFusion() will finalize
     }
 
     void recordDepth(std::uint64_t frameIndex, const cv::Mat& depth) {
@@ -834,7 +847,12 @@ public:
 
         if (frameIndex != 0)
             bus().storeDetections(frameIndex, detections);
+
         return detections;
+    }
+
+    void notifyProcessingComplete(std::uint64_t frameIndex) override {
+        bus().notifyProcessingComplete(frameIndex);
     }
 
 private:
@@ -1102,7 +1120,7 @@ int main(int argc, char** argv) {
 
     const std::string yoloModel = (argIndex < argc)
         ? argv[argIndex++]
-        : "models/yolo26/yolo26_model.xml";
+        : "models/yolo26/yolo26_model0.xml";
     const std::string midasModel = (argIndex < argc)
         ? argv[argIndex++]
         : "models/midasv21/openvino_midas_v21_small_256.xml";

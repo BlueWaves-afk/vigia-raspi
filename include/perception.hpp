@@ -57,6 +57,11 @@ public:
     virtual bool captureFrame(cv::Mat& frame);
     virtual std::vector<Detection> runInference(const cv::Mat& frame);
 
+    /// Called by the coordinator after YOLO + MiDaS + fusion are all done
+    /// for a given frame index.  Override in instrumented subclasses to
+    /// finalize bus slots.  Default implementation is a no-op.
+    virtual void notifyProcessingComplete(std::uint64_t /*frameIndex*/) {}
+
     void run(SafeQueue<FramePacket>& inputQueue,
              SafeQueue<PerceptionResult>& outputQueue,
              std::atomic<bool>& running);
