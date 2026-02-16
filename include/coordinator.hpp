@@ -28,6 +28,7 @@ public:
     );
 
     /* ===================== Lifecycle ===================== */
+    ~Coordinator();
     void start();
     void stop();
 

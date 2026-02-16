@@ -4,12 +4,39 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <csetjmp>
+#include <csignal>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 
 #if defined(__aarch64__) || defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+
+#ifdef __linux__
+#include <unistd.h>
+#endif
+
+/* ── SIGBUS recovery for compile_model() ─────────────────────────────────
+ * On ARM64 without ACL, OpenVINO's reference CPU plugin may emit
+ * unaligned memory accesses during JIT compilation, raising SIGBUS.
+ * We use sigsetjmp/siglongjmp to recover instead of crashing.
+ * ────────────────────────────────────────────────────────────────────── */
+static thread_local sigjmp_buf g_compileJmpBuf;
+static thread_local volatile sig_atomic_t g_compileJmpActive = 0;
+
+static void compileModelSigbusHandler(int sig) {
+    if (g_compileJmpActive) {
+        g_compileJmpActive = 0;
+        siglongjmp(g_compileJmpBuf, sig);
+    }
+    // If not in a guarded region, use default behavior
+    const char msg[] = "\n[FATAL] SIGBUS outside guarded compile_model region\n";
+#ifdef __linux__
+    (void)::write(STDERR_FILENO, msg, sizeof(msg) - 1);
+#endif
+    ::_exit(128 + sig);
+}
 
 namespace vigia {
 
@@ -186,11 +213,10 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
                   << " (continuing without it)" << std::flush << std::endl;
     }
 
-    // ── 7. compile_model ────────────────────────────────────────────
+    // ── 7. compile_model (with SIGBUS recovery) ──────────────────
     std::cout << "[TRACE] >>> core_->compile_model() BEGIN (device=" << device << ")" << std::flush << std::endl;
 
-    // Print available RAM again right before compilation — this is where
-    // SIGBUS typically fires on a memory-starved Pi.
+    // Print available RAM right before compilation
 #ifdef __linux__
     {
         std::ifstream meminfo("/proc/meminfo");
@@ -206,27 +232,69 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     }
 #endif
 
-    try {
-        compiledModel_ = core_->compile_model(
-            model,
-            device,
-            {
-                ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-                ov::hint::num_requests(1),
-                ov::hint::inference_precision(ov::element::f32)
-            }
-        );
-    } catch (const ov::Exception& e) {
-        std::cerr << "[TRACE] !!! ov::Exception in compile_model: " << e.what() << std::flush << std::endl;
-        throw;
-    } catch (const std::exception& e) {
-        std::cerr << "[TRACE] !!! std::exception in compile_model: " << e.what() << std::flush << std::endl;
-        throw;
+    // Install SIGBUS handler for compile_model() recovery.
+    // On ARM64 without ACL, the reference CPU plugin may trigger SIGBUS
+    // from unaligned JIT accesses.  We recover via siglongjmp so the
+    // system can continue in degraded mode without this agent.
+    {
+        struct sigaction sa{}, oldSa{};
+        sa.sa_handler = compileModelSigbusHandler;
+        sa.sa_flags = 0;
+        sigemptyset(&sa.sa_mask);
+        ::sigaction(SIGBUS, &sa, &oldSa);
+
+        g_compileJmpActive = 1;
+        const int sigbusJmp = sigsetjmp(g_compileJmpBuf, 1);
+
+        if (sigbusJmp != 0) {
+            // We got here via siglongjmp — SIGBUS was caught
+            g_compileJmpActive = 0;
+            ::sigaction(SIGBUS, &oldSa, nullptr);  // restore old handler
+            std::cerr << "\n[YOLO26] ══════════════════════════════════════════════════════\n"
+                      << "[YOLO26] SIGBUS caught during compile_model()!\n"
+                      << "[YOLO26] Root cause: OpenVINO ARM CPU plugin lacks ACL (Arm Compute Library).\n"
+                      << "[YOLO26] The reference plugin uses unaligned memory accesses that\n"
+                      << "[YOLO26] trigger SIGBUS on strict-alignment ARM64 hardware.\n"
+                      << "[YOLO26] Fix: rebuild OpenVINO from source with -DENABLE_KLEIDIAI=ON\n"
+                      << "[YOLO26] Continuing in DEGRADED mode (perception disabled).\n"
+                      << "[YOLO26] ══════════════════════════════════════════════════════\n"
+                      << std::flush << std::endl;
+            modelLoaded_ = false;
+            return;  // agent is alive but inference is disabled
+        }
+
+        try {
+            compiledModel_ = core_->compile_model(
+                model,
+                device,
+                {
+                    ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
+                    ov::hint::num_requests(1),
+                    ov::hint::inference_precision(ov::element::f32)
+                }
+            );
+        } catch (const ov::Exception& e) {
+            g_compileJmpActive = 0;
+            ::sigaction(SIGBUS, &oldSa, nullptr);
+            std::cerr << "[TRACE] !!! ov::Exception in compile_model: " << e.what() << std::flush << std::endl;
+            modelLoaded_ = false;
+            return;
+        } catch (const std::exception& e) {
+            g_compileJmpActive = 0;
+            ::sigaction(SIGBUS, &oldSa, nullptr);
+            std::cerr << "[TRACE] !!! std::exception in compile_model: " << e.what() << std::flush << std::endl;
+            modelLoaded_ = false;
+            return;
+        }
+
+        g_compileJmpActive = 0;
+        ::sigaction(SIGBUS, &oldSa, nullptr);  // restore old handler
     }
     std::cout << "[TRACE] <<< core_->compile_model() END (success)" << std::flush << std::endl;
 
     inferRequest_ = compiledModel_.create_infer_request();
     outputTensor_ = compiledModel_.output(0);
+    modelLoaded_ = true;
 
     const auto& inputShape = compiledModel_.input().get_shape();
     inputHeight_ = static_cast<int>(inputShape[2]);
@@ -275,6 +343,11 @@ cv::Mat PerceptionAgent::preprocess(const cv::Mat& frame, Letterbox& lb) {
 }
 
 std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
+    // Guard: if model didn't compile (SIGBUS or error), return empty
+    if (!modelLoaded_) {
+        return {};
+    }
+
     Letterbox lb;
     cv::Mat blob = preprocess(frame, lb);
 

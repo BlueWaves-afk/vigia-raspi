@@ -43,6 +43,16 @@ Coordinator::Coordinator(
 
 /* ===================== Lifecycle ===================== */
 
+Coordinator::~Coordinator() {
+    running_ = false;
+
+    if (captureThread_.joinable())
+        captureThread_.join();
+
+    if (mainThread_.joinable())
+        mainThread_.join();
+}
+
 void Coordinator::start() {
     running_ = true;
 
@@ -66,16 +76,27 @@ void Coordinator::stop() {
 /* ===================== Capture Loop ===================== */
 
 void Coordinator::captureLoop() {
-    while (running_) {
-        cv::Mat frame;
-        if (!perception_.captureFrame(frame))
-            continue;
+    try {
+        while (running_) {
+            cv::Mat frame;
+            if (!perception_.captureFrame(frame)) {
+                // Video ended or camera disconnected — signal shutdown
+                running_ = false;
+                break;
+            }
 
-        {
-            std::lock_guard<std::mutex> lock(bufferMutex_);
-            frameBuffer_[frameIndex_ % FRAME_BUFFER_SIZE] = frame.clone();
-            frameIndex_++;
+            {
+                std::lock_guard<std::mutex> lock(bufferMutex_);
+                frameBuffer_[frameIndex_ % FRAME_BUFFER_SIZE] = frame.clone();
+                frameIndex_++;
+            }
         }
+    } catch (const std::exception& e) {
+        std::cerr << "[Coordinator] Capture thread exception: " << e.what() << std::endl;
+        running_ = false;
+    } catch (...) {
+        std::cerr << "[Coordinator] Capture thread unknown exception" << std::endl;
+        running_ = false;
     }
 }
 
@@ -84,18 +105,26 @@ void Coordinator::captureLoop() {
 void Coordinator::processLoop() {
     using clock = std::chrono::steady_clock;
 
-    while (running_) {
-        const auto start = clock::now();
+    try {
+        while (running_) {
+            const auto start = clock::now();
 
-        processFrame();
+            processFrame();
 
-        const auto elapsedMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                clock::now() - start
-            ).count();
+            const auto elapsedMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    clock::now() - start
+                ).count();
 
-        adaptiveControl(elapsedMs);
-        frameLimiter(elapsedMs);
+            adaptiveControl(elapsedMs);
+            frameLimiter(elapsedMs);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Coordinator] Process thread exception: " << e.what() << std::endl;
+        running_ = false;
+    } catch (...) {
+        std::cerr << "[Coordinator] Process thread unknown exception" << std::endl;
+        running_ = false;
     }
 }
 

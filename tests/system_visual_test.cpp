@@ -942,10 +942,9 @@ static volatile const char* g_currentStep = "(not started)";
 static void sigbusHandler(int sig) {
     // Only async-signal-safe calls here: write() + _exit()
     const char prefix[] = "\n[FATAL] Caught SIGBUS (Bus error) during step: ";
-    const char suffix[] = "\n[FATAL] This typically indicates memory-mapped I/O failure on SD-card\n";
-    // POSIX write() is async-signal-safe
+    const char suffix[] = "\n[FATAL] Root cause: OpenVINO ARM CPU plugin lacks ACL.\n"
+                          "[FATAL] Rebuild OpenVINO from source with -DENABLE_KLEIDIAI=ON\n";
     (void)::write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
-    // g_currentStep is a pointer to a string literal — safe to read
     const volatile char* p = g_currentStep;
     size_t len = 0;
     while (p[len] != '\0') ++len;
@@ -1089,12 +1088,20 @@ int main(int argc, char** argv) {
                     core, yoloModel, device, videoPath, bus);
         } catch (const ov::Exception& e) {
             std::cerr << "[TRACE] !!! ov::Exception during PerceptionAgent construction: " << e.what() << std::flush << std::endl;
-            throw;
+            return 1;
         } catch (const std::exception& e) {
             std::cerr << "[TRACE] !!! std::exception during PerceptionAgent construction: " << e.what() << std::flush << std::endl;
-            throw;
+            return 1;
         }
-        std::cout << "[TRACE] <<< PerceptionAgent construction END (success)" << std::flush << std::endl;
+
+        const bool perceptionOk = perceptionHolder && perceptionHolder->isModelLoaded();
+        if (perceptionOk) {
+            std::cout << "[TRACE] <<< PerceptionAgent construction END (model compiled OK)" << std::flush << std::endl;
+        } else {
+            std::cerr << "[TRACE] <<< PerceptionAgent construction END (DEGRADED — model NOT compiled)\n"
+                      << "[TRACE]     Perception inference will return empty detections.\n"
+                      << "[TRACE]     Rebuild OpenVINO with ACL to fix." << std::flush << std::endl;
+        }
 
         InstrumentedPerceptionAgent& perception = *perceptionHolder;
         g_currentStep = "AnalyticalAgent construction (MiDaS model load + compile)";
@@ -1105,12 +1112,41 @@ int main(int argc, char** argv) {
                 core, midasModel, device, bus, perception);
         } catch (const ov::Exception& e) {
             std::cerr << "[TRACE] !!! ov::Exception during AnalyticalAgent construction: " << e.what() << std::flush << std::endl;
-            throw;
+            return 1;
         } catch (const std::exception& e) {
             std::cerr << "[TRACE] !!! std::exception during AnalyticalAgent construction: " << e.what() << std::flush << std::endl;
-            throw;
+            return 1;
         }
-        std::cout << "[TRACE] <<< AnalyticalAgent construction END (success)" << std::flush << std::endl;
+
+        const bool analyticalOk = analyticalHolder && analyticalHolder->isModelLoaded();
+        if (analyticalOk) {
+            std::cout << "[TRACE] <<< AnalyticalAgent construction END (model compiled OK)" << std::flush << std::endl;
+        } else {
+            std::cerr << "[TRACE] <<< AnalyticalAgent construction END (DEGRADED — model NOT compiled)\n"
+                      << "[TRACE]     Depth estimation will return empty cv::Mat.\n"
+                      << "[TRACE]     Rebuild OpenVINO with ACL to fix." << std::flush << std::endl;
+        }
+
+        // Print degraded-mode summary
+        if (!perceptionOk || !analyticalOk) {
+            std::cerr << "\n"
+                      << "╔══════════════════════════════════════════════════════════════╗\n"
+                      << "║               ⚠  DEGRADED MODE — ACL MISSING  ⚠            ║\n"
+                      << "╠══════════════════════════════════════════════════════════════╣\n"
+                      << "║  Perception (YOLO26) : " << (perceptionOk  ? "OK " : "OFF") << "                                    ║\n"
+                      << "║  Analytical (MiDaS)  : " << (analyticalOk  ? "OK " : "OFF") << "                                    ║\n"
+                      << "╠══════════════════════════════════════════════════════════════╣\n"
+                      << "║  The pre-compiled OpenVINO archive does not include the     ║\n"
+                      << "║  Arm Compute Library (ACL). Without ACL, the reference      ║\n"
+                      << "║  CPU plugin emits unaligned accesses → SIGBUS on ARM64.     ║\n"
+                      << "║                                                              ║\n"
+                      << "║  Fix: rebuild OpenVINO from source:                         ║\n"
+                      << "║    cmake -DENABLE_KLEIDIAI=ON ..                            ║\n"
+                      << "║  See CONTRIBUTING.md Option B for full instructions.        ║\n"
+                      << "╚══════════════════════════════════════════════════════════════╝\n"
+                      << std::flush << std::endl;
+        }
+
         g_currentStep = "Post-construction (coordinator + main loop)";
         InstrumentedAnalyticalAgent& analytical = *analyticalHolder;
         InstrumentedTemporalAnalyzer temporal(bus, perception);

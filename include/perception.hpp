@@ -86,6 +86,14 @@ private:
     int inputWidth_{320};
     int inputHeight_{320};
     float confThreshold_{0.4f};
+
+    /// Set to true only after compile_model() succeeds.
+    /// If false, runInference() returns an empty vector.
+    bool modelLoaded_{false};
+
+public:
+    /// Returns true if the OpenVINO model compiled successfully.
+    bool isModelLoaded() const { return modelLoaded_; }
 };
 
 } // namespace vigia

@@ -29,7 +29,15 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-unused-parameter")
 
 # ── Dependency Discovery ─────────────────────────────────────────────────────
 include(cmake/Dependencies.cmake)
+set(OpenVINO_DIR "/opt/intel/openvino_2025/runtime/cmake")
 
+find_package(OpenCV REQUIRED)
+find_package(OpenVINO REQUIRED)
+find_package(Threads REQUIRED)
+
+# Optional: Add the 3rdparty TBB if needed for parallel processing
+set(TBB_DIR "/opt/intel/openvino_2025/runtime/3rdparty/tbb/lib/cmake/TBB")
+find_package(TBB QUIET)
 # ── Core Library (vigia_lib) ─────────────────────────────────────────────────
 # Every agent / engine source file in src/, excluding main.cpp.
 set(VIGIA_LIB_SOURCES

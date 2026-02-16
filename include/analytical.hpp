@@ -91,6 +91,14 @@ private:
 
     /* ---------- Preallocated Buffers ---------- */
     std::vector<float> chwBuffer_;
+
+    /// Set to true only after compile_model() succeeds.
+    /// If false, runInference() returns an empty cv::Mat.
+    bool modelLoaded_{false};
+
+public:
+    /// Returns true if the OpenVINO model compiled successfully.
+    bool isModelLoaded() const { return modelLoaded_; }
 };
 
 } // namespace vigia
