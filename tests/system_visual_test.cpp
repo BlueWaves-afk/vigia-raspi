@@ -117,6 +117,10 @@ static constexpr int kDashboardHeight = 900;
 static constexpr int kIdleBackoffMs = 10;
 static constexpr int kRenderIntervalMs = 66; // ~15 FPS UI cap
 
+/// Display modes toggled by 'f' key at runtime.
+enum class DisplayMode { Dashboard, Fullscreen };
+
+
 // EMA smoothing factor for the FPS counter.
 // α = 0.1 → heavily smoothed, stable readout on the HUD.
 static constexpr double kFpsEmaAlpha = 0.1;
@@ -1012,6 +1016,178 @@ void drawDetections(cv::Mat& canvas,
     });
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  drawDetectionsFullscreen — Detailed bounding box + fusion breakdown
+ *
+ *  Renders a per-detection info panel beside each bounding box showing:
+ *    • Perception  — YOLO confidence
+ *    • Depth       — geometry confidence, depression score, roughness
+ *    • Temporal    — persistence, stability, temporal confidence
+ *    • Fusion      — final fused confidence score
+ *  Plus a global FPS / Latency HUD in the top-left corner.
+ *
+ *  Used exclusively by the fullscreen display mode ('f' toggle).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+void drawDetectionsFullscreen(cv::Mat& canvas,
+                              const FrameSnapshot& snapshot,
+                              double smoothedFps,
+                              double avgLatencyMs) {
+    if (canvas.empty())
+        return;
+
+    // ── Top-left HUD: FPS + Latency ─────────────────────────────────
+    {
+        // Semi-transparent background bar
+        const int hudW = 360, hudH = 62;
+        cv::Mat roi = canvas(cv::Rect(0, 0,
+                                       std::min(hudW, canvas.cols),
+                                       std::min(hudH, canvas.rows)));
+        cv::multiply(roi, cv::Scalar(0.35, 0.35, 0.35), roi);
+
+        std::ostringstream fpsLine;
+        fpsLine << std::fixed << std::setprecision(1)
+                << "FPS: " << smoothedFps
+                << "  |  Latency: " << avgLatencyMs << " ms";
+        cv::putText(canvas, fpsLine.str(),
+                    cv::Point(14, 24),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                    cv::Scalar(200, 220, 255), 1, cv::LINE_AA);
+
+        std::ostringstream detLine;
+        detLine << "Detections: " << snapshot.fusions.size()
+                << "  |  Stride: " << snapshot.observedStride;
+        cv::putText(canvas, detLine.str(),
+                    cv::Point(14, 50),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                    cv::Scalar(180, 180, 195), 1, cv::LINE_AA);
+    }
+
+    if (snapshot.fusions.empty())
+        return;
+
+    const int numFusions = static_cast<int>(snapshot.fusions.size());
+
+    cv::parallel_for_(cv::Range(0, numFusions), [&](const cv::Range& range) {
+        for (int i = range.start; i < range.end; ++i) {
+            const auto& tele = snapshot.fusions[static_cast<std::size_t>(i)];
+            const cv::Rect& box = tele.detection.boundingBox;
+            if (box.width <= 0 || box.height <= 0)
+                continue;
+
+            const bool hazard = tele.output.finalConfidence >= HAZARD_THRESHOLD;
+
+            // ── Bounding box ────────────────────────────────────────
+            const cv::Scalar boxColor = hazard
+                ? cv::Scalar(48, 48, 255)    // red
+                : cv::Scalar(80, 220, 120);  // green
+            cv::rectangle(canvas, box, boxColor, 2, cv::LINE_AA);
+
+            // ── Corner accents (top-left + bottom-right) ────────────
+            const int cornerLen = std::min(16, std::min(box.width, box.height) / 3);
+            cv::line(canvas, cv::Point(box.x, box.y),
+                     cv::Point(box.x + cornerLen, box.y), boxColor, 3, cv::LINE_AA);
+            cv::line(canvas, cv::Point(box.x, box.y),
+                     cv::Point(box.x, box.y + cornerLen), boxColor, 3, cv::LINE_AA);
+            cv::line(canvas, cv::Point(box.br().x, box.br().y),
+                     cv::Point(box.br().x - cornerLen, box.br().y), boxColor, 3, cv::LINE_AA);
+            cv::line(canvas, cv::Point(box.br().x, box.br().y),
+                     cv::Point(box.br().x, box.br().y - cornerLen), boxColor, 3, cv::LINE_AA);
+
+            // ── HAZARD / SAFE badge above box ───────────────────────
+            const std::string statusText = hazard ? "HAZARD" : "SAFE";
+            const int baseline = 0;
+            const cv::Size textSz = cv::getTextSize(statusText, cv::FONT_HERSHEY_SIMPLEX,
+                                                     0.55, 2, const_cast<int*>(&baseline));
+            const int badgeX = box.x;
+            const int badgeY = std::max(box.y - textSz.height - 14, 0);
+            cv::rectangle(canvas,
+                          cv::Rect(badgeX, badgeY, textSz.width + 12, textSz.height + 10),
+                          boxColor, cv::FILLED);
+            cv::putText(canvas, statusText,
+                        cv::Point(badgeX + 6, badgeY + textSz.height + 4),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                        cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+            // ── Info panel to the right of the bounding box ─────────
+            // Shows detailed perception / depth / temporal / fusion scores.
+            const int panelX = box.x + box.width + 8;
+            const int panelY = box.y;
+            const int panelW = 230;
+            const int panelH = 164;
+
+            // Only draw if it fits in-frame
+            if (panelX + panelW <= canvas.cols && panelY + panelH <= canvas.rows) {
+                // Dark semi-transparent background
+                cv::Mat panelRoi = canvas(cv::Rect(panelX, panelY, panelW, panelH));
+                cv::multiply(panelRoi, cv::Scalar(0.3, 0.3, 0.3), panelRoi);
+
+                const cv::Scalar headColor(120, 200, 255);   // warm gold
+                const cv::Scalar valColor(210, 210, 215);     // cream
+                const double fs = 0.42;
+                int y = panelY + 18;
+                constexpr int lineH = 18;
+
+                auto putKV = [&](const std::string& key, const std::string& val,
+                                 const cv::Scalar& kc, const cv::Scalar& vc) {
+                    cv::putText(canvas, key, cv::Point(panelX + 8, y),
+                                cv::FONT_HERSHEY_SIMPLEX, fs, kc, 1, cv::LINE_AA);
+                    cv::putText(canvas, val, cv::Point(panelX + 120, y),
+                                cv::FONT_HERSHEY_SIMPLEX, fs, vc, 1, cv::LINE_AA);
+                    y += lineH;
+                };
+
+                auto fmtF = [](float v) {
+                    std::ostringstream o;
+                    o << std::fixed << std::setprecision(3) << v;
+                    return o.str();
+                };
+
+                // Perception
+                putKV("Perception", "", cv::Scalar(100, 180, 255), valColor);
+                putKV("  YOLO conf", fmtF(tele.input.yoloConfidence), valColor, valColor);
+
+                // Depth
+                putKV("Depth", "", cv::Scalar(80, 200, 180), valColor);
+                putKV("  Geometry", fmtF(tele.output.geometryConfidence), valColor, valColor);
+                putKV("  Depression", fmtF(tele.input.depressionScore), valColor, valColor);
+                putKV("  Roughness", fmtF(tele.input.roughness), valColor, valColor);
+
+                // Temporal
+                putKV("Temporal", "", cv::Scalar(180, 160, 255), valColor);
+                putKV("  Persist / Stab",
+                      fmtF(tele.temporal.persistence) + " / " + fmtF(tele.temporal.stability),
+                      valColor, valColor);
+            } else {
+                // Panel doesn't fit right — put a compact label below box
+                std::ostringstream compact;
+                compact << std::fixed << std::setprecision(2)
+                        << "P:" << tele.input.yoloConfidence
+                        << " D:" << tele.output.geometryConfidence
+                        << " T:" << tele.output.temporalConfidence
+                        << " F:" << tele.output.finalConfidence;
+                cv::putText(canvas, compact.str(),
+                            cv::Point(box.x, box.y + box.height + 18),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                            boxColor, 1, cv::LINE_AA);
+            }
+
+            // ── Fusion confidence bar at box bottom ─────────────────
+            const int barH = 6;
+            const int barY = box.y + box.height + (panelX + panelW <= canvas.cols ? 4 : 28);
+            if (barY + barH < canvas.rows) {
+                const int filledW = static_cast<int>(
+                    static_cast<float>(box.width) * tele.output.finalConfidence);
+                cv::rectangle(canvas,
+                              cv::Rect(box.x, barY, box.width, barH),
+                              cv::Scalar(40, 40, 40), cv::FILLED);
+                cv::rectangle(canvas,
+                              cv::Rect(box.x, barY, std::min(filledW, box.width), barH),
+                              boxColor, cv::FILLED);
+            }
+        }
+    });
+}
+
 cv::Mat makeDepthVisualization(const FrameSnapshot& snapshot) {
     if (!snapshot.depthValid || snapshot.depthMap.empty())
         return {};
@@ -1086,15 +1262,28 @@ int main(int argc, char** argv) {
     using namespace vigia::viz;
 
     if (argc < 2) {
-        std::cerr << "Usage: system_visual_test (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n";
+        std::cerr << "Usage: system_visual_test [-F] (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n";
         return 1;
     }
 
     bool useCamera = false;
+    bool startFullscreen = false;
     int cameraIndex = 0;
     std::string videoPath;
 
     int argIndex = 1;
+
+    // Optional -F flag for fullscreen display mode
+    if (std::string(argv[argIndex]) == "-F") {
+        startFullscreen = true;
+        argIndex++;
+    }
+
+    if (argIndex >= argc) {
+        std::cerr << "Usage: system_visual_test [-F] (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n";
+        return 1;
+    }
+
     const std::string modeArg = argv[argIndex++];
 
     if (modeArg == "--cam") {
@@ -1115,13 +1304,13 @@ int main(int argc, char** argv) {
         }
         videoPath = argv[argIndex++];
     } else {
-        std::cerr << "Usage: system_visual_test (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n";
+        std::cerr << "Usage: system_visual_test [-F] (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n";
         return 1;
     }
 
     const std::string yoloModel = (argIndex < argc)
         ? argv[argIndex++]
-        : "models/yolo26/yolo26_model0.xml";
+        : "models/yolo26/yolo26_model.xml";
     const std::string midasModel = (argIndex < argc)
         ? argv[argIndex++]
         : "models/midasv21/openvino_midas_v21_small_256.xml";
@@ -1307,6 +1496,10 @@ int main(int argc, char** argv) {
 
         bool shouldQuit = false;
         bool paused = false;
+        DisplayMode displayMode = startFullscreen
+            ? DisplayMode::Fullscreen : DisplayMode::Dashboard;
+
+        FrameSnapshot lastSnapshot;   // retained for fullscreen redraw
 
         cv::Mat currentDetectionsCanvas;
         cv::Mat lastDepthCanvas;
@@ -1401,7 +1594,13 @@ int main(int argc, char** argv) {
         };
 
         cv::namedWindow("VIGIA Dashboard", cv::WINDOW_NORMAL);
-        cv::resizeWindow("VIGIA Dashboard", dashboardSize.width, dashboardSize.height);
+        if (startFullscreen) {
+            cv::setWindowProperty("VIGIA Dashboard",
+                                  cv::WND_PROP_FULLSCREEN,
+                                  cv::WINDOW_FULLSCREEN);
+        } else {
+            cv::resizeWindow("VIGIA Dashboard", dashboardSize.width, dashboardSize.height);
+        }
 
         auto lastRenderTs = std::chrono::steady_clock::now();
         bool needsRender = true;
@@ -1478,6 +1677,9 @@ int main(int argc, char** argv) {
 
                 appendPotholeLog(snapshot);
 
+                // Retain snapshot data for fullscreen redraw
+                lastSnapshot = snapshot;
+
                 if constexpr (!kArmProfile) {
                     std::cout << std::fixed << std::setprecision(2)
                               << "[FRAME " << snapshot.frameIndex << "] latency=" << snapshot.latencyMs
@@ -1499,6 +1701,24 @@ int main(int argc, char** argv) {
                 (renderNow - lastRenderTs >= std::chrono::milliseconds(kRenderIntervalMs));
 
             if (renderDue) {
+
+            if (displayMode == DisplayMode::Fullscreen) {
+            // ── Fullscreen mode: video feed + detailed overlays only ──
+            if (!currentDetectionsCanvas.empty()) {
+                cv::Mat fullCanvas = currentDetectionsCanvas.clone();
+                // Re-draw with the detailed fullscreen renderer
+                drawDetectionsFullscreen(fullCanvas, lastSnapshot,
+                                         lastSmoothedFps, lastAvgLatency);
+
+                // Mode hint in bottom-right
+                cv::putText(fullCanvas, "[Q] Quit  [Space] Pause",
+                            cv::Point(fullCanvas.cols - 280, fullCanvas.rows - 14),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                            cv::Scalar(120, 120, 140), 1, cv::LINE_AA);
+
+                cv::imshow("VIGIA Dashboard", fullCanvas);
+            }
+            } else {
 
             {
             // ── Full 5-panel dashboard (ARM + desktop) ──
@@ -1701,6 +1921,7 @@ int main(int argc, char** argv) {
 
             cv::imshow("VIGIA Dashboard", dashboard);
             } // 5-panel dashboard
+            } // else Dashboard mode
 
             lastRenderTs = renderNow;
             needsRender = false;
