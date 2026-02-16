@@ -222,6 +222,7 @@ public:
         FrameSlot& slot = slots_[frameIndex % MAX_INFLIGHT];
         // Evict stale in-flight slot occupying this ring position
         if (slot.frameIndex != 0 && slot.frameIndex != frameIndex && !slot.completed) {
+            promoteUnfusedDetections(slot);
             finalizeSlot(slot);
             ready_.push_back(makeSnapshot(slot));
         }
@@ -341,6 +342,25 @@ public:
 
     bool tryPopFrame(FrameSnapshot& snapshot) {
         std::lock_guard<std::mutex> lock(mutex_);
+
+        // Promote slots that have been waiting too long for fusion (>500ms).
+        // This ensures bounding boxes are drawn even when depth/fusion is skipped.
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& slot : slots_) {
+            if (slot.frameIndex != 0 && !slot.completed &&
+                !slot.filteredDetections.empty() &&
+                slot.fusionTelemetry.size() < slot.filteredDetections.size()) {
+                const double waitMs = std::chrono::duration<double, std::milli>(
+                    now - slot.startTs).count();
+                if (waitMs > 500.0) {
+                    promoteUnfusedDetections(slot);
+                    finalizeSlot(slot);
+                    ready_.push_back(makeSnapshot(slot));
+                    slot.frameIndex = 0;
+                }
+            }
+        }
+
         if (ready_.empty())
             return false;
         // Drop stale snapshots if the UI fell behind.
@@ -355,6 +375,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& slot : slots_) {
             if (slot.frameIndex != 0 && !slot.completed) {
+                promoteUnfusedDetections(slot);
                 finalizeSlot(slot);
                 ready_.push_back(makeSnapshot(slot));
                 slot.frameIndex = 0;
@@ -441,9 +462,26 @@ private:
         lastFinalizedFrame_ = slot.frameIndex;
     }
 
+    // Promote raw detections to FusionTelemetry so bounding boxes are
+    // always drawn even when the coordinator skips fusion (no depth data,
+    // stride-skipped frames, etc.).
+    static void promoteUnfusedDetections(FrameSlot& slot) {
+        while (slot.fusionTelemetry.size() < slot.filteredDetections.size()) {
+            const auto& det = slot.filteredDetections[slot.fusionTelemetry.size()];
+            FusionTelemetry tele{};
+            tele.detection = det;
+            tele.input.yoloConfidence = det.confidence;
+            tele.output.finalConfidence = det.confidence; // raw YOLO as fallback
+            if (slot.fusionTelemetry.size() < slot.temporalStaging.size())
+                tele.temporal = slot.temporalStaging[slot.fusionTelemetry.size()];
+            slot.fusionTelemetry.push_back(tele);
+        }
+    }
+
     void finalizeOlderFrames(std::uint64_t currentFrameIndex) {
         for (auto& slot : slots_) {
             if (slot.frameIndex != 0 && slot.frameIndex < currentFrameIndex && !slot.completed) {
+                promoteUnfusedDetections(slot);
                 finalizeSlot(slot);
                 ready_.push_back(makeSnapshot(slot));
                 slot.frameIndex = 0;
@@ -850,6 +888,8 @@ void drawDetections(cv::Mat& canvas,
         for (int i = range.start; i < range.end; ++i) {
             const auto& tele = snapshot.fusions[static_cast<std::size_t>(i)];
             const cv::Rect& box = tele.detection.boundingBox;
+            if (box.width <= 0 || box.height <= 0)
+                continue;
             const cv::Scalar boxColor(0, 165, 255);
             cv::rectangle(canvas, box, boxColor, 2);
 
