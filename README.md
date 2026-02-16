@@ -67,7 +67,7 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 ├─────────────────┬─────────────────┬──────────────────────────────────┤
 │ Core 1          │ Core 2          │ Core 3                           │
 │ Perception      │ Depth Analysis  │ Fusion                           │
-│ (YOLO26)        │ (MiDaS v2.1)   │ Engine                           │
+│ (YOLO26)        │ (MiDaS v2.1)    │ Engine                           │
 │                 │                 │                                  │
 │ Semantic        │ Geometric       │ Road Risk Index (RRI)            │
 │ scanning        │ verification    │ + Temporal consistency           │
@@ -76,8 +76,8 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 
 | Stage                  | Role                                                                                   |
 |------------------------|----------------------------------------------------------------------------------------|
-| **Perception**         | High-frequency reactive scanning for semantic hazard candidates using YOLO26            |
-| **Depth Analysis**     | Geometric verification via monocular depth estimation and plane residual analysis        |
+| **Perception**         | High-frequency reactive scanning for semantic hazard candidates using YOLO26(int8)            |
+| **Depth Analysis**     | Geometric verification via monocular depth estimation(MiDaSv2.1) and plane residual analysis        |
 | **Temporal Module**    | Filters transient sensor noise through cross-frame persistence modeling                 |
 | **Fusion Engine**      | Computes a unified **Road Risk Index (RRI)** from perception, depth, and temporal data  |
 | **Coordinator**        | Orchestrates frame dispatch, thermal throttling, core pinning, and adaptive stride      |
@@ -95,7 +95,7 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 ### 2. Perception (Object Detection)
 
 - Custom **YOLO26** model trained for road hazard classes
-- OpenVINO CPU plugin backend with JIT compilation
+- OpenVINO CPU plugin backend with JIT compilation, compiled with KleidiAI
 - INT8 / FP32 inference precision
 - ARM NEON-optimized HWC→CHW transposition
 
@@ -143,7 +143,7 @@ VIGIA is explicitly optimized for the ARM Cortex-A72 microarchitecture. Every la
 | Thread pinning across 4 cores       | Deterministic scheduling, zero cross-core migration |
 | NEON SIMD vectorization             | 4× throughput on HWC→CHW transpose and preprocessing |
 | KleidiCV HAL integration            | Hardware-accelerated resize, blur, color conversion |
-| OpenVINO JIT compilation            | Runtime graph optimization for Cortex-A72        |
+| OpenVINO JIT compilation (with KleidiAI kernals)   | Runtime graph optimization for Cortex-A72        |
 | Inference cadence adaptation        | Automatic stride increase under thermal pressure |
 | Pre-allocated tensor buffers        | Zero per-frame heap allocation in inference path |
 | Lock-free inter-stage communication | Minimal synchronization overhead between cores   |
@@ -163,7 +163,7 @@ VIGIA is explicitly optimized for the ARM Cortex-A72 microarchitecture. Every la
 |---------------------|----------------------------------------------|
 | **Board**           | Raspberry Pi 4B (8 GB recommended)           |
 | **Architecture**    | ARMv8-A (aarch64), Cortex-A72, 4 cores       |
-| **OS**              | 64-bit Linux (Debian Trixie / Bookworm)      |
+| **OS**              | 64-bit Linux (Bookworm)      |
 | **Inference**       | OpenVINO 2025 ARM CPU Plugin + ACL backend   |
 | **Vision**          | OpenCV 4.14 with KleidiCV 0.7.0 HAL + TBB   |
 | **Cooling**         | Active cooling / heatsink required            |
@@ -245,9 +245,9 @@ Rather than maximizing raw FPS, the system prioritizes **stability under load**,
 
 When CPU temperature rises beyond safe thresholds, VIGIA adapts automatically:
 
-1. **Inference stride increases** — fewer frames processed per second
-2. **Depth estimation cadence adapts** — MiDaS runs on every Nth frame
-3. **FPS stability is preserved** — capture rate remains constant
+1. **Depth inference stride increases** — MiDaS runs on every Nth frame (N = 1–5), reducing thermal load while YOLO detection continues on every frame
+2. **Three-tier thermal response** — normal (stride 1), warm >75 °C (stride 3), critical >85 °C (stride 5)
+3. **FPS stability is preserved** — capture rate remains constant regardless of stride
 4. **Thermal throttling is minimized** — proactive adaptation prevents SoC clock reduction
 
 This enables sustained operation even on a passively cooled Raspberry Pi 4 in outdoor environments.
