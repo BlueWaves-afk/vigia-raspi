@@ -87,6 +87,10 @@ void Coordinator::captureLoop() {
 
             {
                 std::lock_guard<std::mutex> lock(bufferMutex_);
+                // Ring buffer must own its data (processFrame reads by
+                // shallow copy), so clone is required here.  The clone
+                // cost (~0.9 ms for 640×480 BGR) is negligible vs YOLO
+                // inference (~220 ms).
                 frameBuffer_[frameIndex_ % FRAME_BUFFER_SIZE] = frame.clone();
                 frameIndex_++;
             }
