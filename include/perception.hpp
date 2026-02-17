@@ -93,7 +93,7 @@ private:
     
     // ── Thresholds (auto-selected based on model quantization) ────────
     static constexpr float kConfThresholdFp32 = 0.25f;
-    static constexpr float kConfThresholdInt8 = 0.01f;
+    static constexpr float kConfThresholdInt8 = 0.008f;
     static constexpr float kIouThreshold = 0.45f;
     float confThreshold_{kConfThresholdFp32};
     bool isInt8Model_{false};
