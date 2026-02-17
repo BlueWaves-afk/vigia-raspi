@@ -571,20 +571,32 @@ public:
     }
 
     VideoPerceptionAgent(ov::Core& sharedCore,
-                         const std::string& modelXmlPath,
-                         const std::string& device,
-                         InstrumentationBus& bus,
-                         int cameraIndex)
-        : PerceptionAgent(sharedCore, modelXmlPath, device, cameraIndex),
-          bus_(bus),
-          cameraIndex_(cameraIndex),
-          useCamera_(true) {
-        if (!capture_.open(cameraIndex_))
-            throw std::runtime_error("Failed to open camera index: " + std::to_string(cameraIndex_));
-        videoFps_ = capture_.get(cv::CAP_PROP_FPS);
-        if (videoFps_ <= 1.0)
-            videoFps_ = 30.0;
-    }
+                            const std::string& modelXmlPath,
+                            const std::string& device,
+                            InstrumentationBus& bus,
+                            int cameraIndex)
+            : PerceptionAgent(sharedCore, modelXmlPath, device, cameraIndex),
+            bus_(bus),
+            cameraIndex_(cameraIndex),
+            useCamera_(true) {
+            
+            // ── GStreamer Pipeline for Raspberry Pi 4 ───────────────────────
+            // Uses libcamerasrc to bypass legacy V4L2 drivers.
+            // Optimized for 640x480 to leave CPU overhead for YOLO + MiDaS.
+            std::string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480, framerate=30/1 "
+                                "! videoconvert ! video/x-raw, format=BGR ! appsink";
+
+            std::cout << "[INFO] Opening camera via GStreamer: " << pipeline << std::endl;
+
+            if (!capture_.open(pipeline, cv::CAP_GSTREAMER)) {
+                throw std::runtime_error("Failed to open camera via GStreamer pipeline. "
+                                        "Ensure libcamera-dev and gstreamer plugins are installed.");
+            }
+            
+            videoFps_ = capture_.get(cv::CAP_PROP_FPS);
+            if (videoFps_ <= 1.0)
+                videoFps_ = 30.0;
+        }
 
     bool captureFrame(cv::Mat& frame) override {
         bool runOnce = false;
