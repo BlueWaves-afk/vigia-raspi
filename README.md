@@ -30,6 +30,7 @@ The project demonstrates a **hardware–software co-design** approach that maxim
 - [Objective](#objective)
 - [System Architecture](#system-architecture)
 - [Pipeline Stages](#pipeline-stages)
+- [Model Selection: FP32 vs INT8](#model-selection-fp32-vs-int8)
 - [ARM Optimization Strategy](#arm-optimization-strategy)
 - [Target Platform](#target-platform)
 - [Project Structure](#project-structure)
