@@ -1407,7 +1407,7 @@ int main(int argc, char** argv) {
     // -- Parse arguments --
     std::string videoPath;
     std::string yoloModel    = "models/yolo26/yolo26_model.xml";
-    std::string yoloInt8     = "models/yolo26/yolo26_model0.xml";
+    std::string yoloInt8     = "models/yolo26/yolo26_model_int8.xml";
     std::string midasModel   = "models/midasv21/openvino_midas_v21_small_256.xml";
     bool useCamera = false;
     int camIdx = 0;
@@ -1422,7 +1422,7 @@ int main(int argc, char** argv) {
         else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: performance_benchmark_test --video <file.mp4>\n"
                       << "  --yolo      <model.xml>   FP32 YOLO model (default: models/yolo26/yolo26_model.xml)\n"
-                      << "  --yolo-int8 <model.xml>   INT8 YOLO model (default: models/yolo26/yolo26_model0.xml)\n"
+                      << "  --yolo-int8 <model.xml>   INT8 YOLO model (default: models/yolo26/yolo26_model_int8.xml)\n"
                       << "  --midas     <model.xml>   MiDaS model\n"
                       << "  --cam       [index]       Use camera instead of video\n";
             return 0;
