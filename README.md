@@ -133,6 +133,68 @@ Combines three independent signals into a unified risk assessment:
 
 ---
 
+## Model Selection: FP32 vs INT8
+
+VIGIA ships with two YOLO26 model variants. Understanding their trade-offs is critical for optimal deployment.
+
+### Available Models
+
+| Model File | Precision | Size | Confidence Threshold | Use Case |
+|------------|-----------|------|---------------------|----------|
+| `yolo26_model.xml` | FP32 | 9.1 MB | 0.25 | Development, accuracy validation |
+| `yolo26_model0.xml` | INT8 | 2.3 MB | 0.01 | Production deployment, thermal efficiency |
+
+### Why Different Thresholds?
+
+**INT8 quantization** compresses the model from 32-bit floats to 8-bit integers, reducing memory bandwidth and enabling faster inference. However, this compression introduces quantization noise:
+
+| Effect | FP32 | INT8 |
+|--------|------|------|
+| Output precision | High | Reduced (noisy) |
+| Confidence scores | Accurate | Compressed range |
+| Box coordinates | Precise | May merge adjacent detections |
+| Memory footprint | 9.1 MB | 2.3 MB (~4× smaller) |
+| Inference speed | Baseline | ~15-25% faster |
+
+**The INT8 model outputs lower raw confidence scores** due to quantization — a detection that scores 0.85 in FP32 might score 0.3 in INT8. The threshold must be lowered accordingly to capture the same detections.
+
+### INT8-Specific Post-Processing
+
+To compensate for INT8 artifacts, VIGIA applies additional post-processing when an INT8 model is detected:
+
+1. **Lower confidence threshold** (0.01 vs 0.25) — captures detections with compressed scores
+2. **Post-NMS cleanup** (IOU 0.45) — separates boxes that merged during quantization
+3. **Letterbox preprocessing** — maintains aspect ratio for consistent coordinate mapping
+
+### How to Choose
+
+```bash
+# Development / accuracy testing — use FP32
+./system_visual_test --video road.mp4 models/yolo26/yolo26_model.xml
+
+# Production / thermal-constrained — use INT8 (default)
+./system_visual_test --video road.mp4 models/yolo26/yolo26_model0.xml
+
+# The system auto-detects INT8 models and adjusts thresholds automatically
+# Look for this log message:
+#   [YOLO26] Model type: INT8 quantized | conf threshold: 0.01 | IOU threshold: 0.45
+```
+
+### When to Use Each
+
+| Scenario | Recommended Model |
+|----------|------------------|
+| Debugging detection issues | FP32 (`yolo26_model.xml`) |
+| Accuracy benchmarking | FP32 |
+| Sustained outdoor operation | INT8 (`yolo26_model0.xml`) |
+| Thermal-constrained deployment | INT8 |
+| Battery-powered operation | INT8 |
+| Maximum detection recall | FP32 (then validate with INT8) |
+
+> **Note:** The system automatically detects INT8 models by scanning for `FakeQuantize` operations in the OpenVINO IR graph. No manual configuration is required.
+
+---
+
 ## ARM Optimization Strategy
 
 VIGIA is explicitly optimized for the ARM Cortex-A72 microarchitecture. Every layer of the stack is tuned for the Pi 4's hardware constraints.

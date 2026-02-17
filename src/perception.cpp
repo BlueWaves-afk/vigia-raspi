@@ -1,5 +1,6 @@
 #include "perception.hpp"
 #include <algorithm>
+#include <numeric>
 #include <thread>
 #include <iostream>
 #include <fstream>
@@ -37,6 +38,53 @@ static void compileModelSigbusHandler(int sig) {
 }
 
 namespace vigia {
+
+namespace {
+// ── NMS to fix merged boxes in INT8 quantized models ────────────────
+// INT8 quantization can cause adjacent detections to merge; this separates them.
+std::vector<int> nmsBoxes(const std::vector<cv::Rect>& boxes,
+                          const std::vector<float>& scores,
+                          float scoreThreshold,
+                          float iouThreshold) {
+    std::vector<int> indices;
+    if (boxes.empty()) return indices;
+    
+    // Sort by score descending
+    std::vector<int> order(boxes.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&scores](int a, int b) {
+        return scores[a] > scores[b];
+    });
+    
+    std::vector<bool> suppressed(boxes.size(), false);
+    
+    for (size_t i = 0; i < order.size(); ++i) {
+        const int idx = order[i];
+        if (suppressed[idx] || scores[idx] < scoreThreshold) continue;
+        
+        indices.push_back(idx);
+        const cv::Rect& boxA = boxes[idx];
+        const float areaA = static_cast<float>(boxA.area());
+        
+        for (size_t j = i + 1; j < order.size(); ++j) {
+            const int jdx = order[j];
+            if (suppressed[jdx]) continue;
+            
+            const cv::Rect& boxB = boxes[jdx];
+            const cv::Rect intersection = boxA & boxB;
+            const float interArea = static_cast<float>(intersection.area());
+            const float areaB = static_cast<float>(boxB.area());
+            const float iou = interArea / (areaA + areaB - interArea + 1e-6f);
+            
+            if (iou > iouThreshold) {
+                suppressed[jdx] = true;
+            }
+        }
+    }
+    
+    return indices;
+}
+} // anonymous namespace
 
 PerceptionAgent::PerceptionAgent(const std::string& modelXmlPath,
                                  const std::string& device,
@@ -168,6 +216,22 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
         throw;
     }
     std::cout << "[TRACE] <<< core_->read_model() END (success)" << std::flush << std::endl;
+
+    // ── Detect INT8 quantized model ─────────────────────────────────
+    // Check for FakeQuantize operations which indicate INT8 quantization
+    isInt8Model_ = false;
+    for (const auto& op : model->get_ops()) {
+        if (op->get_type_name() == std::string("FakeQuantize")) {
+            isInt8Model_ = true;
+            break;
+        }
+    }
+    
+    // Set confidence threshold based on model type
+    confThreshold_ = isInt8Model_ ? kConfThresholdInt8 : kConfThresholdFp32;
+    std::cout << "[YOLO26] Model type: " << (isInt8Model_ ? "INT8 quantized" : "FP32")
+              << " | conf threshold: " << confThreshold_
+              << " | IOU threshold: " << kIouThreshold << std::flush << std::endl;
 
     // Set layout to NCHW as required by OpenVINO for this model type
     model->get_parameters()[0]->set_layout("NCHW");
@@ -401,7 +465,6 @@ std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
 }
 
 std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, const Letterbox& lb, const cv::Size& origSize) {
-    std::vector<Detection> detections;
 #if defined(__clang__) || defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -414,14 +477,23 @@ std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, co
 
     // YOLO26 NMS-Free output is typically [1, 300, 6]
     // Indices: 0:x1, 1:y1, 2:x2, 3:y2, 4:score, 5:class_id
-    int num_detections = static_cast<int>(shape[1]);
+    const int num_detections = static_cast<int>(shape[1]);
+
+    // ── Collect all candidates before NMS ───────────────────────────
+    std::vector<cv::Rect> boxes;
+    std::vector<float> scores;
+    std::vector<int> classIds;
+    boxes.reserve(128);
+    scores.reserve(128);
+    classIds.reserve(128);
 
     for (int i = 0; i < num_detections; ++i) {
         const float* row = data + (i * 6);
-        float confidence = row[4];
+        const float confidence = row[4];
 
         if (confidence < confThreshold_) continue;
 
+        // ── Inverse letterbox scaling ───────────────────────────────
         // Map coordinates back to original frame (removing padding and scaling)
         float x1 = (row[0] - lb.pad_w) / lb.scale;
         float y1 = (row[1] - lb.pad_h) / lb.scale;
@@ -429,17 +501,36 @@ std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, co
         float y2 = (row[3] - lb.pad_h) / lb.scale;
 
         // Clip to original frame boundaries
-        x1 = std::clamp(x1, 0.0f, (float)origSize.width);
-        y1 = std::clamp(y1, 0.0f, (float)origSize.height);
-        x2 = std::clamp(x2, 0.0f, (float)origSize.width);
-        y2 = std::clamp(y2, 0.0f, (float)origSize.height);
+        x1 = std::clamp(x1, 0.0f, static_cast<float>(origSize.width));
+        y1 = std::clamp(y1, 0.0f, static_cast<float>(origSize.height));
+        x2 = std::clamp(x2, 0.0f, static_cast<float>(origSize.width));
+        y2 = std::clamp(y2, 0.0f, static_cast<float>(origSize.height));
 
+        const int bx = static_cast<int>(x1);
+        const int by = static_cast<int>(y1);
+        const int bw = static_cast<int>(x2 - x1);
+        const int bh = static_cast<int>(y2 - y1);
+
+        if (bw > 0 && bh > 0) {
+            boxes.emplace_back(bx, by, bw, bh);
+            scores.push_back(confidence);
+            classIds.push_back(static_cast<int>(row[5]));
+        }
+    }
+
+    // ── Apply NMS (critical for INT8 merged-box fix) ────────────────
+    // Even for FP32 models, NMS helps clean up overlapping detections
+    std::vector<int> keepIndices = nmsBoxes(boxes, scores, confThreshold_, kIouThreshold);
+
+    // Build final detections
+    std::vector<Detection> detections;
+    detections.reserve(keepIndices.size());
+
+    for (int idx : keepIndices) {
         Detection det;
-        det.confidence = confidence;
-        det.classId = static_cast<int>(row[5]);
-        det.boundingBox = cv::Rect(cv::Point(static_cast<int>(x1), static_cast<int>(y1)), 
-                                   cv::Point(static_cast<int>(x2), static_cast<int>(y2)));
-
+        det.boundingBox = boxes[idx];
+        det.confidence = scores[idx];
+        det.classId = classIds[idx];
         detections.push_back(det);
     }
 

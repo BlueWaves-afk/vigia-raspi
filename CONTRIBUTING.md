@@ -19,8 +19,9 @@ This guide covers the development environment setup, build instructions, and per
 7. [OpenVINO Runtime (ARM64)](#7-openvino-runtime-arm64)
 8. [Building VIGIA](#8-building-vigia)
 9. [Performance Tuning](#9-performance-tuning)
-10. [Validation](#10-validation)
-11. [Stack Rationale](#11-stack-rationale)
+10. [Remote Development with VNC](#10-remote-development-with-vnc)
+11. [Validation](#11-validation)
+12. [Stack Rationale](#12-stack-rationale)
 
 ---
 
@@ -457,7 +458,138 @@ This pinning strategy ensures deterministic scheduling and prevents camera I/O f
 
 ---
 
-## 10. Validation
+## 10. Remote Development with VNC
+
+VIGIA's visual tests (`system_visual_test`) require a display. When developing remotely via SSH, you'll need a VNC server to view the OpenCV GUI output.
+
+### Why TigerVNC over RealVNC?
+
+| Aspect | TigerVNC | RealVNC |
+|--------|----------|--------|
+| Stability | Excellent | Frequent glitches, dropped frames |
+| Latency | Low | Variable |
+| Resource usage | Lightweight | Heavier background services |
+| Configuration | Simple CLI | GUI-centric, complex |
+| Open source | Yes | Proprietary (free tier limited) |
+
+RealVNC (pre-installed on Raspberry Pi OS) often exhibits visual artifacts, connection drops, and laggy response when streaming OpenCV windows. TigerVNC provides a more reliable experience for real-time visualization.
+
+### Install TigerVNC (via TightVNC)
+
+```bash
+# Remove RealVNC if present
+sudo apt remove -y --purge realvnc-vnc-server realvnc-vnc-viewer
+sudo apt autoremove -y
+
+# Clean up leftover config
+rm -rf ~/.vnc
+
+# Install TightVNC (most reliable on Pi OS)
+sudo apt update
+sudo apt install -y tightvncserver
+
+# Set VNC password (first time only)
+vncpasswd
+# Enter a password (e.g., "vigia123") — will be used to connect from Mac
+```
+
+### Start VNC Server on Pi
+
+```bash
+# Start VNC on display :1 with 720p resolution
+vncserver :1 -geometry 1280x720 -depth 24
+
+# Verify it's running
+vncserver -list
+
+# You should see:
+#   TigerVNC server sessions:
+#   X DISPLAY #     PROCESS ID
+#   :1              12345
+```
+
+### Connect from Mac
+
+**Option 1 — Terminal:**
+```bash
+open vnc://raspi4B.local:5901
+```
+
+**Option 2 — Finder:**
+1. Press `Cmd + K` (or Finder → Go → Connect to Server)
+2. Enter: `vnc://raspi4B.local:5901`
+3. Click Connect
+4. Enter the VNC password you set earlier
+
+> **Note:** Display `:1` maps to port `5901`, `:2` to `5902`, etc.
+
+### Run VIGIA Tests over VNC
+
+Once connected via VNC, open a terminal in the VNC session and run:
+
+```bash
+cd ~/vigia-raspi/build
+
+# Standard dashboard view
+./system_visual_test --video hazard.mp4
+
+# Fullscreen mode (press Q to quit)
+./system_visual_test -F --video hazard.mp4
+```
+
+The OpenCV window will appear in the VNC session, not on your Mac's local display.
+
+### VNC Management Commands
+
+```bash
+# List running VNC sessions
+vncserver -list
+
+# Kill a specific session
+vncserver -kill :1
+
+# Kill all sessions
+vncserver -kill :*
+
+# Check what's using VNC ports
+ps aux | grep vnc
+```
+
+### Complete SSH + VNC Workflow
+
+Here's the typical workflow for remote development:
+
+```bash
+# 1. SSH into the Pi from Mac
+ssh vigiasense@raspi4B.local
+
+# 2. Start VNC server (if not already running)
+vncserver :1 -geometry 1280x720 -depth 24
+
+# 3. Open a new Mac terminal and connect via VNC
+open vnc://raspi4B.local:5901
+
+# 4. In the VNC session, run visual tests
+cd ~/vigia-raspi/build
+./system_visual_test -F --video hazard.mp4
+
+# 5. When done, kill VNC to free resources
+vncserver -kill :1
+```
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "Connection refused" on Mac | Ensure VNC server is running: `vncserver -list` |
+| Black screen in VNC | Start a window manager: `startlxde &` or just run your test |
+| Multiple VNC sessions running | Kill all: `vncserver -kill :*` then start fresh |
+| Laggy display | Reduce resolution: `-geometry 1024x600` |
+| Authentication failure | Re-run `vncpasswd` to reset password |
+
+---
+
+## 11. Validation
 
 ### Camera Input
 
@@ -482,7 +614,7 @@ This pinning strategy ensures deterministic scheduling and prevents camera I/O f
 
 ---
 
-## 11. Stack Rationale
+## 12. Stack Rationale
 
 | Framework        | ARM CPU Efficiency | Notes                                   |
 |------------------|--------------------|-----------------------------------------|

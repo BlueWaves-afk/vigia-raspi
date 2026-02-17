@@ -90,7 +90,13 @@ private:
 
     int inputWidth_{320};
     int inputHeight_{320};
-    float confThreshold_{0.10f};  // Lowered for INT8 quantized models
+    
+    // ── Thresholds (auto-selected based on model quantization) ────────
+    static constexpr float kConfThresholdFp32 = 0.25f;
+    static constexpr float kConfThresholdInt8 = 0.01f;
+    static constexpr float kIouThreshold = 0.45f;
+    float confThreshold_{kConfThresholdFp32};
+    bool isInt8Model_{false};
 
     /// Set to true only after compile_model() succeeds.
     /// If false, runInference() returns an empty vector.
