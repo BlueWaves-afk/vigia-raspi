@@ -1,7 +1,8 @@
 <div align="center">
-    
+
 ![Tech Event Banner](https://github.com/user-attachments/assets/c7995ac9-c551-4ad8-b5b0-ea759cf8a63f)
-#  VIGIA-ARM
+
+# VIGIA-ARM
 
 **ARM-Based Real-Time Road Hazard Detection System**
 
@@ -24,7 +25,11 @@ VIGIA is a real-time, ARM-optimized road hazard detection system designed for ed
 The project demonstrates a **hardware–software co-design** approach that maximizes performance on constrained ARM edge hardware while maintaining deterministic real-time behavior.
 
 ---
+
 ![VigiaSense MultiModal System.](vigia_700p_final.gif)
+
+---
+
 ## Table of Contents
 
 - [Objective](#objective)
@@ -41,6 +46,32 @@ The project demonstrates a **hardware–software co-design** approach that maxim
 - [Getting Started](#getting-started)
 - [License](#license)
 - [Resources](#resources)
+
+---
+
+## Performance Benchmarks
+
+VIGIA-ARM is optimized for the Raspberry Pi 4 (Cortex-A72), achieving real-time performance through hardware-aware co-design.
+
+### Core Metrics (End-to-End)
+
+| Metric                        | Result       |
+|-------------------------------|--------------|
+| **Stable Throughput**         | 10.3 FPS (Headless Mode) |
+| **Peak Throughput**           | 12.9 FPS     |
+| **YOLO26 Inference (INT8)**   | 83.4 ms      |
+| **MiDaS v2.1 Inference**      | 524.8 ms     |
+| **Memory Footprint (RSS)**    | 551.5 MB     |
+| **Estimated Power Draw**      | 3.0 W        |
+
+### ARM Hardware Optimizations
+
+- **NEON SIMD Uplift:** Manual `vld3q_f32` vectorization provides a **1.3x speedup** in HWC→CHW preprocessing.
+- **INT8 Quantization:** Achieves a **3.9x reduction** in model size (9.1 MB → 2.3 MB) while maintaining a **95.7% detection rate**.
+- **Thermal Stability:** Maintains a stable operating temperature range via adaptive stride control.
+
+> [!IMPORTANT]
+> **Performance Note on Display Lag:** The **10.3 FPS** throughput is achieved in **headless mode** to maximize CPU availability for inference. Displaying the real-time dashboard using OpenCV's `imshow` introduces significant rendering and VNC encoding overhead, reducing system throughput to approximately **3 FPS**. For production deployment, headless operation or subsampled display is recommended.
 
 ---
 
@@ -75,13 +106,13 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 └─────────────────┴─────────────────┴──────────────────────────────────┘
 ```
 
-| Stage                  | Role                                                                                   |
-|------------------------|----------------------------------------------------------------------------------------|
-| **Perception**         | High-frequency reactive scanning for semantic hazard candidates using YOLO26(int8)            |
-| **Depth Analysis**     | Geometric verification via monocular depth estimation(MiDaSv2.1) and plane residual analysis        |
-| **Temporal Module**    | Filters transient sensor noise through cross-frame persistence modeling                 |
-| **Fusion Engine**      | Computes a unified **Road Risk Index (RRI)** from perception, depth, and temporal data  |
-| **Coordinator**        | Orchestrates frame dispatch, thermal throttling, core pinning, and adaptive stride      |
+| Stage               | Role                                                                                  |
+|---------------------|---------------------------------------------------------------------------------------|
+| **Perception**      | High-frequency reactive scanning for semantic hazard candidates using YOLO26 (INT8)   |
+| **Depth Analysis**  | Geometric verification via monocular depth estimation (MiDaS v2.1) and plane residual analysis |
+| **Temporal Module** | Filters transient sensor noise through cross-frame persistence modeling               |
+| **Fusion Engine**   | Computes a unified **Road Risk Index (RRI)** from perception, depth, and temporal data |
+| **Coordinator**     | Orchestrates frame dispatch, thermal throttling, core pinning, and adaptive stride    |
 
 ---
 
@@ -103,7 +134,7 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 ### 3. Depth Analysis
 
 - **MiDaS v2.1** monocular depth estimation
-- Note on Quantization: Unlike the YOLO model, MiDaS v2.1 is maintained in FP32/FP16 precision. Experimental INT8 quantization of MiDaS leads to a "black depth map" failure where the dynamic range of depth values is crushed, making geometric verification impossible. 
+- Unlike the YOLO model, MiDaS v2.1 is maintained in FP32/FP16 precision. Experimental INT8 quantization of MiDaS produces a "black depth map" failure where the dynamic range of depth values is collapsed, making geometric verification impossible.
 - ROI-based depth extraction aligned to detected hazards
 - Plane residual analysis to quantify surface depressions
 - Adaptive stride control under thermal load
@@ -118,11 +149,11 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 
 Combines three independent signals into a unified risk assessment:
 
-| Signal               | Source               | Contribution                     |
-|----------------------|----------------------|----------------------------------|
-| Detection confidence | Perception (YOLO26)  | Semantic probability of hazard   |
-| Depression score     | Depth Analysis       | Geometric severity of defect     |
-| Persistence          | Temporal Module      | Temporal stability of observation|
+| Signal               | Source              | Contribution                      |
+|----------------------|---------------------|-----------------------------------|
+| Detection confidence | Perception (YOLO26) | Semantic probability of hazard    |
+| Depression score     | Depth Analysis      | Geometric severity of defect      |
+| Persistence          | Temporal Module     | Temporal stability of observation |
 
 **Output:** A scalar **Road Risk Index (RRI)** per detection, thresholded to classify hazard vs. safe.
 
@@ -141,43 +172,44 @@ VIGIA ships with two YOLO26 model variants. Understanding their trade-offs is cr
 
 ### Available Models
 
-| Model File | Precision | Size | Confidence Threshold | Use Case |
-|------------|-----------|------|---------------------|----------|
-| `yolo26_model.xml` | FP32 | 9.1 MB | 0.25 | Development, accuracy validation |
-| `yolo26_model_int8.xml` | INT8 | 2.3 MB | 0.008 | Production deployment, thermal efficiency |
+| Model File              | Precision | Size   | Confidence Threshold | Use Case                             |
+|-------------------------|-----------|--------|----------------------|--------------------------------------|
+| `yolo26_model.xml`      | FP32      | 9.1 MB | 0.25                 | Development, accuracy validation     |
+| `yolo26_model_int8.xml` | INT8      | 2.3 MB | 0.008                | Production deployment, thermal efficiency |
 
 ### Why Different Thresholds?
 
 **INT8 quantization** compresses the model from 32-bit floats to 8-bit integers, reducing memory bandwidth and enabling faster inference. However, this compression introduces quantization noise:
 
-| Effect | FP32 | INT8 |
-|--------|------|------|
-| Output precision | High | Reduced (noisy) |
-| Confidence scores | Accurate | Compressed range |
-| Box coordinates | Precise | May merge adjacent detections |
-| Memory footprint | 9.1 MB | 2.3 MB (~4× smaller) |
-| Inference speed | Baseline | ~15-25% faster |
+| Effect              | FP32      | INT8                              |
+|---------------------|-----------|-----------------------------------|
+| Output precision    | High      | Reduced (noisy)                   |
+| Confidence scores   | Accurate  | Compressed range                  |
+| Box coordinates     | Precise   | May merge adjacent detections     |
+| Memory footprint    | 9.1 MB    | 2.3 MB (~4× smaller)              |
+| Inference speed     | Baseline  | ~15–25% faster                    |
 
-**The INT8 model outputs lower raw confidence scores** due to quantization — a detection that scores 0.85 in FP32 might score 0.3 in INT8. The threshold must be lowered accordingly to capture the same detections.
+The INT8 model outputs lower raw confidence scores due to quantization — a detection that scores 0.85 in FP32 might score 0.3 in INT8. The threshold must be lowered accordingly to capture the same detections.
 
-**The 0.008 Settlement: After extensive testing on road footage, the INT8 detection threshold was settled at 0.008. This permissive threshold recovers "missed" potholes caused by quantization rounding errors, while the subsequent Fusion Engine and Temporal Module filter out any resulting low-confidence noise.
+**The 0.008 Settlement:** After extensive testing on road footage, the INT8 detection threshold was settled at 0.008. This permissive threshold recovers detections suppressed by quantization rounding errors, while the subsequent Fusion Engine and Temporal Module filter out the resulting low-confidence noise.
 
-### Post-Quantization Training
-Moving from FP32 to INT8 required a multi-stage accuracy recovery process to prevent detection drops and "merged" bounding boxes.
-## Post-Quantization Training (QAT)
-To restore the detection recall lost during initial INT8 export, a Quantization-Aware Fine-Tuning cycle was implemented. Instead of a standard static calibration, the model was trained for several epochs using "Fake Quantization" nodes. This allows the weights to adapt to the 8-bit bottleneck, effectively teaching the model how to remain accurate despite the loss of numerical precision.
-## Accuracy-Aware Calibration Flow
-The vigia_yolo26_high_acc_int8.xml was generated using a custom NNCF-based calibration script. Key difficulties encountered included:
+### Post-Quantization Training (QAT)
 
-Coordinate Merging: Initial INT8 exports produced large, "merged" bounding boxes that covered multiple hazards.
+To restore the detection recall lost during initial INT8 export, a Quantization-Aware Fine-Tuning cycle was implemented. Instead of a standard static calibration, the model was trained for several epochs using Fake Quantization nodes. This allows the weights to adapt to the 8-bit bottleneck, effectively teaching the model to remain accurate despite the loss of numerical precision.
 
-The Solution: We implemented Letterbox Preprocessing to maintain exact aspect ratios and a high IOU Threshold (0.45) during post-processing to force the model to separate adjacent detections merged by quantization noise.
+### Accuracy-Aware Calibration Flow
+
+The `vigia_yolo26_high_acc_int8.xml` was generated using a custom NNCF-based calibration script. Key difficulties encountered included:
+
+**Coordinate Merging:** Initial INT8 exports produced large, merged bounding boxes that covered multiple hazards.
+
+*Solution:* Letterbox preprocessing was implemented to maintain exact aspect ratios, combined with a high IOU threshold (0.45) during post-processing to force the model to separate adjacent detections merged by quantization noise.
 
 ### INT8-Specific Post-Processing
 
 To compensate for INT8 artifacts, VIGIA applies additional post-processing when an INT8 model is detected:
 
-1. **Lower confidence threshold** (0.01 vs 0.25) — captures detections with compressed scores
+1. **Lower confidence threshold** (0.01 vs. 0.25) — captures detections with compressed scores
 2. **Post-NMS cleanup** (IOU 0.45) — separates boxes that merged during quantization
 3. **Letterbox preprocessing** — maintains aspect ratio for consistent coordinate mapping
 
@@ -197,14 +229,14 @@ To compensate for INT8 artifacts, VIGIA applies additional post-processing when 
 
 ### When to Use Each
 
-| Scenario | Recommended Model |
-|----------|------------------|
-| Debugging detection issues | FP32 (`yolo26_model.xml`) |
-| Accuracy benchmarking | FP32 |
-| Sustained outdoor operation | INT8 (`yolo26_model0.xml`) |
-| Thermal-constrained deployment | INT8 |
-| Battery-powered operation | INT8 |
-| Maximum detection recall | FP32 (then validate with INT8) |
+| Scenario                      | Recommended Model                          |
+|-------------------------------|--------------------------------------------|
+| Debugging detection issues    | FP32 (`yolo26_model.xml`)                  |
+| Accuracy benchmarking         | FP32                                       |
+| Sustained outdoor operation   | INT8 (`yolo26_model0.xml`)                 |
+| Thermal-constrained deployment| INT8                                       |
+| Battery-powered operation     | INT8                                       |
+| Maximum detection recall      | FP32 (then validate with INT8)             |
 
 > **Note:** The system automatically detects INT8 models by scanning for `FakeQuantize` operations in the OpenVINO IR graph. No manual configuration is required.
 
@@ -214,16 +246,16 @@ To compensate for INT8 artifacts, VIGIA applies additional post-processing when 
 
 VIGIA is explicitly optimized for the ARM Cortex-A72 microarchitecture. Every layer of the stack is tuned for the Pi 4's hardware constraints.
 
-| Optimization                        | Impact                                          |
-|-------------------------------------|--------------------------------------------------|
-| CPU governor locked to `performance`| Eliminates frequency scaling latency spikes      |
-| Thread pinning across 4 cores       | Deterministic scheduling, zero cross-core migration |
-| NEON SIMD vectorization             | 4× throughput on HWC→CHW transpose and preprocessing |
-| KleidiCV HAL integration            | Hardware-accelerated resize, blur, color conversion |
-| OpenVINO JIT compilation (with KleidiAI kernals)   | Runtime graph optimization for Cortex-A72        |
-| Inference cadence adaptation        | Automatic stride increase under thermal pressure |
-| Pre-allocated tensor buffers        | Zero per-frame heap allocation in inference path |
-| Lock-free inter-stage communication | Minimal synchronization overhead between cores   |
+| Optimization                              | Impact                                                       |
+|-------------------------------------------|--------------------------------------------------------------|
+| CPU governor locked to `performance`      | Eliminates frequency scaling latency spikes                  |
+| Thread pinning across 4 cores             | Deterministic scheduling, zero cross-core migration          |
+| NEON SIMD vectorization                   | 4× throughput on HWC→CHW transpose and preprocessing         |
+| KleidiCV HAL integration                  | Hardware-accelerated resize, blur, color conversion          |
+| OpenVINO JIT compilation (with KleidiAI kernels) | Runtime graph optimization for Cortex-A72             |
+| Inference cadence adaptation              | Automatic stride increase under thermal pressure             |
+| Pre-allocated tensor buffers              | Zero per-frame heap allocation in inference path             |
+| Lock-free inter-stage communication       | Minimal synchronization overhead between cores               |
 
 **Guarantees:**
 
@@ -236,32 +268,32 @@ VIGIA is explicitly optimized for the ARM Cortex-A72 microarchitecture. Every la
 
 ## Target Platform
 
-| Component           | Specification                                |
-|---------------------|----------------------------------------------|
-| **Board**           | Raspberry Pi 4B (8 GB recommended)           |
-| **Architecture**    | ARMv8-A (aarch64), Cortex-A72, 4 cores       |
-| **OS**              | 64-bit Linux (Bookworm)      |
-| **Inference**       | OpenVINO 2025 ARM CPU Plugin + ACL backend   |
-| **Vision**          | OpenCV 4.14 with KleidiCV 0.7.0 HAL + TBB   |
-| **Cooling**         | Active cooling / heatsink required            |
-| **Camera**          | USB webcam or Pi Camera Module (V2 / V3)     |
+| Component        | Specification                                          |
+|------------------|--------------------------------------------------------|
+| **Board**        | Raspberry Pi 4B (8 GB recommended)                     |
+| **Architecture** | ARMv8-A (aarch64), Cortex-A72, 4 cores                 |
+| **OS**           | 64-bit Linux (Bookworm)                                |
+| **Inference**    | OpenVINO 2025 ARM CPU Plugin + ACL backend             |
+| **Vision**       | OpenCV 4.14 with KleidiCV 0.7.0 HAL + TBB             |
+| **Cooling**      | Active cooling / heatsink required                     |
+| **Camera**       | USB webcam or Pi Camera Module (V2 / V3)               |
 
 ### Why OpenVINO on ARM?
 
 OpenVINO provides several advantages over alternative inference runtimes on ARM:
 
-| Capability                       | Benefit                                       |
-|----------------------------------|-----------------------------------------------|
-| Runtime graph compilation        | Model-specific kernel generation at load time  |
-| Arm Compute Library integration  | NEON-optimized operators tuned for Cortex-A72  |
-| Deterministic execution          | Predictable latency critical for real-time use |
-| INT8 quantization support        | Reduced memory footprint and inference time    |
+| Capability                        | Benefit                                          |
+|-----------------------------------|--------------------------------------------------|
+| Runtime graph compilation         | Model-specific kernel generation at load time    |
+| Arm Compute Library integration   | NEON-optimized operators tuned for Cortex-A72    |
+| Deterministic execution           | Predictable latency critical for real-time use   |
+| INT8 quantization support         | Reduced memory footprint and inference time      |
 
 | Framework        | ARM CPU Efficiency | Notes                                   |
 |------------------|--------------------|-----------------------------------------|
-| **OpenVINO**     | ⭐⭐⭐⭐⭐             | JIT + ACL + NEON — best determinism     |
-| TFLite           | ⭐⭐⭐⭐              | Good, but less runtime optimization     |
-| ONNX Runtime     | ⭐⭐⭐               | Limited ARM-specific tuning             |
+| **OpenVINO**     | Excellent          | JIT + ACL + NEON — best determinism     |
+| TFLite           | Good               | Good, but less runtime optimization     |
+| ONNX Runtime     | Adequate           | Limited ARM-specific tuning             |
 
 ---
 
@@ -306,13 +338,13 @@ vigia-raspi/
 
 VIGIA is built around five core principles:
 
-| Principle                          | Approach                                                     |
-|------------------------------------|--------------------------------------------------------------|
-| **Edge autonomy**                  | All inference runs on-device — no cloud, no GPU              |
-| **Deterministic performance**      | Fixed core affinity, locked frequency, pre-allocated buffers |
-| **Thermal awareness**              | Adaptive stride and cadence under thermal pressure           |
-| **Modular architecture**           | Each pipeline stage is independently testable and replaceable|
-| **Hardware-conscious optimization**| Every decision — from data layout to thread scheduling — is informed by the target hardware |
+| Principle                           | Approach                                                                            |
+|-------------------------------------|-------------------------------------------------------------------------------------|
+| **Edge autonomy**                   | All inference runs on-device — no cloud, no GPU                                     |
+| **Deterministic performance**       | Fixed core affinity, locked frequency, pre-allocated buffers                        |
+| **Thermal awareness**               | Adaptive stride and cadence under thermal pressure                                  |
+| **Modular architecture**            | Each pipeline stage is independently testable and replaceable                       |
+| **Hardware-conscious optimization** | Every decision — from data layout to thread scheduling — is informed by the target hardware |
 
 Rather than maximizing raw FPS, the system prioritizes **stability under load**, **predictable latency**, and **reliable hazard detection**.
 
@@ -366,13 +398,13 @@ The guide covers:
 
 ### Prerequisites
 
-| Requirement          | Specification                                       |
-|----------------------|-----------------------------------------------------|
-| **Hardware**         | Raspberry Pi 4B (8 GB recommended, active cooling)  |
-| **OS**               | Raspberry Pi OS Lite 64-bit                         |
-| **Camera**           | USB webcam or Pi Camera Module V2/V3                |
-| **Inference**        | OpenVINO 2025 ARM CPU Plugin                        |
-| **Vision**           | OpenCV 4.x with KleidiCV HAL                       |
+| Requirement   | Specification                                        |
+|---------------|------------------------------------------------------|
+| **Hardware**  | Raspberry Pi 4B (8 GB recommended, active cooling)   |
+| **OS**        | Raspberry Pi OS Lite 64-bit                          |
+| **Camera**    | USB webcam or Pi Camera Module V2/V3                 |
+| **Inference** | OpenVINO 2025 ARM CPU Plugin                         |
+| **Vision**    | OpenCV 4.x with KleidiCV HAL                         |
 
 ### Test Targets
 

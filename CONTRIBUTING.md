@@ -22,25 +22,27 @@ This guide covers the development environment setup, build instructions, and per
 10. [Remote Development with VNC](#10-remote-development-with-vnc)
 11. [Validation](#11-validation)
 12. [Stack Rationale](#12-stack-rationale)
+13. [Known Issues & Solutions](#13-known-issues--solutions)
 
 ---
 
 ## 1. Target Platform
 
-| Component      | Specification                              |
-|----------------|--------------------------------------------|
-| **Board**      | Raspberry Pi 4B (8 GB strongly recommended) |
-| **OS**         | Raspberry Pi OS Lite (64-bit), Debian 12(Bookworm)              |
-| **CPU**        | ARM Cortex-A72 (ARMv8-A), 4 cores         |
-| **Cooling**    | Active cooling / heatsink required         |
-| **Camera**     | USB webcam or Pi Camera Module (V2 / V3)   |
+| Component  | Specification                                           |
+|------------|---------------------------------------------------------|
+| **Board**  | Raspberry Pi 4B (8 GB strongly recommended)             |
+| **OS**     | Raspberry Pi OS Lite (64-bit), Debian 12 (Bookworm)     |
+| **CPU**    | ARM Cortex-A72 (ARMv8-A), 4 cores                       |
+| **Cooling**| Active cooling / heatsink required                      |
+| **Camera** | USB webcam or Pi Camera Module (V2 / V3)                |
+
 <img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/fce7fb6b-8b3d-47c0-95e1-278481f6c9cf" />
 
 ---
 
 ## 2. OS Foundation
 
-> **Important:** A minimal OS image is critical for real-time performance. A desktop environment introduces background processes that compete for CPU cycles and increase scheduling jitter. Look for 64 bit debian 12 version as thats most suitable for this project.
+> **Important:** A minimal OS image is critical for real-time performance. A desktop environment introduces background processes that compete for CPU cycles and increase scheduling jitter. Use the 64-bit Debian 12 image, as it is the most suitable base for this project.
 
 ### 2.1 Flash the OS
 
@@ -54,25 +56,25 @@ sudo raspi-config
 
 Configure the following:
 
-| Setting             | Path                                                            |
-|---------------------|-----------------------------------------------------------------|
-| CPU Governor        | Performance Options → CPU Governor → `performance`              |
-| Expand Filesystem   | Advanced Options → Expand Filesystem                            |
-| Enable Camera       | Interface Options → Enable Camera *(if using Pi Camera)*        |
+| Setting           | Path                                                       |
+|-------------------|------------------------------------------------------------|
+| CPU Governor      | Performance Options → CPU Governor → `performance`         |
+| Expand Filesystem | Advanced Options → Expand Filesystem                       |
+| Enable Camera     | Interface Options → Enable Camera *(if using Pi Camera)*   |
 
 Reboot after applying changes.
 
 ### 2.3 CPU Scaling Governor
 
-By default, the Pi 4 uses the `ondemand` governor, which dynamically scales CPU frequency to conserve power. For real-time inference this introduces latency spikes as the CPU transitions between frequency states.
+By default, the Pi 4 uses the `ondemand` governor, which dynamically scales CPU frequency to conserve power. For real-time inference, this introduces latency spikes as the CPU transitions between frequency states.
 
 **Fix:** Lock the CPU at its maximum clock speed (1.5 GHz / 1.8 GHz):
 
 ```bash
-# Set to performance mode (lasts until next reboot)
+# Set to performance mode (persists until next reboot)
 echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 
-# Check if it worked
+# Verify the change
 cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 ```
 
@@ -94,15 +96,14 @@ sudo apt autoremove -y
 Increase swap to 2 GB:
 
 ```bash
-# 2. Increase Swap Space (Required for compiling OpenCV/OpenVINO on Pi 4)
-# Default 100MB is too small; increasing to 2GB to prevent 'Out of Memory' crashes
-# Increase Swap to 2GB for Debian Trixie (Modern rpi-swap service)
+# Increase swap to 2 GB (required to prevent out-of-memory crashes during OpenCV/OpenVINO compilation)
+# Default 100 MB is insufficient for this workload
 sudo mkdir -p /etc/rpi/swap.conf.d/
 echo -e "[File]\nFixedSizeMiB=2048" | sudo tee /etc/rpi/swap.conf.d/80-use-swapfile.conf
 sudo reboot
 ```
 
-> **Tip:** If builds still fail due to OOM, increase `CONF_SWAPSIZE` to `8192`.
+> **Tip:** If builds still fail due to OOM errors, increase `FixedSizeMiB` to `8192`.
 
 ---
 
@@ -111,20 +112,19 @@ sudo reboot
 ### 4.1 Synchronize System Clock
 
 ```bash
-# 1. Fix System Time (Critical for GPG signatures and repository access)
-# Manually set the clock to current time to avoid 'Not live until' errors
+# Manually synchronize the clock to avoid GPG signature errors ("Not live until")
 sudo date -s "$(wget -qSO- --max-redirect=0 google.com 2>&1 | grep Date: | cut -d' ' -f5-8)Z"
 ```
 
 ### 4.2 Update & Install Build Toolchain
 
 ```bash
-# 3. Refresh Repositories & Full System Upgrade
-# Use 'full-upgrade' for Debian Trixie to properly resolve dependency shifts
+# Refresh repositories and perform a full system upgrade
+# Use 'full-upgrade' on Debian Bookworm to properly resolve dependency changes
 sudo apt update && sudo apt full-upgrade -y
 
-# 4. Install Build Tools and High-Performance Libraries
-# Includes libtbb-dev for threading and libopenblas for Arm optimization
+# Install build tools and high-performance libraries
+# Includes libtbb-dev for threading and libopenblas for ARM-optimized math
 sudo apt install -y \
   build-essential \
   cmake \
@@ -158,21 +158,21 @@ KleidiAI provides highly optimized NEON SIMD micro-kernels for AI workloads on A
 ### 5.1 Build and Install KleidiCV
 
 ```bash
-# 1. Clone the repository
+# Clone the repository
 git clone https://gitlab.arm.com/kleidi/kleidicv.git
 cd kleidicv
 
-# 2. Configure with RPi 4 specific optimizations
-# -mcpu=cortex-a72: Targets the Pi 4's specific CPU cores
+# Configure with Raspberry Pi 4-specific optimizations
+# -mcpu=cortex-a72 targets the Pi 4's CPU cores directly
 cmake -S . -B build \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_FLAGS="-mcpu=cortex-a72" \
       -DCMAKE_C_FLAGS="-mcpu=cortex-a72"
 
-# 3. Build using all 4 cores
+# Build using all 4 cores
 cmake --build build --parallel $(nproc)
 
-# 4. Install headers and libraries to system paths
+# Install headers and libraries to system paths
 sudo cmake --install build
 ```
 
@@ -185,11 +185,11 @@ OpenCV must be built from source with the `WITH_KLEIDICV` flag to utilize the NE
 ### 6.1 Clone Repositories
 
 ```bash
-# 1. Clone both main and contrib modules (contrib contains extra optimization paths)
-# Navigate to your home or workspace
 cd ~
 sudo apt update
 sudo apt install -y python3-dev python3-numpy python3-setuptools
+
+# Clone both main and contrib modules (contrib contains additional optimization paths)
 git clone --branch 4.x https://github.com/opencv/opencv.git
 git clone --branch 4.x https://github.com/opencv/opencv_contrib.git
 ```
@@ -197,7 +197,6 @@ git clone --branch 4.x https://github.com/opencv/opencv_contrib.git
 ### 6.2 Configure and Build
 
 ```bash
-# 2. The Optimized Build Configuration
 mkdir -p opencv/build && cd opencv/build
 
 cmake -D CMAKE_BUILD_TYPE=RELEASE \
@@ -219,15 +218,13 @@ cmake -D CMAKE_BUILD_TYPE=RELEASE \
       -D CMAKE_CXX_FLAGS="-mcpu=cortex-a72 -O3 -ftree-vectorize" \
       -D CMAKE_C_FLAGS="-mcpu=cortex-a72 -O3 -ftree-vectorize" ..
 
-
-# 4. Build and Install (This will take 1-2 hours)
-#Parallel build using all CPU cores
+# Build and install — this will take approximately 1–2 hours
 make -j$(nproc)
 sudo make install
 sudo ldconfig
 ```
 
-> **Note:** The build takes approximately 1–2 hours on a Pi 4 with active cooling. Ensure adequate swap space (see [Section 3](#3-memory-configuration)).
+> **Note:** The build takes approximately 1–2 hours on a Pi 4 with active cooling. Ensure adequate swap space is configured (see [Section 3](#3-memory-configuration)).
 
 ---
 
@@ -237,31 +234,20 @@ OpenVINO is the preferred inference backend for VIGIA on ARM. It provides:
 
 - **JIT compilation** of model graphs at load time
 - **KleidiAI integration** for NEON-optimized GEMM kernels on Cortex-A72
-- **Runtime kernel selection** tuned for ARMv8-A microarchitecture
+- **Runtime kernel selection** tuned for the ARMv8-A microarchitecture
 - **Async inference API** with pre-allocated tensor buffers
 
-### Option A: Pre-compiled Archive (⚠️ Not Recommended)
+### Option A: Pre-compiled Archive (Not Recommended)
 
 > **Warning — SIGBUS on Raspberry Pi OS.**
 >
-> As of early 2026, there is **no pre-compiled OpenVINO archive** whose memory
-> alignment assumptions match Raspberry Pi OS (Debian 12 Bookworm, aarch64).
-> The official archives target Ubuntu 20.04/22.04 ARM64, which uses different
-> `mmap` page alignment and library versioning. On Pi OS this manifests as a
-> **SIGBUS (Bus error)** during model compilation — specifically when the ARM
-> CPU plugin attempts unaligned vector loads on weight tensors that were
-> memory-mapped from the `.bin` file.
+> As of early 2026, there is **no pre-compiled OpenVINO archive** whose memory alignment assumptions match Raspberry Pi OS (Debian 12 Bookworm, aarch64). The official archives target Ubuntu 20.04/22.04 ARM64, which uses different `mmap` page alignment and library versioning. On Pi OS this manifests as a **SIGBUS (Bus error)** during model compilation — specifically when the ARM CPU plugin attempts unaligned vector loads on weight tensors that were memory-mapped from the `.bin` file.
 >
-> We discovered this during development: the pre-compiled plugin would crash
-> deterministically at `ov::Core::compile_model()` with signal 7 (SIGBUS),
-> even on a clean Debian 12 installation. Disabling `mmap` via
-> `ov::enable_mmap(false)` partially mitigated the crash, but inference was
-> unreliable and significantly slower due to fallback scalar paths.
+> This was encountered during development: the pre-compiled plugin crashed deterministically at `ov::Core::compile_model()` with signal 7 (SIGBUS), even on a clean Debian 12 installation. Disabling `mmap` via `ov::enable_mmap(false)` partially mitigated the crash, but inference remained unreliable and significantly slower due to fallback scalar code paths.
 >
-> **Use Option B (build from source) instead.** It is the only path that
-> produces a working, optimized binary for Raspberry Pi OS.
+> **Use Option B (build from source) instead.** It is the only path that produces a working, optimized binary for Raspberry Pi OS.
 
-If you still want to try the pre-compiled route (e.g., for a quick feasibility check on Ubuntu ARM64), the commands are:
+If you still want to attempt the pre-compiled route (e.g., for a quick feasibility check on Ubuntu ARM64), the commands are:
 
 ```bash
 # Download an ARM64 archive (may not work on Pi OS — see warning above)
@@ -276,15 +262,9 @@ source ~/.bashrc
 
 ### Option B: Build from Source with KleidiAI (Recommended)
 
-Building OpenVINO from source is the **only reliable path** on Raspberry Pi OS.
-This compiles the ARM CPU plugin natively, ensuring correct memory alignment,
-and links KleidiAI micro-kernels directly into the plugin for optimized
-GEMM operations on Cortex-A72.
+Building OpenVINO from source is the **only reliable path** on Raspberry Pi OS. This compiles the ARM CPU plugin natively, ensuring correct memory alignment, and links KleidiAI micro-kernels directly into the plugin for optimized GEMM operations on Cortex-A72.
 
-> **Note on KleidiAI:** You do **not** need to clone or build KleidiAI
-> separately. OpenVINO's build system fetches and compiles KleidiAI
-> automatically when `-DENABLE_KLEIDIAI=ON` is set. The KleidiAI source is
-> already bundled as a dependency inside the OpenVINO repository.
+> **Note on KleidiAI:** You do **not** need to clone or build KleidiAI separately. OpenVINO's build system fetches and compiles KleidiAI automatically when `-DENABLE_KLEIDIAI=ON` is set. The KleidiAI source is bundled as a dependency inside the OpenVINO repository.
 
 #### 7.1 Install Build Prerequisites
 
@@ -312,7 +292,7 @@ cd ~
 git clone --recurse-submodules https://github.com/openvinotoolkit/openvino.git
 cd openvino
 
-# Checkout a known-good release tag
+# Check out a known-good release tag
 git checkout 2025.4.2
 git submodule update --init --recursive
 ```
@@ -338,17 +318,20 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       ..
 ```
 
-> **Flag rationale:**
-> - `ENABLE_KLEIDIAI=ON` — links KleidiAI NEON micro-kernels for INT8/FP32 GEMM
-> - `ENABLE_INTEL_*=OFF` — disables x86-only plugins (GPU, NPU) that don't exist on ARM
-> - `THREADING=TBB` — uses the system TBB for multi-core dispatch
-> - `-mcpu=cortex-a72` — generates code tuned for the Pi 4's specific core
+**Flag rationale:**
+
+| Flag | Purpose |
+|------|---------|
+| `ENABLE_KLEIDIAI=ON` | Links KleidiAI NEON micro-kernels for INT8/FP32 GEMM |
+| `ENABLE_INTEL_*=OFF` | Disables x86-only plugins (GPU, NPU) that do not exist on ARM |
+| `THREADING=TBB` | Uses the system TBB library for multi-core dispatch |
+| `-mcpu=cortex-a72` | Generates code tuned specifically for the Pi 4's core |
 
 #### 7.4 Build and Install
 
 ```bash
-# Build using all 4 cores. This takes ~2–3 hours on a Pi 4 with active cooling.
-# Ensure swap is at least 2 GB (see Section 3).
+# Build using all 4 cores — takes approximately 2–3 hours with active cooling
+# Ensure swap is at least 2 GB (see Section 3)
 make -j$(nproc)
 
 # Install to /opt/intel/openvino_2025
@@ -370,7 +353,7 @@ source ~/.bashrc
 #### 7.6 Verify the Build
 
 ```bash
-# Confirm the ARM CPU plugin exists and contains KleidiAI
+# Confirm the ARM CPU plugin exists
 ls /opt/intel/openvino_2025/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so
 
 # Verify KleidiAI is linked into the plugin
@@ -387,7 +370,7 @@ cd ~
 git clone https://github.com/BlueWaves-afk/vigia-raspi.git
 cd vigia-raspi
 
-# Create and enter build directory
+# Create and enter the build directory
 mkdir -p build && cd build
 
 # Configure the project with CMake
@@ -398,10 +381,10 @@ cmake -DOpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake ..
 # Compile the visual test using all 4 cores
 make system_visual_test -j$(nproc)
 
-# Set CPU governor to maximum performance
+# Lock the CPU governor to maximum performance
 echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 
-# Run the test (assuming hazard.mp4 and models/ are in your project root)
+# Run the test (assumes hazard.mp4 and models/ are in your project root)
 ./system_visual_test --video ../hazard.mp4
 ```
 
@@ -411,7 +394,7 @@ echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_gove
 
 ### 9.1 Overclock (Optional)
 
-> ⚠️ **Warning:** Overclocking requires adequate cooling and may void your warranty. Recommended for advanced users only.
+> **Warning:** Overclocking requires adequate cooling and may void your warranty. Recommended for advanced users only.
 
 Edit `/boot/config.txt`:
 
@@ -432,27 +415,23 @@ sudo raspi-config
 
 ### 9.3 Thread Affinity
 
-VIGIA **automatically pins threads to specific cores** at startup — no manual configuration required. The pinning is implemented in two places:
+VIGIA **automatically pins threads to specific cores** at startup — no manual configuration is required. The pinning is implemented in two locations:
 
-- **`Coordinator::captureLoop()`** and **`Coordinator::processLoop()`** in `src/coordinator.cpp` — pin themselves via `pthread_setaffinity_np` at the top of each function, plus `Coordinator::start()` calls `pinThread()` on both threads after launch.
+- **`Coordinator::captureLoop()`** and **`Coordinator::processLoop()`** in `src/coordinator.cpp` — each pins itself via `pthread_setaffinity_np` at function entry. `Coordinator::start()` additionally calls `pinThread()` on both threads after launch.
 - **`main()`** in `tests/system_visual_test.cpp` — pins the UI/dashboard thread via `pinCurrentThreadToCore(3)`.
 
 All pinning is guarded by `#if defined(__linux__) && defined(__aarch64__)` so it compiles as a no-op on macOS.
 
 #### Core Assignment Map
 
-| Thread                     | Core   | Rationale                                            |
-|----------------------------|--------|------------------------------------------------------|
-| Capture (`captureLoop`)    | Core 0 | Dedicated to camera I/O and frame decode             |
-| Process (`processLoop`)    | Core 1 | Runs YOLO + MiDaS inference + fusion sequentially    |
-| TBB workers (OpenVINO)     | Core 2 | Left unassigned — TBB scheduler uses available cores |
-| UI / Dashboard (`main`)    | Core 3 | Rendering, dashboard compositing, keyboard input     |
+| Thread                   | Core   | Rationale                                                   |
+|--------------------------|--------|-------------------------------------------------------------|
+| Capture (`captureLoop`)  | Core 0 | Dedicated to camera I/O and frame decode                    |
+| Process (`processLoop`)  | Core 1 | Runs YOLO + MiDaS inference and fusion sequentially         |
+| TBB workers (OpenVINO)   | Core 2 | Left unassigned — TBB scheduler uses available cores        |
+| UI / Dashboard (`main`)  | Core 3 | Rendering, dashboard compositing, and keyboard input        |
 
-> **Why 4 threads on 4 cores?** The Pi 4 has four identical Cortex-A72 cores.
-> Pinning eliminates cross-core migration, which would flush the L1/L2 cache
-> and add ~1–2 ms of jitter per migration. Core 2 is intentionally left
-> unpinned so that OpenVINO's internal TBB threads can use it for parallel
-> operator execution without competing with the capture or UI threads.
+> **Why 4 threads on 4 cores?** The Pi 4 has four identical Cortex-A72 cores. Pinning eliminates cross-core migration, which flushes the L1/L2 cache and adds approximately 1–2 ms of jitter per migration. Core 2 is intentionally left unpinned so that OpenVINO's internal TBB threads can use it for parallel operator execution without competing with the capture or UI threads.
 
 This pinning strategy ensures deterministic scheduling and prevents camera I/O from competing with inference workloads.
 
@@ -460,19 +439,19 @@ This pinning strategy ensures deterministic scheduling and prevents camera I/O f
 
 ## 10. Remote Development with VNC
 
-VIGIA's visual tests (`system_visual_test`) require a display. When developing remotely via SSH, you'll need a VNC server to view the OpenCV GUI output.
+VIGIA's visual tests (`system_visual_test`) require a display. When developing remotely over SSH, a VNC server is needed to view the OpenCV GUI output.
 
 ### Why TigerVNC over RealVNC?
 
-| Aspect | TigerVNC | RealVNC |
-|--------|----------|--------|
-| Stability | Excellent | Frequent glitches, dropped frames |
-| Latency | Low | Variable |
-| Resource usage | Lightweight | Heavier background services |
-| Configuration | Simple CLI | GUI-centric, complex |
-| Open source | Yes | Proprietary (free tier limited) |
+| Aspect           | TigerVNC                     | RealVNC                          |
+|------------------|------------------------------|----------------------------------|
+| Stability        | Excellent                    | Frequent glitches, dropped frames |
+| Latency          | Low                          | Variable                         |
+| Resource usage   | Lightweight                  | Heavier background services      |
+| Configuration    | Simple CLI                   | GUI-centric, complex             |
+| Open source      | Yes                          | Proprietary (free tier limited)  |
 
-RealVNC (pre-installed on Raspberry Pi OS) often exhibits visual artifacts, connection drops, and laggy response when streaming OpenCV windows. TigerVNC provides a more reliable experience for real-time visualization.
+RealVNC (pre-installed on Raspberry Pi OS) frequently exhibits visual artifacts, connection drops, and high latency when streaming OpenCV windows. TigerVNC provides a more reliable experience for real-time visualization.
 
 ### Install TigerVNC (via TightVNC)
 
@@ -481,16 +460,15 @@ RealVNC (pre-installed on Raspberry Pi OS) often exhibits visual artifacts, conn
 sudo apt remove -y --purge realvnc-vnc-server realvnc-vnc-viewer
 sudo apt autoremove -y
 
-# Clean up leftover config
+# Clean up leftover configuration
 rm -rf ~/.vnc
 
-# Install TightVNC (most reliable on Pi OS)
+# Install TightVNC
 sudo apt update
 sudo apt install -y tightvncserver
 
 # Set VNC password (first time only)
 vncpasswd
-# Enter a password (e.g., "vigia123") — will be used to connect from Mac
 ```
 
 ### Start VNC Server on Pi
@@ -499,16 +477,16 @@ vncpasswd
 # Start VNC on display :1 with 720p resolution
 vncserver :1 -geometry 1280x720 -depth 24
 
-# Verify it's running
+# Verify the server is running
 vncserver -list
 
-# You should see:
+# Expected output:
 #   TigerVNC server sessions:
 #   X DISPLAY #     PROCESS ID
 #   :1              12345
 ```
 
-### Connect from Mac
+### Connect from macOS
 
 **Option 1 — Terminal:**
 ```bash
@@ -518,10 +496,10 @@ open vnc://raspi4B.local:5901
 **Option 2 — Finder:**
 1. Press `Cmd + K` (or Finder → Go → Connect to Server)
 2. Enter: `vnc://raspi4B.local:5901`
-3. Click Connect
-4. Enter the VNC password you set earlier
+3. Click **Connect**
+4. Enter the VNC password set earlier
 
-> **Note:** Display `:1` maps to port `5901`, `:2` to `5902`, etc.
+> **Note:** Display `:1` maps to port `5901`, `:2` to `5902`, and so on.
 
 ### Run VIGIA Tests over VNC
 
@@ -537,7 +515,7 @@ cd ~/vigia-raspi/build
 ./system_visual_test -F --video hazard.mp4
 ```
 
-The OpenCV window will appear in the VNC session, not on your Mac's local display.
+The OpenCV window will appear in the VNC session, not on your local display.
 
 ### VNC Management Commands
 
@@ -551,41 +529,39 @@ vncserver -kill :1
 # Kill all sessions
 vncserver -kill :*
 
-# Check what's using VNC ports
+# Check what processes are using VNC ports
 ps aux | grep vnc
 ```
 
 ### Complete SSH + VNC Workflow
 
-Here's the typical workflow for remote development:
-
 ```bash
-# 1. SSH into the Pi from Mac
+# 1. SSH into the Pi
 ssh vigiasense@raspi4B.local
 
-# 2. Start VNC server (if not already running)
+# 2. Start the VNC server (if not already running)
 vncserver :1 -geometry 1280x720 -depth 24
 
-# 3. Open a new Mac terminal and connect via VNC
+# 3. Open a new terminal on your Mac and connect via VNC
 open vnc://raspi4B.local:5901
 
 # 4. In the VNC session, run visual tests
 cd ~/vigia-raspi/build
 ./system_visual_test -F --video hazard.mp4
 
-# 5. When done, kill VNC to free resources
+# 5. When finished, stop VNC to free resources
 vncserver -kill :1
 ```
 
 ### Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| "Connection refused" on Mac | Ensure VNC server is running: `vncserver -list` |
-| Black screen in VNC | Start a window manager: `startlxde &` or just run your test |
-| Multiple VNC sessions running | Kill all: `vncserver -kill :*` then start fresh |
-| Laggy display | Reduce resolution: `-geometry 1024x600` |
-| Authentication failure | Re-run `vncpasswd` to reset password |
+| Issue                              | Solution                                                |
+|------------------------------------|---------------------------------------------------------|
+| "Connection refused" on Mac        | Verify VNC server is running: `vncserver -list`         |
+| Black screen in VNC                | Start a window manager: `startlxde &`, or run your test |
+| Multiple VNC sessions running      | Kill all: `vncserver -kill :*`, then start fresh        |
+| Laggy display                      | Reduce resolution: `-geometry 1024x600`                 |
+| Authentication failure             | Re-run `vncpasswd` to reset the password                |
 
 ---
 
@@ -602,115 +578,116 @@ vncserver -kill :1
 ```bash
 ./system_visual_test --video road.mp4
 ```
+
 <img width="1440" height="867" alt="image" src="https://github.com/user-attachments/assets/770f6d3d-62bc-4e51-8e25-66b1935a8685" />
 
 **Expected console output indicators:**
 
-- ✅ Stable FPS within target range
-- ✅ CPU temperature below thermal throttle threshold
-- ✅ Adaptive stride adjustments logged at runtime
+- Stable FPS within the target range
+- CPU temperature below the thermal throttle threshold
+- Adaptive stride adjustments logged at runtime
 
-> **Thermal note:** If the CPU exceeds ~75 °C, VIGIA automatically adjusts inference cadence to maintain real-time behavior.
+> **Thermal note:** If the CPU exceeds approximately 75 °C, VIGIA automatically adjusts inference cadence to maintain real-time behavior.
 
 ---
 
 ## 12. Stack Rationale
 
-| Framework        | ARM CPU Efficiency | Notes                                   |
-|------------------|--------------------|-----------------------------------------|
-| **OpenVINO**     | ⭐⭐⭐⭐⭐             | JIT + KleidiAI + NEON — best determinism|
-| TFLite           | ⭐⭐⭐⭐              | Good, but less runtime optimization     |
-| ONNX Runtime     | ⭐⭐⭐               | Limited ARM-specific tuning             |
+| Framework    | ARM CPU Efficiency | Notes                                          |
+|--------------|--------------------|------------------------------------------------|
+| **OpenVINO** | Excellent          | JIT + KleidiAI + NEON — best determinism       |
+| TFLite       | Good               | Good performance, but less runtime optimization |
+| ONNX Runtime | Adequate           | Limited ARM-specific tuning                    |
 
 This stack prioritizes **determinism**, **thermal stability**, and **real-time guarantees** over raw throughput — the defining requirements for safety-critical edge inference on resource-constrained hardware.
 
 ---
 
+## 13. Known Issues & Solutions
+
+This section documents the engineering challenges encountered during development and the solutions that were implemented.
+
+### Hardware & OS Configuration
+
+**Issue: GPU Disabled in Headless Operation**
+The Pi 4 disables its VideoCore GPU when no monitor is attached, forcing the CPU to handle all desktop rendering and causing severe VNC lag.
+
+*Solution:* Force a virtual monitor by appending `video=HDMI-A-1:1280x720@60D` to `/boot/firmware/cmdline.txt`. This keeps the GPU active for hardware-accelerated rendering.
+
+**Issue: VNC Clipboard Synchronization Failure**
+Switching from the Wayland compositor to X11 resolved clipboard sync issues between macOS and the Pi.
+
+*Solution:* Use `raspi-config` to set the backend to X11 (System → Boot → Desktop Autologin; Advanced → Wayland → X11), then install and run `autocutsel -fork` to bridge the clipboard.
+
+### Inference Stability
+
+**Issue: SIGBUS Crash During Model Compilation**
+The pre-compiled OpenVINO binary crashed at `ov::Core::compile_model()` with signal 7 (SIGBUS) due to memory alignment mismatches between the Ubuntu-targeted archive and Raspberry Pi OS.
+
+*Solution:* Build OpenVINO 2025.4.2 from source with `-DENABLE_KLEIDIAI=ON`. This ensures 16-byte alignment guards are active and all SIMD paths are compiled natively for the Cortex-A72.
+
+**Issue: SD Card Memory Faults (`mmap`)**
+Memory-mapping model weights from an SD card caused intermittent hangs and crashes.
+
+*Solution:* Disable memory mapping explicitly via `ov::enable_mmap(false)`, forcing the model weights to be loaded entirely into RAM.
+
+**Issue: Zero Detections (Color Space Mismatch)**
+The C++ pipeline produced no detections because OpenCV's capture returns BGR frames, while the model expects RGB input.
+
+*Solution:* Rewrote the preprocessing loop using ARM NEON SIMD de-interleaving to convert BGR to RGB and transpose the tensor to NCHW in a single optimized pass.
+
+### Quantization & Model Accuracy
+
+**Issue: Recall Loss After INT8 Quantization**
+Initial INT8 quantization caused the model to miss small or distant potholes that were clearly visible in the FP32 version.
+
+*Solution:* Applied Accuracy-Aware Quantization and Quantization-Aware Training (QAT). A significantly lower confidence threshold (0.008) was used to account for the compressed score range produced by 8-bit arithmetic, with the fusion engine filtering the resulting noise.
+
+**Issue: Bounding Box Merging After Quantization**
+Rounding errors caused the model to merge adjacent potholes into a single oversized bounding box.
+
+*Solution:* Implemented Letterbox preprocessing to maintain exact 1:1 aspect ratios, and added a custom post-NMS cleanup step with an IoU threshold of 0.45 for the INT8 pipeline.
+
+**Issue: MiDaS Depth Model Failure at INT8**
+Quantizing the MiDaS v2.1 depth estimation model to INT8 produced a uniformly black depth map, rendering it non-functional.
+
+*Solution:* Determined that MiDaS requires higher dynamic range for geometric analysis. A hybrid-precision pipeline was adopted: MiDaS runs in FP32/FP16 while only the YOLO backbone is quantized.
+
+### Throughput & Latency
+
+**Issue: Inference Precision Conflict (2–4 FPS)**
+The system was implicitly up-converting the INT8 model back to FP32 at runtime, negating all quantization speed gains.
+
+*Solution:* Set `ov::hint::inference_precision` to dynamic (undefined), allowing the model to remain in its native INT8 execution path.
+
+**Issue: Parallelism Overhead (3 FPS vs. 10 FPS)**
+The multi-threaded architecture performed significantly worse than single-threaded benchmarks due to contention on the Pi's shared L2 cache.
+
+*Solution:* Replaced the parallel pipeline with a sequential processing loop to maximize cache locality for the active model. Display sampling was introduced to skip unnecessary UI renders without reducing the background inference rate.
+
+**Issue: UI Back-Pressure Blocking Inference**
+The `cv::waitKey(1)` call blocked the entire AI pipeline whenever the display server lagged.
+
+*Solution:* Decoupled visualization into a separate thread, allowing the inference core to continue processing frames regardless of monitor refresh rate.
+
+### Asynchronous Pipeline
+
+**Issue: Pipeline Stall on Skipped MiDaS Frames**
+The `InstrumentationBus` stalled indefinitely when waiting for depth data from MiDaS frames that the Adaptive Control logic had deliberately skipped.
+
+*Solution:* Replaced the blocking fusion model with a YOLO-first transparency model. YOLO detections are published immediately; depth and temporal enrichment data are treated as optional layers.
+
+**Issue: Thread State Isolation**
+Using `thread_local` variables to track frame indices caused the Perception and Analytical threads to maintain independent, unsynchronized counters, producing mismatched telemetry.
+
+*Solution:* Replaced `thread_local` with `std::atomic<std::uint64_t>` to create a shared, thread-safe global frame index, ensuring all agents report against a consistent timeline.
+
+---
+
 ## Code of Conduct
 
-All contributors are expected to follow respectful, professional communication. Harassment, discrimination, and disruptive behavior will not be tolerated.
+All contributors are expected to maintain respectful, professional communication. Harassment, discrimination, and disruptive behavior will not be tolerated.
 
-## Questions?
+## Questions
 
 If you encounter issues with the build process or have questions about the architecture, please [open an issue](https://github.com/BlueWaves-afk/vigia-raspi/issues) on the repository.
-
-That is a massive milestone, Tom! Seeing that **VIGIA** dashboard finally pop up on your MacBook with the camera feed and those **KleidiAI** symbols working together is a huge win for the project.
-
-Here is the finalized setup sequence for your GitHub README, structured for the **NIT Rourkela** environment and the Raspberry Pi 4's specific 2026 hardware constraints.
-
----
-
-## 🛠️ VIGIA: High-Performance Setup (RPi 4 + OpenVINO 2025)
-
-### 1. Hardware & OS Foundation
-
-Before running the vision stack, the Pi 4 must be configured to prioritize the GPU and hardware camera stack.
-
-```bash
-# 1. Force GPU acceleration for headless VNC and set resolution
-echo "video=HDMI-A-1:1280x720@60D" | sudo tee -a /boot/firmware/cmdline.txt
-
-# 2. Configure OS for Desktop Autologin and X11 Backend
-# (Use raspi-config: System -> Boot -> Desktop Autologin; Advanced -> Wayland -> X11)
-sudo raspi-config 
-
-# 3. Install the Camera and GStreamer hardware drivers
-sudo apt update && sudo apt install -y \
-    libcamera-tools gstreamer1.0-libcamera \
-    gstreamer1.0-plugins-bad gstreamer1.0-plugins-good \
-    realvnc-vnc-server autocutsel
-
-```
-
-### 2. Environment & Runtime
-
-Your source-built OpenVINO version is optimized for the **Cortex-A72** architecture.
-
-```bash
-# Initialize OpenVINO 2025.4.2 (KleidiAI Optimized)
-source /opt/intel/openvino_2025/setupvars.sh
-
-# Force the CPU plugin to use the high-performance ARM backends
-export OV_CPU_BACKEND_PATH=/opt/intel/openvino_2025/runtime/lib/aarch64
-export OV_CPU_ARM_ENABLE_FP16=1
-
-# Sync clipboard between MacBook and Pi
-autocutsel -fork
-
-```
-
-### 3. Build & Launch
-
-Build the C++ pipeline using the **GStreamer** backend for the lowest possible latency.
-
-```bash
-cd ~/vigia-raspi && mkdir -p build && cd build
-cmake -DOpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake ..
-make -j2
-
-# Run VIGIA with the Live Camera Pipeline
-./system_visual_test --cam 0
-
-```
-
----
-
-## 🚀 Why This Method is Superior
-
-| Feature | Previous Method (V4L2 / Generic) | New VIGIA Stack (GStreamer + KleidiAI) |
-| --- | --- | --- |
-| **Inference Engine** | Generic C++ reference code. | **KleidiAI + NEON** assembly kernels. |
-| **Camera Latency** | Legacy V4L2 wrapper (high overhead). | **Direct GStreamer** `libcamerasrc` pipeline. |
-| **Visual Stability** | Frequent **SIGBUS** crashes on ARM. | **Hardened** with 16-byte alignment guards. |
-| **UI Performance** | CPU-based VNC rendering (Laggy). | **GPU-accelerated** "Ghost Monitor" rendering. |
-| **Preprocessing** | Standard OpenCV `cv::resize`. | **KleidiCV HAL** multi-threaded dispatch. |
-
----
-
-### 💡 Key Takeaways for your README
-
-* **The "Shadowing" Fix**: We manually removed the `old_generic` OpenVINO libraries to ensure the linker only sees the 50MB optimized plugin.
-* **Zero-Copy Path**: Using the `BGR` format directly in the GStreamer string eliminates the need for a second `cv::cvtColor` call in the main loop.
-* **Hostel Optimization**: Forcing 720p resolution reduces the VNC network bandwidth by **~50%** compared to 1080p, making it much more usable on NIT's WiFi.
-
-**Since you've got the camera working, would you like me to help you set up a "Headless Mode" launch script that automatically starts VIGIA on boot and logs the hazard detections to a file?**
