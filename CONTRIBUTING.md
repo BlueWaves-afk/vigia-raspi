@@ -633,3 +633,84 @@ All contributors are expected to follow respectful, professional communication. 
 ## Questions?
 
 If you encounter issues with the build process or have questions about the architecture, please [open an issue](https://github.com/BlueWaves-afk/vigia-raspi/issues) on the repository.
+
+That is a massive milestone, Tom! Seeing that **VIGIA** dashboard finally pop up on your MacBook with the camera feed and those **KleidiAI** symbols working together is a huge win for the project.
+
+Here is the finalized setup sequence for your GitHub README, structured for the **NIT Rourkela** environment and the Raspberry Pi 4's specific 2026 hardware constraints.
+
+---
+
+## 🛠️ VIGIA: High-Performance Setup (RPi 4 + OpenVINO 2025)
+
+### 1. Hardware & OS Foundation
+
+Before running the vision stack, the Pi 4 must be configured to prioritize the GPU and hardware camera stack.
+
+```bash
+# 1. Force GPU acceleration for headless VNC and set resolution
+echo "video=HDMI-A-1:1280x720@60D" | sudo tee -a /boot/firmware/cmdline.txt
+
+# 2. Configure OS for Desktop Autologin and X11 Backend
+# (Use raspi-config: System -> Boot -> Desktop Autologin; Advanced -> Wayland -> X11)
+sudo raspi-config 
+
+# 3. Install the Camera and GStreamer hardware drivers
+sudo apt update && sudo apt install -y \
+    libcamera-tools gstreamer1.0-libcamera \
+    gstreamer1.0-plugins-bad gstreamer1.0-plugins-good \
+    realvnc-vnc-server autocutsel
+
+```
+
+### 2. Environment & Runtime
+
+Your source-built OpenVINO version is optimized for the **Cortex-A72** architecture.
+
+```bash
+# Initialize OpenVINO 2025.4.2 (KleidiAI Optimized)
+source /opt/intel/openvino_2025/setupvars.sh
+
+# Force the CPU plugin to use the high-performance ARM backends
+export OV_CPU_BACKEND_PATH=/opt/intel/openvino_2025/runtime/lib/aarch64
+export OV_CPU_ARM_ENABLE_FP16=1
+
+# Sync clipboard between MacBook and Pi
+autocutsel -fork
+
+```
+
+### 3. Build & Launch
+
+Build the C++ pipeline using the **GStreamer** backend for the lowest possible latency.
+
+```bash
+cd ~/vigia-raspi && mkdir -p build && cd build
+cmake -DOpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake ..
+make -j2
+
+# Run VIGIA with the Live Camera Pipeline
+./system_visual_test --cam 0
+
+```
+
+---
+
+## 🚀 Why This Method is Superior
+
+| Feature | Previous Method (V4L2 / Generic) | New VIGIA Stack (GStreamer + KleidiAI) |
+| --- | --- | --- |
+| **Inference Engine** | Generic C++ reference code. | **KleidiAI + NEON** assembly kernels. |
+| **Camera Latency** | Legacy V4L2 wrapper (high overhead). | **Direct GStreamer** `libcamerasrc` pipeline. |
+| **Visual Stability** | Frequent **SIGBUS** crashes on ARM. | **Hardened** with 16-byte alignment guards. |
+| **UI Performance** | CPU-based VNC rendering (Laggy). | **GPU-accelerated** "Ghost Monitor" rendering. |
+| **Preprocessing** | Standard OpenCV `cv::resize`. | **KleidiCV HAL** multi-threaded dispatch. |
+
+---
+
+### 💡 Key Takeaways for your README
+
+* **The "Shadowing" Fix**: We manually removed the `old_generic` OpenVINO libraries to ensure the linker only sees the 50MB optimized plugin.
+* **Zero-Copy Path**: Using the `BGR` format directly in the GStreamer string eliminates the need for a second `cv::cvtColor` call in the main loop.
+* **Hostel Optimization**: Forcing 720p resolution reduces the VNC network bandwidth by **~50%** compared to 1080p, making it much more usable on NIT's WiFi.
+
+**Since you've got the camera working, would you like me to help you set up a "Headless Mode" launch script that automatically starts VIGIA on boot and logs the hazard detections to a file?**
