@@ -95,7 +95,7 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 
 ### 2. Perception (Object Detection)
 
-- Custom **YOLO26** model trained for road hazard classes
+- Custom **YOLO26** model trained for road hazard classes. Base weights obtained from [omarakl/Potholes-detector-using-YOLO26](https://github.com/omarakl/Potholes-detector-using-YOLO26-YOLOv11.git).
 - OpenVINO CPU plugin backend with JIT compilation, compiled with KleidiAI
 - INT8 / FP32 inference precision
 - ARM NEON-optimized HWC→CHW transposition
@@ -103,6 +103,7 @@ VIGIA implements a modular, event-driven perception pipeline. Each processing st
 ### 3. Depth Analysis
 
 - **MiDaS v2.1** monocular depth estimation
+- Note on Quantization: Unlike the YOLO model, MiDaS v2.1 is maintained in FP32/FP16 precision. Experimental INT8 quantization of MiDaS leads to a "black depth map" failure where the dynamic range of depth values is crushed, making geometric verification impossible. 
 - ROI-based depth extraction aligned to detected hazards
 - Plane residual analysis to quantify surface depressions
 - Adaptive stride control under thermal load
@@ -143,7 +144,7 @@ VIGIA ships with two YOLO26 model variants. Understanding their trade-offs is cr
 | Model File | Precision | Size | Confidence Threshold | Use Case |
 |------------|-----------|------|---------------------|----------|
 | `yolo26_model.xml` | FP32 | 9.1 MB | 0.25 | Development, accuracy validation |
-| `yolo26_model0.xml` | INT8 | 2.3 MB | 0.01 | Production deployment, thermal efficiency |
+| `yolo26_model_int8.xml` | INT8 | 2.3 MB | 0.008 | Production deployment, thermal efficiency |
 
 ### Why Different Thresholds?
 
@@ -158,6 +159,19 @@ VIGIA ships with two YOLO26 model variants. Understanding their trade-offs is cr
 | Inference speed | Baseline | ~15-25% faster |
 
 **The INT8 model outputs lower raw confidence scores** due to quantization — a detection that scores 0.85 in FP32 might score 0.3 in INT8. The threshold must be lowered accordingly to capture the same detections.
+
+**The 0.008 Settlement: After extensive testing on road footage, the INT8 detection threshold was settled at 0.008. This permissive threshold recovers "missed" potholes caused by quantization rounding errors, while the subsequent Fusion Engine and Temporal Module filter out any resulting low-confidence noise.
+
+### Post-Quantization Training
+Moving from FP32 to INT8 required a multi-stage accuracy recovery process to prevent detection drops and "merged" bounding boxes.
+## Post-Quantization Training (QAT)
+To restore the detection recall lost during initial INT8 export, a Quantization-Aware Fine-Tuning cycle was implemented. Instead of a standard static calibration, the model was trained for several epochs using "Fake Quantization" nodes. This allows the weights to adapt to the 8-bit bottleneck, effectively teaching the model how to remain accurate despite the loss of numerical precision.
+## Accuracy-Aware Calibration Flow
+The vigia_yolo26_high_acc_int8.xml was generated using a custom NNCF-based calibration script. Key difficulties encountered included:
+
+Coordinate Merging: Initial INT8 exports produced large, "merged" bounding boxes that covered multiple hazards.
+
+The Solution: We implemented Letterbox Preprocessing to maintain exact aspect ratios and a high IOU Threshold (0.45) during post-processing to force the model to separate adjacent detections merged by quantization noise.
 
 ### INT8-Specific Post-Processing
 
