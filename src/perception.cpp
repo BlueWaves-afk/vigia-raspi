@@ -9,6 +9,8 @@
 #include <csignal>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
+#include <openvino/runtime/intel_cpu/properties.hpp>
+#include <openvino/core/preprocess/pre_post_process.hpp>
 
 #if defined(__aarch64__) || defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -233,8 +235,28 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
               << " | conf threshold: " << confThreshold_
               << " | IOU threshold: " << kIouThreshold << std::flush << std::endl;
 
-    // Set layout to NCHW as required by OpenVINO for this model type
-    model->get_parameters()[0]->set_layout("NCHW");
+    // ── Configure preprocessing based on model type ─────────────────
+    // INT8 models: Zero-copy U8 input (NHWC) → model (NCHW)
+    // FP32 models: Standard F32 input with manual HWC→CHW transposition
+    if (isInt8Model_) {
+    ov::preprocess::PrePostProcessor ppp(model);
+    ppp.input().tensor()
+        .set_element_type(ov::element::u8)
+        .set_layout("NHWC")
+        .set_color_format(ov::preprocess::ColorFormat::RGB);
+
+    // ONLY convert the type. Let the model's internal layers handle the division.
+    ppp.input().preprocess()
+        .convert_element_type(ov::element::f32)
+        .scale(255.0f);
+
+    ppp.input().model().set_layout("NCHW");
+    model = ppp.build();
+    std::cout << "[YOLO26] PrePostProcessor: U8 NHWC RGB -> F32 (Internal scaling expected)" << std::endl;
+    } else {
+        // FP32: Set layout directly, manual preprocessing in runInference
+        model->get_parameters()[0]->set_layout("NCHW");
+    }
     ov::set_batch(model, 1);
 
     // ── 5. Explicit plugin inspection: check CPU supported properties
@@ -261,18 +283,28 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
         std::cerr << "[YOLO26] WARNING: Could not query CPU properties: " << e.what() << std::flush << std::endl;
     }
 
-    // ── 6. Disable mmap: forces standard RAM allocation instead of
-    //    memory-mapping the .bin weights file.  Fixes SIGBUS on SD-card
-    //    based systems (Raspberry Pi) where mmap pages can fault if the
-    //    filesystem returns EIO.
-    std::cout << "[TRACE] >>> Disabling mmap for CPU plugin" << std::flush << std::endl;
+    // ── 6. Configure CPU plugin properties BEFORE compile_model ─────────
+    //    These must be set via set_property() on the device, not passed
+    //    to compile_model(), for proper ARM/KleidiAI backend selection.
+    std::cout << "[TRACE] >>> Configuring CPU plugin properties" << std::flush << std::endl;
     try {
+        // Disable mmap: forces standard RAM allocation instead of memory-mapping
+        // the .bin weights file. Fixes SIGBUS on SD-card based systems (Raspberry Pi)
+        // where mmap pages can fault if the filesystem returns EIO.
         core_->set_property("CPU", ov::enable_mmap(false));
         std::cout << "[TRACE] <<< ov::enable_mmap(false) set successfully" << std::flush << std::endl;
+
+        // Threading config for Raspberry Pi 4 (4× Cortex-A72 @ 1.5GHz):
+        // - num_streams(1): Single inference stream for minimum latency
+        // - inference_num_threads(4): Use all 4 cores to parallelize ops
+        // This prevents core saturation and context-switching overhead.
+        core_->set_property("CPU", ov::num_streams(1));
+        core_->set_property("CPU", ov::inference_num_threads(4));
+        std::cout << "[YOLO26] Threading: num_streams=1, inference_num_threads=4" << std::flush << std::endl;
     } catch (const std::exception& e) {
-        // enable_mmap may not exist on older OpenVINO builds — non-fatal
-        std::cerr << "[YOLO26] WARNING: Could not set enable_mmap(false): " << e.what()
-                  << " (continuing without it)" << std::flush << std::endl;
+        // Properties may not exist on older OpenVINO builds — non-fatal
+        std::cerr << "[YOLO26] WARNING: Could not set CPU properties: " << e.what()
+                  << " (continuing with defaults)" << std::flush << std::endl;
     }
 
     // ── 7. compile_model (with SIGBUS recovery) ──────────────────
@@ -326,13 +358,16 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
         }
 
         try {
+            // inference_precision = dynamic lets OpenVINO use native INT8
+            // when the model contains FakeQuantize ops (INT8 quantized).
+            // For FP32 models, it falls back to FP32 automatically.
             compiledModel_ = core_->compile_model(
                 model,
                 device,
                 {
                     ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
                     ov::hint::num_requests(1),
-                    ov::hint::inference_precision(ov::element::f32)
+                    ov::hint::inference_precision(ov::element::dynamic)
                 }
             );
         } catch (const ov::Exception& e) {
@@ -359,17 +394,35 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     modelLoaded_ = true;
 
     const auto& inputShape = compiledModel_.input().get_shape();
-    inputHeight_ = static_cast<int>(inputShape[2]);
-    inputWidth_  = static_cast<int>(inputShape[3]);
+    if (isInt8Model_) {
+        // NHWC: [1, H, W, C]
+        inputHeight_ = static_cast<int>(inputShape[1]);
+        inputWidth_  = static_cast<int>(inputShape[2]);
+    } else {
+        // NCHW: [1, C, H, W]
+        inputHeight_ = static_cast<int>(inputShape[2]);
+        inputWidth_  = static_cast<int>(inputShape[3]);
+    }
 
     std::cout << "[TRACE] >>> input tensor pre-allocation BEGIN (" << inputWidth_ << "x" << inputHeight_ << ")" << std::flush << std::endl;
     // Pre-allocate a persistent input tensor — avoids malloc/free every frame
-    inputTensor_ = ov::Tensor(ov::element::f32,
-                              {1, 3,
-                               static_cast<std::size_t>(inputHeight_),
-                               static_cast<std::size_t>(inputWidth_)});
+    // INT8: U8 tensor in NHWC layout (OpenVINO handles conversion)
+    // FP32: F32 tensor in NCHW layout (manual HWC→CHW transposition)
+    if (isInt8Model_) {
+        inputTensor_ = ov::Tensor(ov::element::u8,
+                      {1,
+                       static_cast<std::size_t>(inputHeight_),
+                       static_cast<std::size_t>(inputWidth_),
+                       3});  // NHWC
+    } else {
+        inputTensor_ = ov::Tensor(ov::element::f32,
+                                  {1, 3,
+                                   static_cast<std::size_t>(inputHeight_),
+                                   static_cast<std::size_t>(inputWidth_)});  // NCHW
+    }
     inferRequest_.set_input_tensor(inputTensor_);
-    std::cout << "[TRACE] <<< input tensor pre-allocation END (success)" << std::flush << std::endl;
+    std::cout << "[TRACE] <<< input tensor pre-allocation END (" 
+              << (isInt8Model_ ? "U8 NHWC" : "F32 NCHW") << ")" << std::flush << std::endl;
 
     std::cout << "[YOLO26] Model Loaded. Input: " << inputWidth_ << "x" << inputHeight_ << "\n";
 }
@@ -398,7 +451,11 @@ cv::Mat PerceptionAgent::preprocess(const cv::Mat& frame, Letterbox& lb) {
                        lb.pad_w, inputWidth_ - new_unpad_w - lb.pad_w,
                        cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
 
-    // 3. Normalize to [0.0, 1.0]
+    // INT8: Return raw U8 Mat — OpenVINO PrePostProcessor handles normalization
+    if (isInt8Model_) {
+        return padded;  // CV_8UC3, zero-copy path
+    }
+    // FP32: Normalize to [0.0, 1.0] and convert to float
     cv::Mat blob;
     padded.convertTo(blob, CV_32F, 1.0 / 255.0);
     return blob;
@@ -406,47 +463,55 @@ cv::Mat PerceptionAgent::preprocess(const cv::Mat& frame, Letterbox& lb) {
 
 std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
     // Guard: if model didn't compile (SIGBUS or error), return empty
-    if (!modelLoaded_) {
-        return {};
-    }
-
     Letterbox lb;
     cv::Mat blob = preprocess(frame, lb);
-
-    // ── HWC → CHW transposition ──────────────────────────────────
-    // Write directly into the pre-allocated input tensor.
-    float* tensorData = inputTensor_.data<float>();
-    const float* blobData = blob.ptr<float>();
     const int planeSize = inputHeight_ * inputWidth_;
 
-    float* dst_r = tensorData;
-    float* dst_g = tensorData + planeSize;
-    float* dst_b = tensorData + planeSize * 2;
-
+    if (isInt8Model_) {
+        uint8_t* tensorData = inputTensor_.data<uint8_t>();
+        const uint8_t* blobData = blob.ptr<uint8_t>();
+        const int totalBytes = inputHeight_ * inputWidth_ * 3;
 #if defined(__aarch64__) || defined(__ARM_NEON)
-    // NEON vld3q deinterleave: loads 4 RGB pixels (12 floats) at once,
-    // splits into 3 contiguous channel planes.  ~4× faster than scalar.
-    int i = 0;
-    const int simdEnd = planeSize - (planeSize % 4);
-    for (; i < simdEnd; i += 4) {
-        float32x4x3_t rgb = vld3q_f32(blobData + i * 3);
-        vst1q_f32(dst_r + i, rgb.val[0]);
-        vst1q_f32(dst_g + i, rgb.val[1]);
-        vst1q_f32(dst_b + i, rgb.val[2]);
-    }
-    // Scalar tail for non-multiple-of-4 remainder
-    for (; i < planeSize; ++i) {
-        dst_r[i] = blobData[i * 3 + 0];
-        dst_g[i] = blobData[i * 3 + 1];
-        dst_b[i] = blobData[i * 3 + 2];
-    }
+        int i = 0;
+        const int simdEnd = totalBytes - (totalBytes % 16);
+        for (; i < simdEnd; i += 16) {
+            uint8x16_t chunk = vld1q_u8(blobData + i);
+            vst1q_u8(tensorData + i, chunk);
+        }
+        for (; i < totalBytes; ++i) {
+            tensorData[i] = blobData[i];
+        }
 #else
-    for (int i = 0; i < planeSize; ++i) {
-        dst_r[i] = blobData[i * 3 + 0];
-        dst_g[i] = blobData[i * 3 + 1];
-        dst_b[i] = blobData[i * 3 + 2];
-    }
+        std::memcpy(tensorData, blobData, static_cast<size_t>(totalBytes));
 #endif
+    } else {
+        float* tensorData = inputTensor_.data<float>();
+        const float* blobData = blob.ptr<float>();
+        float* dst_r = tensorData;
+        float* dst_g = tensorData + planeSize;
+        float* dst_b = tensorData + planeSize * 2;
+#if defined(__aarch64__) || defined(__ARM_NEON)
+        int i = 0;
+        const int simdEnd = planeSize - (planeSize % 4);
+        for (; i < simdEnd; i += 4) {
+            float32x4x3_t rgb = vld3q_f32(blobData + i * 3);
+            vst1q_f32(dst_r + i, rgb.val[0]);
+            vst1q_f32(dst_g + i, rgb.val[1]);
+            vst1q_f32(dst_b + i, rgb.val[2]);
+        }
+        for (; i < planeSize; ++i) {
+            dst_r[i] = blobData[i * 3 + 0];
+            dst_g[i] = blobData[i * 3 + 1];
+            dst_b[i] = blobData[i * 3 + 2];
+        }
+#else
+        for (int i = 0; i < planeSize; ++i) {
+            dst_r[i] = blobData[i * 3 + 0];
+            dst_g[i] = blobData[i * 3 + 1];
+            dst_b[i] = blobData[i * 3 + 2];
+        }
+#endif
+    }
 
     // ── Async inference (OpenVINO 2025) ───────────────────────────
     // Input tensor is already bound via set_input_tensor in loadNetwork.
