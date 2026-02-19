@@ -1,138 +1,110 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
-#include <memory>
-#include <mutex>
-#include <queue>
+#include <chrono>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <openvino/openvino.hpp>
 
-#include "safe_queue.hpp"   // adjust to your project's include path
+#include "safe_queue.hpp"
 
 namespace vigia {
 
-// ── Forward-declared so RequestWrap's OpenVINO members don't leak
-//    into every translation unit that includes this header.
-struct RequestWrap;
-
-/* ─── Public data types ───────────────────────────────────────────── */
+struct FramePacket {
+    std::uint64_t frameId{0};
+    cv::Mat frame;
+    std::chrono::steady_clock::time_point timestamp{};
+};
 
 struct Detection {
     cv::Rect boundingBox;
-    float    confidence{0.0f};
-    int      classId{-1};
-};
-
-struct FramePacket {
-    std::uint64_t frameId{0};
-    cv::Mat       frame;
-    double        timestamp{0.0};
+    float confidence{0.0F};
+    std::int32_t classId{-1};
 };
 
 struct PerceptionResult {
-    std::uint64_t          frameId{0};
+    std::uint64_t frameId{0};
     std::vector<Detection> detections;
-    float                  greatestConfidence{0.0f};
-    double                 timestamp{0.0};
+    float greatestConfidence{0.0F};
+    std::chrono::steady_clock::time_point timestamp{};
 };
 
-/* ═══════════════════════════════════════════════════════════════════
- *  PerceptionAgent
- * ═══════════════════════════════════════════════════════════════════ */
+/**
+ * @brief Helper for Ultralytics-style Letterboxing to maintain aspect ratio
+ */
+struct Letterbox {
+    float scale;
+    int pad_w;
+    int pad_h;
+};
+
 class PerceptionAgent {
 public:
-    // Owning-Core constructor (creates its own ov::Core)
     PerceptionAgent(const std::string& modelXmlPath,
-                    const std::string& device,
+                    const std::string& device = "CPU",
                     int cameraIndex = 0);
-
-    // Shared-Core constructor (avoids duplicate plugin discovery on Pi 4)
     PerceptionAgent(ov::Core& sharedCore,
                     const std::string& modelXmlPath,
-                    const std::string& device,
+                    const std::string& device = "CPU",
                     int cameraIndex = 0);
-
     virtual ~PerceptionAgent();
-
-    // H-HMAS agent-loop entry point
-    void run(SafeQueue<FramePacket>&     inputQueue,
-             SafeQueue<PerceptionResult>& outputQueue,
-             std::atomic<bool>&          running);
 
     virtual bool captureFrame(cv::Mat& frame);
     virtual std::vector<Detection> runInference(const cv::Mat& frame);
+
+    /// Called by the coordinator after YOLO + MiDaS + fusion are all done
+    /// for a given frame index.  Override in instrumented subclasses to
+    /// finalize bus slots.  Default implementation is a no-op.
     virtual void notifyProcessingComplete(std::uint64_t /*frameIndex*/) {}
 
-    bool isModelLoaded() const { return modelLoaded_; }
+    void run(SafeQueue<FramePacket>& inputQueue,
+             SafeQueue<PerceptionResult>& outputQueue,
+             std::atomic<bool>& running);
 
 protected:
-    struct Letterbox {
-        float scale{1.0f};
-        int   pad_w{0};
-        int   pad_h{0};
-    };
-
-    cv::Mat              preprocess(const cv::Mat& frame, Letterbox& lb);
-    std::vector<Detection> postprocess(const ov::Tensor& output,
-                                       const Letterbox&  lb,
-                                       const cv::Size&   origSize);
-    float aggregateConfidence(const std::vector<Detection>& detections) const;
-
-    // ── OpenVINO core ──────────────────────────────────────────────
-    ov::Core  ownedCore_;       // used when no external Core is supplied
-    ov::Core* core_;            // always points to the active Core
-
-    ov::CompiledModel          compiledModel_;
-    ov::Output<const ov::Node> outputTensor_;   // read-only graph metadata, safe to share
-
-    // ── Model metadata ─────────────────────────────────────────────
-    int  inputWidth_{640};
-    int  inputHeight_{640};
-    bool isInt8Model_{false};
-    bool modelLoaded_{false};
-
-    // ── Thresholds ─────────────────────────────────────────────────
-    static constexpr float kConfThresholdFp32 = 0.25f;
-    static constexpr float kConfThresholdInt8 = 0.20f;
-    static constexpr float kIouThreshold      = 0.45f;
-    float confThreshold_{kConfThresholdFp32};
-
-    // ── Camera (fallback capture) ──────────────────────────────────
-    cv::VideoCapture camera_;
-    bool             cameraInitialized_{false};
-    int              cameraIndex_{0};
+    PerceptionAgent() = default;
 
 private:
-    void loadNetwork(const std::string& modelXmlPath,
-                     const std::string& device);
+    void loadNetwork(const std::string& modelXmlPath, const std::string& device);
+    float aggregateConfidence(const std::vector<Detection>& detections) const;
+    
+    // Core Logic
+    cv::Mat preprocess(const cv::Mat& frame, Letterbox& lb);
+    std::vector<Detection> postprocess(const ov::Tensor& output, const Letterbox& lb, const cv::Size& origSize);
 
-    // ════════════════════════════════════════════════════════════════
-    //  Thread-safe InferRequest pool
-    //
-    //  kPoolSize MUST equal the num_requests hint in compile_model().
-    //
-    //  Each RequestWrap owns one InferRequest + one pre-allocated
-    //  ov::Tensor. Callers write into wrap->inputTensor and run
-    //  wrap->inferRequest — no shared state between concurrent calls.
-    //
-    //  getRequest()    – blocks on poolCv_ until a slot is free.
-    //  returnRequest() – pushes the slot back and notifies one waiter.
-    //                    Called inside try/catch in runInference so an
-    //                    exception can never permanently drain the pool.
-    // ════════════════════════════════════════════════════════════════
-    static constexpr std::size_t kPoolSize = 2;  // matches num_requests(2)
+    ov::Core ownedCore_;                  // used when no shared core is provided
+    ov::Core* core_;                       // points to ownedCore_ or external shared core
+    ov::CompiledModel compiledModel_;
+    ov::InferRequest inferRequest_;
+    ov::Tensor inputTensor_;              // pre-allocated, reused every frame
+    ov::Output<const ov::Node> outputTensor_;
 
-    std::queue<std::unique_ptr<RequestWrap>> idleRequests_;
-    mutable std::mutex                       poolMutex_;
-    std::condition_variable                  poolCv_;
+    int cameraIndex_{0};
+    bool cameraInitialized_{false};
+    cv::VideoCapture camera_;
 
-    std::unique_ptr<RequestWrap> getRequest();
-    void returnRequest(std::unique_ptr<RequestWrap> wrap);
+    int inputWidth_{320};
+    int inputHeight_{320};
+    
+    // ── Thresholds (auto-selected based on model quantization) ────────
+    static constexpr float kConfThresholdFp32 = 0.25f;
+    static constexpr float kConfThresholdInt8 = 0.008f;
+    static constexpr float kIouThreshold = 0.45f;
+    float confThreshold_{kConfThresholdFp32};
+    bool isInt8Model_{false};
+
+    /// Set to true only after compile_model() succeeds.
+    /// If false, runInference() returns an empty vector.
+    bool modelLoaded_{false};
+
+public:
+    /// Returns true if the OpenVINO model compiled successfully.
+    bool isModelLoaded() const { return modelLoaded_; }
 };
 
 } // namespace vigia
