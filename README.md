@@ -20,6 +20,11 @@ A multimodal, event-driven perception system with geometry-aware and temporally 
 
 ## Project Overview
 
+<div align="center">
+  <a href="https://www.youtube.com/watch?v=VIDEO_ID">
+    <img src="https://img.youtube.com/vi/cVD0lM7jQQk?si=5I2LdG0cCZ9Rh3w_/maxresdefault.jpg" alt="Watch the video" style="width:100%; max-width:600px;">
+  </a>
+</div>
 VIGIA is a real-time, ARM-optimized road hazard detection system designed for edge deployment on a Raspberry Pi 4 (ARM Cortex-A72). The system performs on-device perception, monocular depth analysis, and risk fusion using a CPU-only stack powered by OpenVINO and OpenCV — without relying on GPUs, cloud inference, or external accelerators.
 
 The project demonstrates a **hardware–software co-design** approach that maximizes performance on constrained ARM edge hardware while maintaining deterministic real-time behavior.
