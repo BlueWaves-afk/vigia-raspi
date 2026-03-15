@@ -13,12 +13,12 @@
 #include "analytical.hpp"
 #include "temporal.hpp"
 #include "fusion.hpp"
+#include "safe_queue.hpp"
 
 namespace vigia {
 
 class Coordinator {
 public:
-    /* ===================== Constructor ===================== */
     Coordinator(
         PerceptionAgent& perception,
         AnalyticalAgent& analytical,
@@ -27,49 +27,51 @@ public:
         int targetFps
     );
 
-    /* ===================== Lifecycle ===================== */
     ~Coordinator();
     void start();
     void stop();
 
 private:
-    /* ===================== Threads ===================== */
     void captureLoop();
     void processLoop();
+    void midasLoop();          // dedicated MiDaS thread on Core 2
 
-    /* ===================== Core Logic ===================== */
     void processFrame();
     void adaptiveControl(long elapsedMs);
     void frameLimiter(long elapsedMs) const;
 
-    /* ===================== Utilities ===================== */
     float readTemperature() const;
     void pinThread(std::thread& t, int coreId);
 
-    /* ===================== Output ===================== */
     void publishResult(const Detection& det, const FusionOutput& out) const;
 
 private:
-    /* ===================== Dependencies ===================== */
     PerceptionAgent& perception_;
     AnalyticalAgent& analytical_;
     TemporalAnalyzer& temporal_;
     FusionEngine& fusion_;
 
-    /* ===================== Timing ===================== */
     long targetFrameTimeMs_;
 
-    /* ===================== Threading ===================== */
     std::atomic<bool> running_;
     std::thread captureThread_;
     std::thread mainThread_;
+    std::thread midasThread_;  // Core 2 — async MiDaS
 
-    /* ===================== Frame Buffer ===================== */
+    // Frame buffer — size 8 to cover MiDaS's ~525ms window at 15 FPS
+    static constexpr std::size_t FRAME_BUFFER_SIZE = 8;
     std::vector<cv::Mat> frameBuffer_;
     std::mutex bufferMutex_;
     std::uint64_t frameIndex_;
 
-    /* ===================== Adaptive Control ===================== */
+    // MiDaS work queue: carries frame + YOLO detections for fusion on Core 2
+    struct MidasWork {
+        std::uint64_t frameIdx;
+        cv::Mat frame;
+        std::vector<Detection> detections;
+    };
+    SafeQueue<MidasWork> midasQueue_;
+
     int midasStride_;
     float cachedTemp_{0.0f};
     std::chrono::steady_clock::time_point lastTempReadTs_{};

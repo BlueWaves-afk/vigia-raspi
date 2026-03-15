@@ -253,26 +253,28 @@ void AnalyticalAgent::loadNetwork(
 
     std::cout << "[TRACE]     MiDaS input: " << inputWidth_ << "x" << inputHeight_ << std::flush << std::endl;
     chwBuffer_.resize(inputWidth_ * inputHeight_ * 3);
+
+    // Pre-allocate preprocessing buffers
+    midasResized_.create(static_cast<int>(inputHeight_), static_cast<int>(inputWidth_), CV_8UC3);
+    midasBlob_.create(static_cast<int>(inputHeight_), static_cast<int>(inputWidth_), CV_32FC3);
+
+    // Wrap output tensor as a persistent cv::Mat header (zero-copy depth output)
+    const ov::Tensor outTensor = inferRequest_.get_tensor(outputTensor_);
+    depthOutput_ = cv::Mat(static_cast<int>(inputHeight_), static_cast<int>(inputWidth_),
+                           CV_32F, const_cast<float*>(outTensor.data<float>()));
 }
 
 /* ===================== Phase 1: MiDaS Inference ===================== */
 
 cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
-    // Guard: if model didn't compile (SIGBUS or error), return empty
-    if (!modelLoaded_) {
-        return cv::Mat();
-    }
+    if (!modelLoaded_) return cv::Mat();
 
-    cv::Mat resized;
-    cv::resize(frame, resized, cv::Size(inputWidth_, inputHeight_));
+    // Resize into pre-allocated buffer, then convert in-place — no intermediate alloc
+    cv::resize(frame, midasResized_, cv::Size(inputWidth_, inputHeight_));
+    midasResized_.convertTo(midasBlob_, CV_32F, 1.0f / 255.0f);
 
-    cv::Mat inputBlob;
-    resized.convertTo(inputBlob, CV_32F, 1.0f / 255.0f);
-
-    // ── HWC → CHW transposition ──────────────────────────────────
-    // Write directly into the pre-allocated CHW buffer.
     float* const chw = chwBuffer_.data();
-    const float* blobData = inputBlob.ptr<float>();
+    const float* blobData = midasBlob_.ptr<float>();
     const int planeSize = static_cast<int>(inputHeight_ * inputWidth_);
 
     float* dst_r = chw;
@@ -327,29 +329,9 @@ cv::Mat AnalyticalAgent::runInference(const cv::Mat& frame) {
         throw;
     }
 
-    const ov::Tensor output = inferRequest_.get_tensor(outputTensor_);
-#if defined(__clang__) || defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-    const float* depthData = output.data<float>();
-#if defined(__clang__) || defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-
-    cv::Mat depthMap(
-        static_cast<int>(inputHeight_),
-        static_cast<int>(inputWidth_),
-        CV_32F
-    );
-
-    std::memcpy(
-        depthMap.data,
-        depthData,
-        inputWidth_ * inputHeight_ * sizeof(float)
-    );
-
-    return depthMap;
+    // depthOutput_ is a cv::Mat header wrapping the output tensor buffer.
+    // Return a clone so the caller owns stable data independent of the next infer().
+    return depthOutput_.clone();
 }
 
 cv::Rect AnalyticalAgent::scaleROIToDepth(
@@ -384,25 +366,15 @@ cv::Rect AnalyticalAgent::scaleROIToDepth(
 cv::Mat AnalyticalAgent::extractDepthROI(
     const cv::Mat& depthMap,
     const cv::Rect& roi
-) const {
+) {
     const cv::Rect boundedROI = clampROIToMat(roi, depthMap);
+    if (boundedROI.empty()) return {};
 
-    if (boundedROI.empty())
-        return {};
-
-    cv::Mat roiDepth = depthMap(boundedROI).clone();
-
-    cv::medianBlur(roiDepth, roiDepth, 5);
-
-    cv::normalize(
-        roiDepth,
-        roiDepth,
-        0.0f,
-        1.0f,
-        cv::NORM_MINMAX
-    );
-
-    return roiDepth;
+    // copyTo reuses roiScratch_ allocation when size matches — no heap alloc
+    depthMap(boundedROI).copyTo(roiScratch_);
+    cv::GaussianBlur(roiScratch_, roiScratch_, cv::Size(3, 3), 0);
+    cv::normalize(roiScratch_, roiScratch_, 0.0f, 1.0f, cv::NORM_MINMAX);
+    return roiScratch_;
 }
 
 /* ===================== Phase 2b: Plane Residual Analysis ===================== */
@@ -418,69 +390,69 @@ DepthResidualStats AnalyticalAgent::computeDepthResiduals(
     const int rows = roiDepth.rows;
     const int cols = roiDepth.cols;
     const int N = rows * cols;
+    const float fN = static_cast<float>(N);
 
-    double sumX = 0, sumY = 0, sumZ = 0;
-    double sumXX = 0, sumYY = 0, sumXY = 0;
-    double sumXZ = 0, sumYZ = 0;
+    float sumX = 0, sumY = 0, sumZ = 0;
+    float sumXX = 0, sumYY = 0, sumXY = 0;
+    float sumXZ = 0, sumYZ = 0;
 
     for (int y = 0; y < rows; ++y)
         for (int x = 0; x < cols; ++x) {
             const float z = roiDepth.at<float>(y, x);
-            sumX += x; sumY += y; sumZ += z;
-            sumXX += x * x; sumYY += y * y;
-            sumXY += x * y;
-            sumXZ += x * z; sumYZ += y * z;
+            const float fx = static_cast<float>(x);
+            const float fy = static_cast<float>(y);
+            sumX += fx; sumY += fy; sumZ += z;
+            sumXX += fx * fx; sumYY += fy * fy;
+            sumXY += fx * fy;
+            sumXZ += fx * z; sumYZ += fy * z;
         }
 
-    const double denom =
-        (sumXX * sumYY * N +
-         2 * sumX * sumY * sumXY -
+    const float denom =
+        (sumXX * sumYY * fN +
+         2.0f * sumX * sumY * sumXY -
          sumXX * sumY * sumY -
          sumYY * sumX * sumX -
-         sumXY * sumXY * N);
+         sumXY * sumXY * fN);
 
-    double a = 0, b = 0, c = 0;
+    float a = 0, b = 0, c = 0;
 
-    if (std::abs(denom) > 1e-6) {
-        a = (sumXZ * sumYY * N +
+    if (std::abs(denom) > 1e-6f) {
+        a = (sumXZ * sumYY * fN +
              sumX * sumY * sumYZ +
              sumXY * sumY * sumZ -
              sumXZ * sumY * sumY -
              sumYY * sumX * sumZ -
-             sumXY * sumYZ * N) / denom;
+             sumXY * sumYZ * fN) / denom;
 
-        b = (sumXX * sumYZ * N +
+        b = (sumXX * sumYZ * fN +
              sumX * sumY * sumXZ +
              sumX * sumXY * sumZ -
              sumXX * sumY * sumZ -
              sumYZ * sumX * sumX -
-             sumXY * sumXZ * N) / denom;
+             sumXY * sumXZ * fN) / denom;
 
-        c = (sumZ - a * sumX - b * sumY) / N;
+        c = (sumZ - a * sumX - b * sumY) / fN;
     }
 
-    double mean = 0.0;
-    double minVal = std::numeric_limits<double>::max();
-    double var = 0.0;
+    float mean = 0.0f;
+    float minVal = std::numeric_limits<float>::max();
+    float var = 0.0f;
 
     for (int y = 0; y < rows; ++y)
         for (int x = 0; x < cols; ++x) {
             const float obs = roiDepth.at<float>(y, x);
-            const float exp = static_cast<float>(a * x + b * y + c);
-            const float r = obs - exp;
+            const float r = obs - (a * static_cast<float>(x) + b * static_cast<float>(y) + c);
             mean += r;
-            minVal = std::min(minVal, static_cast<double>(r));
+            if (r < minVal) minVal = r;
             var += r * r;
         }
 
-    mean /= N;
-    var = (var / N) - (mean * mean);
+    mean /= fN;
+    var = (var / fN) - (mean * mean);
 
-    stats.meanResidual = static_cast<float>(mean);
-    stats.minResidual  = static_cast<float>(minVal);
-    stats.stdResidual  = static_cast<float>(
-        std::sqrt(std::max(0.0, var))
-    );
+    stats.meanResidual = mean;
+    stats.minResidual  = minVal;
+    stats.stdResidual  = std::sqrt(std::max(0.0f, var));
 
     return stats;
 }

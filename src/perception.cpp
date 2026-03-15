@@ -366,7 +366,7 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
                 device,
                 {
                     ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-                    ov::hint::num_requests(2),
+                    ov::hint::num_requests(1),
                     ov::hint::inference_precision(ov::element::dynamic)
                 }
             );
@@ -405,9 +405,6 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     }
 
     std::cout << "[TRACE] >>> input tensor pre-allocation BEGIN (" << inputWidth_ << "x" << inputHeight_ << ")" << std::flush << std::endl;
-    // Pre-allocate a persistent input tensor — avoids malloc/free every frame
-    // INT8: U8 tensor in NHWC layout (OpenVINO handles conversion)
-    // FP32: F32 tensor in NCHW layout (manual HWC→CHW transposition)
     if (isInt8Model_) {
         inputTensor_ = ov::Tensor(ov::element::u8,
                       {1,
@@ -424,66 +421,66 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
     std::cout << "[TRACE] <<< input tensor pre-allocation END (" 
               << (isInt8Model_ ? "U8 NHWC" : "F32 NCHW") << ")" << std::flush << std::endl;
 
+    // Pre-allocate preprocessing buffers — eliminates per-frame heap alloc.
+    // For INT8: preprocPadded_ wraps the tensor data directly (zero-copy write).
+    preprocResized_.create(inputHeight_, inputWidth_, CV_8UC3);
+    if (isInt8Model_) {
+        // Header-only wrap of tensor buffer — copyMakeBorder writes straight into it
+        preprocPadded_ = cv::Mat(inputHeight_, inputWidth_, CV_8UC3,
+                                  inputTensor_.data<uint8_t>());
+    } else {
+        preprocPadded_.create(inputHeight_, inputWidth_, CV_8UC3);
+        preprocBlob_.create(inputHeight_, inputWidth_, CV_32FC3);
+    }
+
+    // Pre-allocate NMS vectors — cleared each frame, never reallocated
+    nmsBoxes_.reserve(128);
+    nmsScores_.reserve(128);
+    nmsClassIds_.reserve(128);
+
     std::cout << "[YOLO26] Model Loaded. Input: " << inputWidth_ << "x" << inputHeight_ << "\n";
 }
 
 /* ===================== Core Logic ===================== */
 
 cv::Mat PerceptionAgent::preprocess(const cv::Mat& frame, Letterbox& lb) {
-    // 1. Convert BGR to RGB
-    cv::Mat rgb;
-    cv::cvtColor(frame, rgb, cv::COLOR_BGR2RGB);
-
-    // 2. Calculate Letterbox (preserves aspect ratio)
-    float r = std::min((float)inputWidth_ / frame.cols, (float)inputHeight_ / frame.rows);
-    int new_unpad_w = std::round(frame.cols * r);
-    int new_unpad_h = std::round(frame.rows * r);
-
+    // Letterbox scaling
+    const float r = std::min(static_cast<float>(inputWidth_)  / frame.cols,
+                             static_cast<float>(inputHeight_) / frame.rows);
+    const int new_unpad_w = static_cast<int>(std::round(frame.cols * r));
+    const int new_unpad_h = static_cast<int>(std::round(frame.rows * r));
     lb.scale = r;
-    lb.pad_w = (inputWidth_ - new_unpad_w) / 2;
+    lb.pad_w = (inputWidth_  - new_unpad_w) / 2;
     lb.pad_h = (inputHeight_ - new_unpad_h) / 2;
 
-    cv::Mat resized;
-    cv::resize(rgb, resized, cv::Size(new_unpad_w, new_unpad_h));
+    // Resize FIRST (on full-res BGR) — cvtColor then operates on small image only.
+    // This reduces cvtColor work by ~9× for 1280×720 → 320×320.
+    cv::resize(frame, preprocResized_, cv::Size(new_unpad_w, new_unpad_h));
+    cv::cvtColor(preprocResized_, preprocResized_, cv::COLOR_BGR2RGB);
 
-    cv::Mat padded;
-    cv::copyMakeBorder(resized, padded, lb.pad_h, inputHeight_ - new_unpad_h - lb.pad_h,
-                       lb.pad_w, inputWidth_ - new_unpad_w - lb.pad_w,
+    // Letterbox pad into pre-allocated buffer.
+    // INT8: preprocPadded_ wraps inputTensor_ data → zero-copy write into tensor.
+    cv::copyMakeBorder(preprocResized_, preprocPadded_,
+                       lb.pad_h, inputHeight_ - new_unpad_h - lb.pad_h,
+                       lb.pad_w, inputWidth_  - new_unpad_w - lb.pad_w,
                        cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
 
-    // INT8: Return raw U8 Mat — OpenVINO PrePostProcessor handles normalization
     if (isInt8Model_) {
-        return padded;  // CV_8UC3, zero-copy path
+        return preprocPadded_;  // already in tensor — caller skips memcpy
     }
-    // FP32: Normalize to [0.0, 1.0] and convert to float
-    cv::Mat blob;
-    padded.convertTo(blob, CV_32F, 1.0 / 255.0);
-    return blob;
+    preprocPadded_.convertTo(preprocBlob_, CV_32F, 1.0 / 255.0);
+    return preprocBlob_;
 }
 
 std::vector<Detection> PerceptionAgent::runInference(const cv::Mat& frame) {
-    // Guard: if model didn't compile (SIGBUS or error), return empty
     Letterbox lb;
     cv::Mat blob = preprocess(frame, lb);
     const int planeSize = inputHeight_ * inputWidth_;
 
     if (isInt8Model_) {
-        uint8_t* tensorData = inputTensor_.data<uint8_t>();
-        const uint8_t* blobData = blob.ptr<uint8_t>();
-        const int totalBytes = inputHeight_ * inputWidth_ * 3;
-#if defined(__aarch64__) || defined(__ARM_NEON)
-        int i = 0;
-        const int simdEnd = totalBytes - (totalBytes % 16);
-        for (; i < simdEnd; i += 16) {
-            uint8x16_t chunk = vld1q_u8(blobData + i);
-            vst1q_u8(tensorData + i, chunk);
-        }
-        for (; i < totalBytes; ++i) {
-            tensorData[i] = blobData[i];
-        }
-#else
-        std::memcpy(tensorData, blobData, static_cast<size_t>(totalBytes));
-#endif
+        // preprocPadded_ wraps inputTensor_ data — copyMakeBorder already wrote
+        // directly into the tensor. Nothing to copy.
+        (void)blob;
     } else {
         float* tensorData = inputTensor_.data<float>();
         const float* blobData = blob.ptr<float>();
@@ -544,13 +541,10 @@ std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, co
     // Indices: 0:x1, 1:y1, 2:x2, 3:y2, 4:score, 5:class_id
     const int num_detections = static_cast<int>(shape[1]);
 
-    // ── Collect all candidates before NMS ───────────────────────────
-    std::vector<cv::Rect> boxes;
-    std::vector<float> scores;
-    std::vector<int> classIds;
-    boxes.reserve(128);
-    scores.reserve(128);
-    classIds.reserve(128);
+    // Use persistent vectors — clear() keeps capacity, avoids per-frame alloc
+    nmsBoxes_.clear();
+    nmsScores_.clear();
+    nmsClassIds_.clear();
 
     for (int i = 0; i < num_detections; ++i) {
         const float* row = data + (i * 6);
@@ -577,28 +571,23 @@ std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, co
         const int bh = static_cast<int>(y2 - y1);
 
         if (bw > 0 && bh > 0) {
-            boxes.emplace_back(bx, by, bw, bh);
-            scores.push_back(confidence);
-            classIds.push_back(static_cast<int>(row[5]));
+            nmsBoxes_.emplace_back(bx, by, bw, bh);
+            nmsScores_.push_back(confidence);
+            nmsClassIds_.push_back(static_cast<int>(row[5]));
         }
     }
 
-    // ── Apply NMS (critical for INT8 merged-box fix) ────────────────
-    // Even for FP32 models, NMS helps clean up overlapping detections
-    std::vector<int> keepIndices = nmsBoxes(boxes, scores, confThreshold_, kIouThreshold);
+    std::vector<int> keepIndices = nmsBoxes(nmsBoxes_, nmsScores_, confThreshold_, kIouThreshold);
 
-    // Build final detections
     std::vector<Detection> detections;
     detections.reserve(keepIndices.size());
-
     for (int idx : keepIndices) {
         Detection det;
-        det.boundingBox = boxes[idx];
-        det.confidence = scores[idx];
-        det.classId = classIds[idx];
+        det.boundingBox = nmsBoxes_[idx];
+        det.confidence  = nmsScores_[idx];
+        det.classId     = nmsClassIds_[idx];
         detections.push_back(det);
     }
-
     return detections;
 }
 

@@ -106,8 +106,8 @@ constexpr float HAZARD_THRESHOLD = 0.55f;
 // --- ARM64 edge-device profile ---
 #if defined(__aarch64__) || defined(__ARM_NEON)
 static constexpr bool kArmProfile = true;
-static constexpr int kDashboardWidth = 1024;
-static constexpr int kDashboardHeight = 768;
+static constexpr int kDashboardWidth = 800;
+static constexpr int kDashboardHeight = 480;
 #else
 static constexpr bool kArmProfile = false;
 static constexpr int kDashboardWidth = 1440;
@@ -115,7 +115,7 @@ static constexpr int kDashboardHeight = 900;
 #endif
 
 static constexpr int kIdleBackoffMs = 10;
-static constexpr int kRenderIntervalMs = 66; // ~15 FPS UI cap
+static constexpr int kRenderIntervalMs = 150; // ~7 FPS UI cap — reduces VNC encode overhead on Pi 4
 
 /// Display modes toggled by 'f' key at runtime.
 enum class DisplayMode { Dashboard, Fullscreen };
@@ -987,9 +987,8 @@ void drawDetections(cv::Mat& canvas,
         return;
 
     const int numFusions = static_cast<int>(snapshot.fusions.size());
+    char buf[64];
 
-    // cv::parallel_for_ dispatches to TBB when OpenCV is built with TBB.
-    // For ≤2 detections the overhead is negligible; for 10+ it wins on 4 cores.
     cv::parallel_for_(cv::Range(0, numFusions), [&](const cv::Range& range) {
         for (int i = range.start; i < range.end; ++i) {
             const auto& tele = snapshot.fusions[static_cast<std::size_t>(i)];
@@ -999,31 +998,20 @@ void drawDetections(cv::Mat& canvas,
             const cv::Scalar boxColor(0, 165, 255);
             cv::rectangle(canvas, box, boxColor, 2);
 
-            // Upper label: YOLO / Fusion / Stride
-            std::ostringstream label;
-            label << std::fixed << std::setprecision(2)
-                  << "Y:" << tele.input.yoloConfidence
-                  << " F:" << tele.output.finalConfidence
-                  << " S:" << snapshot.observedStride;
-            cv::putText(canvas,
-                        label.str(),
+            std::snprintf(buf, sizeof(buf), "Y:%.2f F:%.2f S:%d",
+                          tele.input.yoloConfidence,
+                          tele.output.finalConfidence,
+                          snapshot.observedStride);
+            cv::putText(canvas, buf,
                         cv::Point(box.x, std::max(box.y - 8, 12)),
-                        cv::FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        boxColor,
-                        1,
-                        cv::LINE_8);
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, boxColor, 1, cv::LINE_8);
 
-            // Lower label: HAZARD / SAFE
             const bool hazard = tele.output.finalConfidence >= HAZARD_THRESHOLD;
-            cv::putText(canvas,
-                        hazard ? "HAZARD" : "SAFE",
+            cv::putText(canvas, hazard ? "HAZARD" : "SAFE",
                         cv::Point(box.x, box.y + box.height + 18),
-                        cv::FONT_HERSHEY_SIMPLEX,
-                        0.55,
+                        cv::FONT_HERSHEY_SIMPLEX, 0.55,
                         hazard ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 200, 0),
-                        2,
-                        cv::LINE_8);
+                        2, cv::LINE_8);
         }
     });
 }
@@ -1078,6 +1066,11 @@ void drawDetectionsFullscreen(cv::Mat& canvas,
         return;
 
     const int numFusions = static_cast<int>(snapshot.fusions.size());
+    char fbuf[32];
+
+    // Pre-compute getTextSize for the two possible badge strings (constant)
+    static const cv::Size hazardSz = cv::getTextSize("HAZARD", cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, nullptr);
+    static const cv::Size safeSz   = cv::getTextSize("SAFE",   cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, nullptr);
 
     cv::parallel_for_(cv::Range(0, numFusions), [&](const cv::Range& range) {
         for (int i = range.start; i < range.end; ++i) {
@@ -1087,129 +1080,88 @@ void drawDetectionsFullscreen(cv::Mat& canvas,
                 continue;
 
             const bool hazard = tele.output.finalConfidence >= HAZARD_THRESHOLD;
-
-            // ── Bounding box ────────────────────────────────────────
-            const cv::Scalar boxColor = hazard
-                ? cv::Scalar(48, 48, 255)    // red
-                : cv::Scalar(80, 220, 120);  // green
+            const cv::Scalar boxColor = hazard ? cv::Scalar(48, 48, 255) : cv::Scalar(80, 220, 120);
             cv::rectangle(canvas, box, boxColor, 2, cv::LINE_AA);
 
-            // ── Corner accents (top-left + bottom-right) ────────────
+            // Corner accents
             const int cornerLen = std::min(16, std::min(box.width, box.height) / 3);
-            cv::line(canvas, cv::Point(box.x, box.y),
-                     cv::Point(box.x + cornerLen, box.y), boxColor, 3, cv::LINE_AA);
-            cv::line(canvas, cv::Point(box.x, box.y),
-                     cv::Point(box.x, box.y + cornerLen), boxColor, 3, cv::LINE_AA);
-            cv::line(canvas, cv::Point(box.br().x, box.br().y),
-                     cv::Point(box.br().x - cornerLen, box.br().y), boxColor, 3, cv::LINE_AA);
-            cv::line(canvas, cv::Point(box.br().x, box.br().y),
-                     cv::Point(box.br().x, box.br().y - cornerLen), boxColor, 3, cv::LINE_AA);
+            cv::line(canvas, cv::Point(box.x, box.y), cv::Point(box.x + cornerLen, box.y), boxColor, 3, cv::LINE_AA);
+            cv::line(canvas, cv::Point(box.x, box.y), cv::Point(box.x, box.y + cornerLen), boxColor, 3, cv::LINE_AA);
+            cv::line(canvas, cv::Point(box.br().x, box.br().y), cv::Point(box.br().x - cornerLen, box.br().y), boxColor, 3, cv::LINE_AA);
+            cv::line(canvas, cv::Point(box.br().x, box.br().y), cv::Point(box.br().x, box.br().y - cornerLen), boxColor, 3, cv::LINE_AA);
 
-            // ── HAZARD / SAFE badge above box ───────────────────────
-            const std::string statusText = hazard ? "HAZARD" : "SAFE";
-            const int baseline = 0;
-            const cv::Size textSz = cv::getTextSize(statusText, cv::FONT_HERSHEY_SIMPLEX,
-                                                     0.55, 2, const_cast<int*>(&baseline));
+            // HAZARD/SAFE badge — use pre-computed text size
+            const char* statusText = hazard ? "HAZARD" : "SAFE";
+            const cv::Size& textSz = hazard ? hazardSz : safeSz;
             const int badgeX = box.x;
             const int badgeY = std::max(box.y - textSz.height - 14, 0);
-            cv::rectangle(canvas,
-                          cv::Rect(badgeX, badgeY, textSz.width + 12, textSz.height + 10),
-                          boxColor, cv::FILLED);
-            cv::putText(canvas, statusText,
-                        cv::Point(badgeX + 6, badgeY + textSz.height + 4),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.55,
-                        cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+            cv::rectangle(canvas, cv::Rect(badgeX, badgeY, textSz.width + 12, textSz.height + 10), boxColor, cv::FILLED);
+            cv::putText(canvas, statusText, cv::Point(badgeX + 6, badgeY + textSz.height + 4),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
-            // ── Info panel to the right of the bounding box ─────────
-            // Shows detailed perception / depth / temporal / fusion scores.
+            // Info panel
             const int panelX = box.x + box.width + 8;
             const int panelY = box.y;
-            const int panelW = 230;
-            const int panelH = 164;
+            const int panelW = 230, panelH = 164;
 
-            // Only draw if it fits in-frame
             if (panelX + panelW <= canvas.cols && panelY + panelH <= canvas.rows) {
-                // Dark semi-transparent background
                 cv::Mat panelRoi = canvas(cv::Rect(panelX, panelY, panelW, panelH));
                 cv::multiply(panelRoi, cv::Scalar(0.3, 0.3, 0.3), panelRoi);
 
-                const cv::Scalar headColor(120, 200, 255);   // warm gold
-                const cv::Scalar valColor(210, 210, 215);     // cream
+                const cv::Scalar valColor(210, 210, 215);
                 const double fs = 0.42;
                 int y = panelY + 18;
                 constexpr int lineH = 18;
 
-                auto putKV = [&](const std::string& key, const std::string& val,
-                                 const cv::Scalar& kc, const cv::Scalar& vc) {
-                    cv::putText(canvas, key, cv::Point(panelX + 8, y),
-                                cv::FONT_HERSHEY_SIMPLEX, fs, kc, 1, cv::LINE_AA);
-                    cv::putText(canvas, val, cv::Point(panelX + 120, y),
-                                cv::FONT_HERSHEY_SIMPLEX, fs, vc, 1, cv::LINE_AA);
+                // Use snprintf instead of ostringstream — no heap alloc
+                auto putKV = [&](const char* key, const char* val, const cv::Scalar& kc) {
+                    cv::putText(canvas, key, cv::Point(panelX + 8, y), cv::FONT_HERSHEY_SIMPLEX, fs, kc, 1, cv::LINE_AA);
+                    cv::putText(canvas, val, cv::Point(panelX + 120, y), cv::FONT_HERSHEY_SIMPLEX, fs, valColor, 1, cv::LINE_AA);
                     y += lineH;
                 };
 
-                auto fmtF = [](float v) {
-                    std::ostringstream o;
-                    o << std::fixed << std::setprecision(3) << v;
-                    return o.str();
-                };
+                putKV("Perception", "", cv::Scalar(100, 180, 255));
+                std::snprintf(fbuf, sizeof(fbuf), "%.3f", tele.input.yoloConfidence);
+                putKV("  YOLO conf", fbuf, valColor);
 
-                // Perception
-                putKV("Perception", "", cv::Scalar(100, 180, 255), valColor);
-                putKV("  YOLO conf", fmtF(tele.input.yoloConfidence), valColor, valColor);
+                putKV("Depth", "", cv::Scalar(80, 200, 180));
+                std::snprintf(fbuf, sizeof(fbuf), "%.3f", tele.output.geometryConfidence);
+                putKV("  Geometry", fbuf, valColor);
+                std::snprintf(fbuf, sizeof(fbuf), "%.3f", tele.input.depressionScore);
+                putKV("  Depression", fbuf, valColor);
+                std::snprintf(fbuf, sizeof(fbuf), "%.3f", tele.input.roughness);
+                putKV("  Roughness", fbuf, valColor);
 
-                // Depth
-                putKV("Depth", "", cv::Scalar(80, 200, 180), valColor);
-                putKV("  Geometry", fmtF(tele.output.geometryConfidence), valColor, valColor);
-                putKV("  Depression", fmtF(tele.input.depressionScore), valColor, valColor);
-                putKV("  Roughness", fmtF(tele.input.roughness), valColor, valColor);
-
-                // Temporal
-                putKV("Temporal", "", cv::Scalar(180, 160, 255), valColor);
-                putKV("  Persist / Stab",
-                      fmtF(tele.temporal.persistence) + " / " + fmtF(tele.temporal.stability),
-                      valColor, valColor);
+                putKV("Temporal", "", cv::Scalar(180, 160, 255));
+                std::snprintf(fbuf, sizeof(fbuf), "%.2f/%.2f", tele.temporal.persistence, tele.temporal.stability);
+                putKV("  Persist/Stab", fbuf, valColor);
             } else {
-                // Panel doesn't fit right — put a compact label below box
-                std::ostringstream compact;
-                compact << std::fixed << std::setprecision(2)
-                        << "P:" << tele.input.yoloConfidence
-                        << " D:" << tele.output.geometryConfidence
-                        << " T:" << tele.output.temporalConfidence
-                        << " F:" << tele.output.finalConfidence;
-                cv::putText(canvas, compact.str(),
-                            cv::Point(box.x, box.y + box.height + 18),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.45,
-                            boxColor, 1, cv::LINE_AA);
+                std::snprintf(fbuf, sizeof(fbuf), "P:%.2f D:%.2f F:%.2f",
+                              tele.input.yoloConfidence,
+                              tele.output.geometryConfidence,
+                              tele.output.finalConfidence);
+                cv::putText(canvas, fbuf, cv::Point(box.x, box.y + box.height + 18),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.45, boxColor, 1, cv::LINE_AA);
             }
 
-            // ── Fusion confidence bar at box bottom ─────────────────
+            // Confidence bar
             const int barH = 6;
             const int barY = box.y + box.height + (panelX + panelW <= canvas.cols ? 4 : 28);
             if (barY + barH < canvas.rows) {
-                const int filledW = static_cast<int>(
-                    static_cast<float>(box.width) * tele.output.finalConfidence);
-                cv::rectangle(canvas,
-                              cv::Rect(box.x, barY, box.width, barH),
-                              cv::Scalar(40, 40, 40), cv::FILLED);
-                cv::rectangle(canvas,
-                              cv::Rect(box.x, barY, std::min(filledW, box.width), barH),
-                              boxColor, cv::FILLED);
+                const int filledW = static_cast<int>(static_cast<float>(box.width) * tele.output.finalConfidence);
+                cv::rectangle(canvas, cv::Rect(box.x, barY, box.width, barH), cv::Scalar(40, 40, 40), cv::FILLED);
+                cv::rectangle(canvas, cv::Rect(box.x, barY, std::min(filledW, box.width), barH), boxColor, cv::FILLED);
             }
         }
     });
 }
 
-cv::Mat makeDepthVisualization(const FrameSnapshot& snapshot) {
+cv::Mat makeDepthVisualization(const FrameSnapshot& snapshot,
+                               cv::Mat& depthNorm, cv::Mat& depthColor) {
     if (!snapshot.depthValid || snapshot.depthMap.empty())
         return {};
-
-    // cv::normalize and cv::applyColorMap dispatch through KleidiCV HAL
-    // when built with TBB — no manual parallel_for_ needed.
-    cv::Mat depthNorm;
     cv::normalize(snapshot.depthMap, depthNorm, 0.0, 255.0, cv::NORM_MINMAX);
     depthNorm.convertTo(depthNorm, CV_8U);
-    cv::Mat depthColor;
     cv::applyColorMap(depthNorm, depthColor, cv::COLORMAP_INFERNO);
     return depthColor;
 }
@@ -1274,12 +1226,15 @@ int main(int argc, char** argv) {
     using namespace vigia::viz;
 
     if (argc < 2) {
-        std::cerr << "Usage: system_visual_test [-F] (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n";
+        std::cerr << "Usage: system_visual_test [-F] [--headless] [--fp32] (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n"
+                  << "  --fp32      Use FP32 YOLO model (default: INT8)\n";
         return 1;
     }
 
     bool useCamera = false;
     bool startFullscreen = false;
+    bool headlessMode = false;
+    bool useFp32 = false;
     int cameraIndex = 0;
     std::string videoPath;
 
@@ -1288,6 +1243,18 @@ int main(int argc, char** argv) {
     // Optional -F flag for fullscreen display mode
     if (std::string(argv[argIndex]) == "-F") {
         startFullscreen = true;
+        argIndex++;
+    }
+
+    // Optional --headless flag: skip all cv::imshow calls for max throughput
+    if (argIndex < argc && std::string(argv[argIndex]) == "--headless") {
+        headlessMode = true;
+        argIndex++;
+    }
+
+    // Optional --fp32 flag: use FP32 model instead of INT8
+    if (argIndex < argc && std::string(argv[argIndex]) == "--fp32") {
+        useFp32 = true;
         argIndex++;
     }
 
@@ -1322,7 +1289,8 @@ int main(int argc, char** argv) {
 
     const std::string yoloModel = (argIndex < argc)
         ? argv[argIndex++]
-        : "models/yolo26/yolo26_model_int8.xml";
+        : (useFp32 ? "models/yolo26/yolo26_model.xml"
+                   : "models/yolo26/yolo26_model_int8.xml");
     const std::string midasModel = (argIndex < argc)
         ? argv[argIndex++]
         : "models/midasv21/openvino_midas_v21_small_256.xml";
@@ -1569,13 +1537,16 @@ int main(int argc, char** argv) {
             const auto now = std::chrono::system_clock::now();
             const std::time_t tt = std::chrono::system_clock::to_time_t(now);
             const std::tm tm = *std::localtime(&tt);
+            char timeBuf[12];
+            std::strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &tm);
+            char logBuf[96];
             for (const auto& tele : snap.fusions) {
-                std::ostringstream line;
-                line << '[' << std::put_time(&tm, "%H:%M:%S") << "] | "
-                     << "Conf: " << std::fixed << std::setprecision(2) << tele.input.yoloConfidence
-                     << " | Fusion: " << std::fixed << std::setprecision(2) << tele.output.finalConfidence
-                     << " | Status: " << (tele.output.finalConfidence >= HAZARD_THRESHOLD ? "HAZARD" : "SAFE");
-                potholeLog.push_back(line.str());
+                std::snprintf(logBuf, sizeof(logBuf), "[%s] | Conf: %.2f | Fusion: %.2f | Status: %s",
+                              timeBuf,
+                              tele.input.yoloConfidence,
+                              tele.output.finalConfidence,
+                              tele.output.finalConfidence >= HAZARD_THRESHOLD ? "HAZARD" : "SAFE");
+                potholeLog.push_back(logBuf);
             }
             while (potholeLog.size() > MAX_EVENT_LOG)
                 potholeLog.pop_front();
@@ -1599,11 +1570,7 @@ int main(int argc, char** argv) {
             }
         };
 
-        auto formatDouble = [](double value) {
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << value;
-            return oss.str();
-        };
+        char fmtBuf[32];
 
         cv::namedWindow("VIGIA Dashboard", cv::WINDOW_NORMAL);
         if (startFullscreen) {
@@ -1613,9 +1580,22 @@ int main(int argc, char** argv) {
         } else {
             cv::resizeWindow("VIGIA Dashboard", dashboardSize.width, dashboardSize.height);
         }
+        if (headlessMode) {
+            std::cout << "[vigia-test] Headless mode: display disabled for maximum throughput\n";
+            cv::destroyAllWindows();
+        }
 
         auto lastRenderTs = std::chrono::steady_clock::now();
         bool needsRender = true;
+
+        // Pre-allocate dashboard Mat once — reused every render cycle.
+        // Avoids a 2.25MB (1024×768) or 1.15MB (800×480) allocation per frame.
+        cv::Mat dashboard(dashboardSize, CV_8UC3);
+
+        // Persistent Mats for depth visualization — no per-frame alloc
+        cv::Mat depthNormBuf, depthColorBuf;
+        // Persistent tint Mats for panel overlays — allocated once at first use
+        cv::Mat detTint, snapshotTint;
 
         while (!shouldQuit) {
             FrameSnapshot snapshot;
@@ -1682,7 +1662,7 @@ int main(int argc, char** argv) {
                 }
 
                 {
-                    cv::Mat depthCanvas = makeDepthVisualization(snapshot);
+                    cv::Mat depthCanvas = makeDepthVisualization(snapshot, depthNormBuf, depthColorBuf);
                     if (!depthCanvas.empty())
                         lastDepthCanvas = depthCanvas;
                 }
@@ -1707,34 +1687,28 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(kIdleBackoffMs));
             }
 
-            // Render-throttle: cap dashboard rebuilds to ~15 FPS
+            // Render-throttle: cap dashboard rebuilds to ~7 FPS UI
             const auto renderNow = std::chrono::steady_clock::now();
-            const bool renderDue = needsRender &&
+            const bool renderDue = !headlessMode && needsRender &&
                 (renderNow - lastRenderTs >= std::chrono::milliseconds(kRenderIntervalMs));
 
             if (renderDue) {
 
             if (displayMode == DisplayMode::Fullscreen) {
-            // ── Fullscreen mode: video feed + detailed overlays only ──
             if (!currentDetectionsCanvas.empty()) {
-                cv::Mat fullCanvas = currentDetectionsCanvas.clone();
-                // Re-draw with the detailed fullscreen renderer
-                drawDetectionsFullscreen(fullCanvas, lastSnapshot,
-                                         lastSmoothedFps, lastAvgLatency);
-
-                // Mode hint in bottom-right
-                cv::putText(fullCanvas, "[Q] Quit  [Space] Pause",
-                            cv::Point(fullCanvas.cols - 280, fullCanvas.rows - 14),
+                // Reuse fullCanvas allocation — copyTo only reallocates if size changes
+                currentDetectionsCanvas.copyTo(dashboard);
+                drawDetectionsFullscreen(dashboard, lastSnapshot, lastSmoothedFps, lastAvgLatency);
+                cv::putText(dashboard, "[Q] Quit  [Space] Pause",
+                            cv::Point(dashboard.cols - 280, dashboard.rows - 14),
                             cv::FONT_HERSHEY_SIMPLEX, 0.45,
                             cv::Scalar(120, 120, 140), 1, cv::LINE_AA);
-
-                cv::imshow("VIGIA Dashboard", fullCanvas);
+                cv::imshow("VIGIA Dashboard", dashboard);
             }
             } else {
 
             {
             // ── Full 5-panel dashboard (ARM + desktop) ──
-            cv::Mat dashboard(dashboardSize, CV_8UC3);
             dashboard.setTo(backgroundColor);
 
             cv::rectangle(dashboard, headerRect, headerColor, cv::FILLED);
@@ -1754,10 +1728,10 @@ int main(int argc, char** argv) {
             const auto headerNow = std::chrono::system_clock::now();
             const std::time_t headerT = std::chrono::system_clock::to_time_t(headerNow);
             const std::tm headerTm = *std::localtime(&headerT);
-            std::ostringstream headerTime;
-            headerTime << std::put_time(&headerTm, "%b %d  %H:%M");
+            char headerTimeBuf[20];
+            std::strftime(headerTimeBuf, sizeof(headerTimeBuf), "%b %d  %H:%M", &headerTm);
             cv::putText(dashboard,
-                        headerTime.str(),
+                        headerTimeBuf,
                         cv::Point(dashboardSize.width - 200, headerHeight - 20),
                         cv::FONT_HERSHEY_DUPLEX,
                         0.6,
@@ -1800,8 +1774,10 @@ int main(int argc, char** argv) {
                     // allocation.  KleidiCV HAL accelerates cv::resize via NEON.
                     cv::resize(currentDetectionsCanvas, detContent, detContent.size());
                     {
-                        cv::Mat tint(detContent.size(), detContent.type(), cv::Scalar(14, 14, 22));
-                        cv::addWeighted(detContent, 0.88, tint, 0.12, 0.0, detContent);
+                        if (detTint.size() != detContent.size() || detTint.type() != detContent.type())
+                            detTint.create(detContent.size(), detContent.type());
+                        detTint.setTo(cv::Scalar(14, 14, 22));
+                        cv::addWeighted(detContent, 0.88, detTint, 0.12, 0.0, detContent);
                     }
                 } else {
                     const int fallbackY = panelHeaderHeight + detContentHeight / 2;
@@ -1830,10 +1806,9 @@ int main(int argc, char** argv) {
                 cv::Mat statusBar = detPanel(statusRect);
                 statusBar.setTo(cv::Scalar(18, 18, 28));
 
-                const std::string statusLine =
-                    "Source " + sourceLabel +
-                    ".FPS" + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a")) +
-                    " Latency " + (lastAvgLatency > 0.0 ? formatDouble(lastAvgLatency) + " ms" : std::string("n/a"));
+                char statusLine[128];
+                std::snprintf(statusLine, sizeof(statusLine), "Source %s  FPS %.2f  Latency %.2f ms",
+                              sourceLabel.c_str(), lastSmoothedFps, lastAvgLatency);
                 cv::putText(detPanel,
                             statusLine,
                             cv::Point(24, detPanel.rows - 24),
@@ -1890,8 +1865,10 @@ int main(int argc, char** argv) {
                     // Resize directly into dashboard sub-ROI — zero intermediate alloc
                     cv::resize(lastPotholeCanvas, snapshotContent, snapshotContent.size());
                     {
-                        cv::Mat tint(snapshotContent.size(), snapshotContent.type(), cv::Scalar(18, 18, 32));
-                        cv::addWeighted(snapshotContent, 0.9, tint, 0.1, 0.0, snapshotContent);
+                        if (snapshotTint.size() != snapshotContent.size() || snapshotTint.type() != snapshotContent.type())
+                            snapshotTint.create(snapshotContent.size(), snapshotContent.type());
+                        snapshotTint.setTo(cv::Scalar(18, 18, 32));
+                        cv::addWeighted(snapshotContent, 0.9, snapshotTint, 0.1, 0.0, snapshotContent);
                     }
                 } else {
                     const int placeholderY = panelHeaderHeight + snapshotContentHeight / 2;
@@ -1905,31 +1882,45 @@ int main(int argc, char** argv) {
 
             // ── Operational Insights panel (with PerfTracker metrics) ──
             cv::Mat insightsPanel = setupPanel(insightsRect, "Operational Insights");
-            std::vector<std::string> insightLines;
-            insightLines.emplace_back("Latency avg: " + (lastAvgLatency > 0.0 ? formatDouble(lastAvgLatency) + " ms" : std::string("n/a")));
-            insightLines.emplace_back("FPS smooth: " + (lastSmoothedFps > 0.0 ? formatDouble(lastSmoothedFps) : std::string("n/a")));
-            insightLines.emplace_back("MiDaS stride: " + std::to_string(lastObservedStride));
-            insightLines.emplace_back("YOLO max: " + formatDouble(static_cast<double>(lastMaxConfidence)));
-            insightLines.emplace_back("YOLO peak: " + formatDouble(lastYoloPeak));
-            insightLines.emplace_back("Fusion peak: " + formatDouble(lastFusionPeak));
-            insightLines.emplace_back("Hazard state: " + std::string(lastHazardTriggered ? "ACTIVE" : "nominal"));
-            insightLines.emplace_back("CPU temp: " + (std::isnan(lastCpuTemp) ? std::string("n/a") : formatDouble(lastCpuTemp) + " C"));
-            insightLines.emplace_back("Events buffered: " + std::to_string(potholeLog.size()));
-            renderTextBlock(insightsPanel, insightLines, textColor, panelHeaderHeight + 32, 26);
+            {
+                // Write directly with snprintf — no vector<string> or ostringstream allocs
+                const int baseY = panelHeaderHeight + 32;
+                constexpr int lineH = 26;
+                int iy = baseY;
+                auto putLine = [&](const char* text) {
+                    cv::putText(insightsPanel, text, cv::Point(20, iy),
+                                cv::FONT_HERSHEY_DUPLEX, 0.55, textColor, 1, cv::LINE_8);
+                    iy += lineH;
+                };
+                std::snprintf(fmtBuf, sizeof(fmtBuf), "Latency avg: %.2f ms", lastAvgLatency); putLine(fmtBuf);
+                std::snprintf(fmtBuf, sizeof(fmtBuf), "FPS smooth: %.2f", lastSmoothedFps);    putLine(fmtBuf);
+                std::snprintf(fmtBuf, sizeof(fmtBuf), "MiDaS stride: %d", lastObservedStride); putLine(fmtBuf);
+                std::snprintf(fmtBuf, sizeof(fmtBuf), "YOLO max: %.2f", lastMaxConfidence);    putLine(fmtBuf);
+                std::snprintf(fmtBuf, sizeof(fmtBuf), "YOLO peak: %.2f", lastYoloPeak);        putLine(fmtBuf);
+                std::snprintf(fmtBuf, sizeof(fmtBuf), "Fusion peak: %.2f", lastFusionPeak);    putLine(fmtBuf);
+                putLine(lastHazardTriggered ? "Hazard state: ACTIVE" : "Hazard state: nominal");
+                if (std::isnan(lastCpuTemp)) putLine("CPU temp: n/a");
+                else { std::snprintf(fmtBuf, sizeof(fmtBuf), "CPU temp: %.2f C", lastCpuTemp); putLine(fmtBuf); }
+                std::snprintf(fmtBuf, sizeof(fmtBuf), "Events buffered: %zu", potholeLog.size()); putLine(fmtBuf);
+            }
 
             // ── Pothole Event Log panel ──
             cv::Mat logPanel = setupPanel(logRect, "Pothole Event Log");
-            const int maxVisibleEvents = std::max(1, (logRect.height - (panelHeaderHeight + 28)) / 22);
-            std::vector<std::string> logLines;
-            logLines.reserve(static_cast<std::size_t>(maxVisibleEvents));
-            if (potholeLog.empty()) {
-                logLines.emplace_back("No pothole events yet");
-            } else {
-                int added = 0;
-                for (auto it = potholeLog.rbegin(); it != potholeLog.rend() && added < maxVisibleEvents; ++it, ++added)
-                    logLines.push_back(*it);
+            {
+                const int maxVisibleEvents = std::max(1, (logRect.height - (panelHeaderHeight + 28)) / 22);
+                int iy = panelHeaderHeight + 32;
+                if (potholeLog.empty()) {
+                    cv::putText(logPanel, "No pothole events yet", cv::Point(20, iy),
+                                cv::FONT_HERSHEY_DUPLEX, 0.55, subtitleColor, 1, cv::LINE_8);
+                } else {
+                    int added = 0;
+                    for (auto it = potholeLog.rbegin(); it != potholeLog.rend() && added < maxVisibleEvents; ++it, ++added) {
+                        cv::putText(logPanel, it->c_str(), cv::Point(20, iy),
+                                    cv::FONT_HERSHEY_DUPLEX, 0.55, subtitleColor, 1, cv::LINE_8);
+                        iy += 22;
+                    }
+                }
             }
-            renderTextBlock(logPanel, logLines, subtitleColor, panelHeaderHeight + 32, 22);
 
             cv::imshow("VIGIA Dashboard", dashboard);
             } // 5-panel dashboard
@@ -1939,11 +1930,10 @@ int main(int argc, char** argv) {
             needsRender = false;
             } // render-throttle gate
 
+            if (!headlessMode) {
             const int delay = paused ? 50 : 1;
             const int key = cv::waitKey(delay);
-            if (key < 0)
-                continue;
-
+            if (key >= 0) {
             switch (key) {
             case 'q':
             case 'Q':
@@ -1963,7 +1953,9 @@ int main(int argc, char** argv) {
             default:
                 break;
             }
-        }
+            }
+            }
+        } // while (!shouldQuit)
 
         perception.requestStop();
         coordinator.stop();

@@ -56,7 +56,7 @@ public:
     virtual cv::Mat extractDepthROI(
         const cv::Mat& depthMap,
         const cv::Rect& roi
-    ) const;
+    );
 
     /* ---------- Phase 2b ---------- */
     virtual DepthResidualStats computeDepthResiduals(
@@ -93,6 +93,12 @@ private:
     std::vector<float> chwBuffer_;
     ov::Tensor midasInputTensor_;       // pre-allocated, wraps chwBuffer_
     bool       inputTensorBound_{false}; // true after first set_input_tensor
+
+    // ── Pre-allocated preprocessing + ROI buffers ──────────────────
+    cv::Mat midasResized_;   // 256×256 U8C3
+    cv::Mat midasBlob_;      // 256×256 CV_32FC3
+    cv::Mat roiScratch_;     // reused per-detection in extractDepthROI
+    cv::Mat depthOutput_;    // wraps output tensor data (zero-copy)
 
     /// Set to true only after compile_model() succeeds.
     /// If false, runInference() returns an empty cv::Mat.

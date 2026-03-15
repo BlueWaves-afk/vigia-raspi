@@ -98,6 +98,16 @@ private:
     float confThreshold_{kConfThresholdFp32};
     bool isInt8Model_{false};
 
+    // ── Pre-allocated preprocessing buffers (fix: zero per-frame alloc) ──
+    cv::Mat preprocResized_;   // downscaled to new_unpad size
+    cv::Mat preprocPadded_;    // letterboxed to inputW×inputH, wraps inputTensor_ for INT8
+    cv::Mat preprocBlob_;      // FP32 normalized (FP32 model only)
+
+    // ── Pre-allocated postprocessing vectors (fix: no per-frame heap alloc) ──
+    std::vector<cv::Rect> nmsBoxes_;
+    std::vector<float>    nmsScores_;
+    std::vector<int>      nmsClassIds_;
+
     /// Set to true only after compile_model() succeeds.
     /// If false, runInference() returns an empty vector.
     bool modelLoaded_{false};

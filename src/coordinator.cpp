@@ -15,7 +15,6 @@ namespace vigia {
 
 /* ===================== Constants ===================== */
 
-static constexpr std::size_t FRAME_BUFFER_SIZE = 4;
 static constexpr float TEMP_WARN_C = 75.0f;
 static constexpr float TEMP_CRITICAL_C = 85.0f;
 static constexpr std::int32_t POTHOLE_CLASS_ID = 0;
@@ -45,12 +44,11 @@ Coordinator::Coordinator(
 
 Coordinator::~Coordinator() {
     running_ = false;
+    midasQueue_.shutdown();
 
-    if (captureThread_.joinable())
-        captureThread_.join();
-
-    if (mainThread_.joinable())
-        mainThread_.join();
+    if (captureThread_.joinable()) captureThread_.join();
+    if (mainThread_.joinable())    mainThread_.join();
+    if (midasThread_.joinable())   midasThread_.join();
 }
 
 void Coordinator::start() {
@@ -58,19 +56,20 @@ void Coordinator::start() {
 
     captureThread_ = std::thread(&Coordinator::captureLoop, this);
     mainThread_    = std::thread(&Coordinator::processLoop, this);
+    midasThread_   = std::thread(&Coordinator::midasLoop,   this);
 
-    pinThread(captureThread_, 0); // LITTLE core
-    pinThread(mainThread_, 1);    // BIG core
+    pinThread(captureThread_, 0);
+    pinThread(mainThread_,    1);
+    pinThread(midasThread_,   2);
 }
 
 void Coordinator::stop() {
     running_ = false;
+    midasQueue_.shutdown();
 
-    if (captureThread_.joinable())
-        captureThread_.join();
-
-    if (mainThread_.joinable())
-        mainThread_.join();
+    if (captureThread_.joinable()) captureThread_.join();
+    if (mainThread_.joinable())    mainThread_.join();
+    if (midasThread_.joinable())   midasThread_.join();
 }
 
 /* ===================== Capture Loop ===================== */
@@ -97,13 +96,11 @@ void Coordinator::captureLoop() {
                 break;
             }
 
+            // Clone outside the lock — ~0.9ms clone must not block processLoop.
+            cv::Mat cloned = frame.clone();
             {
                 std::lock_guard<std::mutex> lock(bufferMutex_);
-                // Ring buffer must own its data (processFrame reads by
-                // shallow copy), so clone is required here.  The clone
-                // cost (~0.9 ms for 640×480 BGR) is negligible vs YOLO
-                // inference (~220 ms).
-                frameBuffer_[frameIndex_ % FRAME_BUFFER_SIZE] = frame.clone();
+                frameBuffer_[frameIndex_ % FRAME_BUFFER_SIZE] = std::move(cloned);
                 frameIndex_++;
             }
         }
@@ -112,6 +109,59 @@ void Coordinator::captureLoop() {
         running_ = false;
     } catch (...) {
         std::cerr << "[Coordinator] Capture thread unknown exception" << std::endl;
+        running_ = false;
+    }
+}
+
+/* ===================== MiDaS Loop (Core 2) ===================== */
+
+void Coordinator::midasLoop() {
+#if defined(__linux__) && defined(__aarch64__)
+    {
+        cpu_set_t cpuSet;
+        CPU_ZERO(&cpuSet);
+        CPU_SET(2, &cpuSet);
+        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuSet);
+    }
+#endif
+    try {
+        while (running_) {
+            MidasWork work;
+            if (!midasQueue_.wait_and_pop(work))
+                continue;
+            if (!running_) break;
+
+            // InstrumentedAnalyticalAgent::runInference records depth to bus
+            cv::Mat depthMap = analytical_.runInference(work.frame);
+            if (depthMap.empty()) continue;
+
+            // Re-run fusion for any potholes detected on this frame.
+            // We don't have the detection list here, so we rely on the
+            // InstrumentationBus slot's filteredDetections via the coordinator's
+            // stored detections. Instead, we store detections per frame in midasWork.
+            for (const auto& det : work.detections) {
+                if (det.classId != POTHOLE_CLASS_ID) continue;
+
+                cv::Rect depthROI = analytical_.scaleROIToDepth(
+                    det.boundingBox, work.frame.size(), depthMap.size());
+                cv::Mat roiDepth = analytical_.extractDepthROI(depthMap, depthROI);
+                if (roiDepth.empty()) continue;
+
+                auto residuals = analytical_.computeDepthResiduals(roiDepth);
+                auto geom      = analytical_.computeGeometryMetrics(roiDepth, residuals);
+                auto temporal  = temporal_.update(geom.depressionScore, geom.roughness);
+
+                FusionInput fin{};
+                fin.yoloConfidence  = det.confidence;
+                fin.depressionScore = geom.depressionScore;
+                fin.roughness       = geom.roughness;
+                fin.persistence     = temporal.persistence;
+                fin.stability       = temporal.stability;
+                fusion_.fuse(fin);  // InstrumentedFusionEngine records to bus
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Coordinator] MiDaS thread exception: " << e.what() << std::endl;
         running_ = false;
     }
 }
@@ -166,75 +216,31 @@ void Coordinator::processFrame() {
         std::lock_guard<std::mutex> lock(bufferMutex_);
         if (frameIndex_ == 0)
             return;
-
         frame = frameBuffer_[(frameIndex_ - 1) % FRAME_BUFFER_SIZE];
-        currentIdx = frameIndex_; 
+        currentIdx = frameIndex_;
     }
 
-    /* ---------- YOLO (High Priority) ---------- */
-    // Run detection first. If this finds something, we report it regardless of MiDaS.
-    // std::move avoids deep-copying the vector + cv::Rect objects across the memory bus.
-    auto detections = std::move(perception_.runInference(frame));
+    /* ---------- YOLO (Core 1 — every frame) ---------- */
+    auto detections = perception_.runInference(frame);
 
-    /* ---------- MiDaS (Adaptive Stride) ---------- */
-    const bool runMidas = (currentIdx % midasStride_ == 0);
-    cv::Mat depthMap;
-
-    if (runMidas) {
-        // std::move elides the cv::Mat refcount atomic on the returned temporary.
-        // NOTE: This calls InstrumentedAnalyticalAgent::runInference() which
-        // records the depth map into the InstrumentationBus slot via
-        // recordDepth(). The slot was opened by beginFrame() inside
-        // perception_.runInference() above, so the depth data lands in the
-        // correct slot BEFORE storeDetections() can finalize it.
-        depthMap = std::move(analytical_.runInference(frame));
+    /* ---------- MiDaS (Core 2 — async, stride-gated) ---------- */
+    if (currentIdx % midasStride_ == 0) {
+        // Pass detections so midasLoop can run the full fusion chain
+        midasQueue_.push({currentIdx, frame.clone(), detections});
     }
 
+    // Fusion uses YOLO-only baseline; MiDaS results arrive asynchronously
+    // via InstrumentedAnalyticalAgent → InstrumentationBus → tryPopFrame.
     for (const auto& det : detections) {
         if (det.classId != POTHOLE_CLASS_ID)
             continue;
-
-        // Initialize output with YOLO's data as the baseline
         FusionOutput fout{};
-        fout.finalConfidence = det.confidence;
+        fout.finalConfidence    = det.confidence;
         fout.geometryConfidence = 0.0f;
         fout.temporalConfidence = 0.0f;
-
-        /* ---------- Optional Verification Stage ---------- */
-        // Only refine the score if MiDaS was triggered AND produced valid data
-        if (runMidas && !depthMap.empty()) {
-            cv::Rect depthROI = analytical_.scaleROIToDepth(
-                det.boundingBox,
-                frame.size(),
-                depthMap.size()
-            );
-
-            cv::Mat roiDepth = analytical_.extractDepthROI(depthMap, depthROI);
-
-            if (!roiDepth.empty()) {
-                auto residuals = analytical_.computeDepthResiduals(roiDepth);
-                auto geom = analytical_.computeGeometryMetrics(roiDepth, residuals);
-                auto temporalMetrics = temporal_.update(geom.depressionScore, geom.roughness);
-
-                FusionInput fin{};
-                fin.yoloConfidence   = det.confidence;
-                fin.depressionScore  = geom.depressionScore;
-                fin.roughness        = geom.roughness;
-                fin.persistence      = temporalMetrics.persistence;
-                fin.stability        = temporalMetrics.stability;
-
-                // Overwrite fout with the fully fused result
-                fout = fusion_.fuse(fin);
-            }
-        }
-
-        // ALWAYS publish the result. Even if MiDaS didn't run, the visualizer gets the YOLO box.
         publishResult(det, fout);
     }
 
-    // Notify the instrumentation bus that processing is complete for this
-    // frame.  This finalizes no-pothole slots (depth data is already stored)
-    // and slots where all fusions have been recorded.
     perception_.notifyProcessingComplete(currentIdx);
 }
 
@@ -255,12 +261,12 @@ void Coordinator::adaptiveControl(long elapsedMs) {
     else if (temp > TEMP_WARN_C) {
         midasStride_ = 3;
     }
-    else if (elapsedMs > targetFrameTimeMs_) {
-        // If processing is slow, skip more MiDaS frames to keep YOLO fluid
+    else if (elapsedMs > 150) {
+        // Only throttle MiDaS if genuinely below ~7 FPS — not just because
+        // targetFrameTimeMs_ is set to an unreachable 30 FPS target.
         midasStride_ = std::min(midasStride_ + 1, 5);
     }
     else {
-        // If we have overhead, run MiDaS more frequently
         midasStride_ = std::max(1, midasStride_ - 1);
     }
 }
@@ -311,6 +317,7 @@ void Coordinator::publishResult(
     const Detection& det,
     const FusionOutput& out
 ) const {
+#ifndef NDEBUG
     std::cout
         << "[POTHOLE]"
         << " conf="   << out.finalConfidence
@@ -318,6 +325,9 @@ void Coordinator::publishResult(
         << " tmp="    << out.temporalConfidence
         << " stride=" << midasStride_
         << "\n";
+#else
+    (void)det; (void)out;
+#endif
 }
 
 } // namespace vigia
