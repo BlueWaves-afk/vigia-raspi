@@ -79,9 +79,9 @@ int main(int argc, char** argv) {
     try { core.set_property("CPU", ov::inference_num_threads(4)); } catch (...) {}
 
     // Suppress verbose OpenVINO/YOLO startup logs — redirect stdout during model load
-    std::cout.setstate(std::ios::failbit);
+    if (!headless) std::cout.setstate(std::ios::failbit);
     vigia::PerceptionAgent agent(core, modelPath, "CPU");
-    std::cout.clear();
+    if (!headless) std::cout.clear();
 
     if (!agent.isModelLoaded()) {
         std::cerr << "[ERROR] Model failed to compile: " << modelPath << "\n";
