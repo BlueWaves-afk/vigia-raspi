@@ -18,6 +18,8 @@
 #include "perception.hpp"
 
 #include <opencv2/core/ocl.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <openvino/openvino.hpp>
 
@@ -169,23 +171,32 @@ int main(int argc, char** argv) {
         emaFps = (frameCount == 1) ? instantFps : kAlpha * instantFps + (1.0 - kAlpha) * emaFps;
 
         if (streamIp && udp.fd >= 0) {
-            // Serialize detections to compact JSON — no heap alloc
-            // Format: {"f":123,"fps":9.3,"dets":[{"c":0,"s":0.82,"x1":10,"y1":20,"x2":100,"y2":80},...]}
-            int pos = std::snprintf(jsonBuf, sizeof(jsonBuf),
-                                    "{\"f\":%llu,\"fps\":%.1f,\"dets\":[",
-                                    (unsigned long long)frameCount, emaFps);
-            for (std::size_t i = 0; i < detections.size() && pos < 4000; ++i) {
-                const auto& d = detections[i];
-                pos += std::snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos,
-                                     "%s{\"c\":%d,\"s\":%.2f,\"x1\":%d,\"y1\":%d,\"x2\":%d,\"y2\":%d}",
-                                     i ? "," : "",
-                                     d.classId, d.confidence,
-                                     d.boundingBox.x, d.boundingBox.y,
-                                     d.boundingBox.x + d.boundingBox.width,
-                                     d.boundingBox.y + d.boundingBox.height);
+            // Draw detections on frame, encode as JPEG, send via UDP
+            cv::Mat canvas;
+            raw.copyTo(canvas);
+
+            for (const auto& det : detections) {
+                const cv::Rect& box = det.boundingBox;
+                if (box.width <= 0 || box.height <= 0) continue;
+                const bool hazard = det.confidence >= 0.55f;
+                const cv::Scalar color = hazard ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 200, 80);
+                cv::rectangle(canvas, box, color, 2);
+                std::snprintf(jsonBuf, 32, "%.2f", det.confidence);
+                cv::putText(canvas, jsonBuf,
+                            cv::Point(box.x, std::max(box.y - 6, 12)),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_8);
             }
-            std::snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "]}");
-            udp.send(jsonBuf, std::strlen(jsonBuf));
+            std::snprintf(jsonBuf, 64, "FPS:%.1f Det:%zu", emaFps, detections.size());
+            cv::putText(canvas, jsonBuf, cv::Point(8, 22),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1, cv::LINE_8);
+
+            // Encode to JPEG — quality 60 keeps packets under 64KB UDP limit
+            static std::vector<uchar> jpegBuf;
+            static const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 60};
+            cv::imencode(".jpg", canvas, jpegBuf, params);
+
+            if (jpegBuf.size() < 65000)  // UDP max safe payload
+                udp.send(reinterpret_cast<const char*>(jpegBuf.data()), jpegBuf.size());
         }
     }
 
