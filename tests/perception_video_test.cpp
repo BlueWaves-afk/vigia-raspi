@@ -54,9 +54,11 @@ struct UdpSender {
     bool init(const char* ip, int port) {
         fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) return false;
-        // Non-blocking — send never waits
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        // Enable broadcast so Pi can reach Mac through AP isolation
+        int broadcast = 1;
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         inet_pton(AF_INET, ip, &addr.sin_addr);
