@@ -190,13 +190,18 @@ int main(int argc, char** argv) {
             cv::putText(canvas, jsonBuf, cv::Point(8, 22),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1, cv::LINE_8);
 
-            // Encode to JPEG — quality 60 keeps packets under 64KB UDP limit
-            static std::vector<uchar> jpegBuf;
-            static const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 60};
-            cv::imencode(".jpg", canvas, jpegBuf, params);
+            // Resize to 640x360 before encoding to keep JPEG under UDP limit
+            static cv::Mat streamFrame;
+            cv::resize(canvas, streamFrame, cv::Size(640, 360));
 
-            if (jpegBuf.size() < 65000)  // UDP max safe payload
+            static std::vector<uchar> jpegBuf;
+            static const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 50};
+            cv::imencode(".jpg", streamFrame, jpegBuf, params);
+
+            if (jpegBuf.size() < 65000)
                 udp.send(reinterpret_cast<const char*>(jpegBuf.data()), jpegBuf.size());
+            else
+                std::fprintf(stderr, "[WARN] JPEG too large: %zu bytes\n", jpegBuf.size());
         }
     }
 
