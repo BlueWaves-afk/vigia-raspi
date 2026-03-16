@@ -538,27 +538,104 @@ std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, co
 #endif
     const auto& shape = output.get_shape(); 
 
-    // YOLO26 NMS-Free output is typically [1, 300, 6]
-    // Indices: 0:x1, 1:y1, 2:x2, 3:y2, 4:score, 5:class_id
-    const int num_detections = static_cast<int>(shape[1]);
+    // YOLO exports vary in output layout. Common patterns:
+    // - [1, N, 6] => rows are (x1,y1,x2,y2,score,class)
+    // - [1, 6, N] => channels-first, requires transpose-like access
+    // Some exports may omit class_id (5 values) or use [N,6] / [6,N].
+    enum class Layout { kUnknown, kNBy6, k6ByN, kNBy5, k5ByN };
+    Layout layout = Layout::kUnknown;
+    std::size_t numDet = 0;
+
+    if (shape.size() == 3) {
+        const std::size_t a = shape[1];
+        const std::size_t b = shape[2];
+        if (b == 6) { layout = Layout::kNBy6; numDet = a; }
+        else if (a == 6) { layout = Layout::k6ByN; numDet = b; }
+        else if (b == 5) { layout = Layout::kNBy5; numDet = a; }
+        else if (a == 5) { layout = Layout::k5ByN; numDet = b; }
+    } else if (shape.size() == 2) {
+        const std::size_t a = shape[0];
+        const std::size_t b = shape[1];
+        if (b == 6) { layout = Layout::kNBy6; numDet = a; }
+        else if (a == 6) { layout = Layout::k6ByN; numDet = b; }
+        else if (b == 5) { layout = Layout::kNBy5; numDet = a; }
+        else if (a == 5) { layout = Layout::k5ByN; numDet = b; }
+    }
+
+    if (layout == Layout::kUnknown || numDet == 0) {
+        // Unknown output layout — fail safe (no boxes) rather than drawing garbage.
+        return {};
+    }
+
+    const auto readVal = [&](std::size_t detIdx, std::size_t fieldIdx) -> float {
+        switch (layout) {
+            case Layout::kNBy6:
+            case Layout::kNBy5: {
+                const std::size_t stride = (layout == Layout::kNBy6) ? 6 : 5;
+                return data[detIdx * stride + fieldIdx];
+            }
+            case Layout::k6ByN:
+            case Layout::k5ByN: {
+                const std::size_t stride = numDet;  // channel blocks of length N
+                return data[fieldIdx * stride + detIdx];
+            }
+            default:
+                return 0.0f;
+        }
+    };
 
     // Use persistent vectors — clear() keeps capacity, avoids per-frame alloc
     nmsBoxes_.clear();
     nmsScores_.clear();
     nmsClassIds_.clear();
 
-    for (int i = 0; i < num_detections; ++i) {
-        const float* row = data + (i * 6);
-        const float confidence = row[4];
+    for (std::size_t i = 0; i < numDet; ++i) {
+        float x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
+        float confidence = 0.0f;
+        float cls = 0.0f;
+
+        if (layout == Layout::kNBy6 || layout == Layout::k6ByN) {
+            x1 = readVal(i, 0);
+            y1 = readVal(i, 1);
+            x2 = readVal(i, 2);
+            y2 = readVal(i, 3);
+            confidence = readVal(i, 4);
+            cls = readVal(i, 5);
+        } else {
+            // 5-field variant: assume (cx,cy,w,h,score) like some YOLO exports.
+            const float cx = readVal(i, 0);
+            const float cy = readVal(i, 1);
+            const float bw = readVal(i, 2);
+            const float bh = readVal(i, 3);
+            confidence = readVal(i, 4);
+            x1 = cx - (bw * 0.5f);
+            y1 = cy - (bh * 0.5f);
+            x2 = cx + (bw * 0.5f);
+            y2 = cy + (bh * 0.5f);
+            cls = 0.0f;
+        }
 
         if (confidence < confThreshold_) continue;
 
+        // Some exports emit normalized coordinates in [0,1] (or very close).
+        // If so, convert to input-pixel coordinates before unletterboxing.
+        const bool looksNormalized =
+            (x1 >= 0.0f && y1 >= 0.0f && x2 >= 0.0f && y2 >= 0.0f) &&
+            (x1 <= 2.0f && y1 <= 2.0f && x2 <= 2.0f && y2 <= 2.0f);
+
+        if (looksNormalized) {
+            x1 *= static_cast<float>(inputWidth_);
+            x2 *= static_cast<float>(inputWidth_);
+            y1 *= static_cast<float>(inputHeight_);
+            y2 *= static_cast<float>(inputHeight_);
+        }
+
         // ── Inverse letterbox scaling ───────────────────────────────
         // Map coordinates back to original frame (removing padding and scaling)
-        float x1 = (row[0] - lb.pad_w) / lb.scale;
-        float y1 = (row[1] - lb.pad_h) / lb.scale;
-        float x2 = (row[2] - lb.pad_w) / lb.scale;
-        float y2 = (row[3] - lb.pad_h) / lb.scale;
+        x1 = (x1 - static_cast<float>(lb.pad_w)) / lb.scale;
+        y1 = (y1 - static_cast<float>(lb.pad_h)) / lb.scale;
+        x2 = (x2 - static_cast<float>(lb.pad_w)) / lb.scale;
+        y2 = (y2 - static_cast<float>(lb.pad_h)) / lb.scale;
 
         // Clip to original frame boundaries
         x1 = std::clamp(x1, 0.0f, static_cast<float>(origSize.width));
@@ -574,7 +651,7 @@ std::vector<Detection> PerceptionAgent::postprocess(const ov::Tensor& output, co
         if (bw > 0 && bh > 0) {
             nmsBoxes_.emplace_back(bx, by, bw, bh);
             nmsScores_.push_back(confidence);
-            nmsClassIds_.push_back(static_cast<int>(row[5]));
+            nmsClassIds_.push_back(static_cast<int>(cls));
         }
     }
 

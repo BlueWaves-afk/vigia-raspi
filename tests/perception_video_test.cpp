@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     const std::string modelPath = (argIdx < argc)
         ? argv[argIdx]
         : (useFp32 ? "models/yolo26/yolo26_model.xml"
-                   : "models/yolo26/yolo26_model_int8.xml");
+                   : "models/yolo26/yolo26_320_fp16.xml");
 
     // ── OpenCV: let TBB use all cores, disable OpenCL ──────────────
     cv::setNumThreads(0);
@@ -228,6 +228,12 @@ int main(int argc, char** argv) {
     const double avgLatency = frameCount > 0 ? totalLatencyMs / frameCount : 0.0;
     const double avgFps = totalSec > 0.0 ? frameCount / totalSec : 0.0;
 
+    const char* modelLabel = "FP32";
+    if (modelPath.find("int8") != std::string::npos || modelPath.find("INT8") != std::string::npos)
+        modelLabel = "INT8 (quantized)";
+    else if (modelPath.find("fp16") != std::string::npos || modelPath.find("FP16") != std::string::npos)
+        modelLabel = "FP16";
+
     // P95 latency
     double p95 = 0.0;
     if (!latencies.empty()) {
@@ -239,7 +245,7 @@ int main(int argc, char** argv) {
     std::printf("╔══════════════════════════════════════════╗\n");
     std::printf("║         YOLO Detection Benchmark         ║\n");
     std::printf("╠══════════════════════════════════════════╣\n");
-    std::printf("║  Model    : %-29s║\n", (useFp32 ? "FP32" : "INT8 (quantized)"));
+    std::printf("║  Model    : %-29s║\n", modelLabel);
     std::printf("║  Runtime  : OpenVINO 2025 CPU            ║\n");
     std::printf("║  Source   : %-29s║\n", videoPath.c_str());
     std::printf("╠══════════════════════════════════════════╣\n");
