@@ -170,15 +170,10 @@ void Coordinator::midasLoop() {
 
 void Coordinator::processLoop() {
 #if defined(__linux__) && defined(__aarch64__)
-    // Pin process thread to Core 1 — dedicated to YOLO + MiDaS inference.
-    // Core 2 is left free for OpenVINO's TBB worker threads.
-    // Core 3 is pinned to the UI/main thread (in system_visual_test.cpp).
-    {
-        cpu_set_t cpuSet;
-        CPU_ZERO(&cpuSet);
-        CPU_SET(1, &cpuSet);
-        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuSet);
-    }
+    // Do NOT pin the process thread when using ACL — ACL's CPPScheduler
+    // spawns worker threads that need access to all cores. Pinning to a
+    // single core prevents ACL from utilizing the other 3 cores.
+    // Core affinity is handled at the coordinator level via pinThread().
 #endif
 
     using clock = std::chrono::steady_clock;

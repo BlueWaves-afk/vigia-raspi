@@ -68,8 +68,8 @@ int main(int argc, char** argv) {
     cv::setNumThreads(0);
     cv::ocl::setUseOpenCL(false);
 
-    // ── Pin main thread to Core 1 (inference core on Pi 4) ─────────
-    pinToCore(1);
+    // Thread pinning disabled — ACL CPPScheduler needs all cores available
+    // pinToCore(1);
 
     // ── Shared ov::Core — single plugin init ────────────────────────
     auto corePtr = std::make_shared<ov::Core>();

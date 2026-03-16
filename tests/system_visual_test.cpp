@@ -1324,9 +1324,8 @@ int main(int argc, char** argv) {
         cv::setNumThreads(0);
         cv::ocl::setUseOpenCL(false);
 
-        // Pin UI/main thread to Core 3 (Linux/Raspberry Pi).
-        // Core 0 = capture, Core 1 = process, Core 2 = TBB workers, Core 3 = UI.
-        pinCurrentThreadToCore(3);
+        // Thread pinning disabled — ACL CPPScheduler needs all cores available
+        // pinCurrentThreadToCore(3);
 
 #ifdef __linux__
         // ── Verify CPU governor is set to 'performance' ────────────────
