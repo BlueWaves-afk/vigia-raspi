@@ -18,6 +18,7 @@
 #include "perception.hpp"
 
 #include <opencv2/core/ocl.hpp>
+#include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
@@ -127,7 +128,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // UDP telemetry sender (non-blocking, fire-and-forget)
+    if (!headless && !streamIp)
+        cv::namedWindow("YOLO", cv::WINDOW_NORMAL);
+
     UdpSender udp;
     if (streamIp) {
         if (udp.init(streamIp, 5005))
@@ -171,41 +174,55 @@ int main(int argc, char** argv) {
         emaFps = (frameCount == 1) ? instantFps : kAlpha * instantFps + (1.0 - kAlpha) * emaFps;
 
         if (streamIp && udp.fd >= 0) {
-            // Draw detections on frame, encode as JPEG, send via UDP
+            // Draw on frame, encode, send
             cv::Mat canvas;
             raw.copyTo(canvas);
-
             for (const auto& det : detections) {
                 const cv::Rect& box = det.boundingBox;
                 if (box.width <= 0 || box.height <= 0) continue;
                 const bool hazard = det.confidence >= 0.55f;
                 const cv::Scalar color = hazard ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 200, 80);
                 cv::rectangle(canvas, box, color, 2);
-                std::snprintf(jsonBuf, 32, "%.2f", det.confidence);
-                cv::putText(canvas, jsonBuf,
-                            cv::Point(box.x, std::max(box.y - 6, 12)),
+                std::snprintf(buf, sizeof(buf), "%.2f", det.confidence);
+                cv::putText(canvas, buf, cv::Point(box.x, std::max(box.y - 6, 12)),
                             cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_8);
             }
-            std::snprintf(jsonBuf, 64, "FPS:%.1f Det:%zu", emaFps, detections.size());
-            cv::putText(canvas, jsonBuf, cv::Point(8, 22),
+            std::snprintf(buf, sizeof(buf), "FPS:%.1f Det:%zu", emaFps, detections.size());
+            cv::putText(canvas, buf, cv::Point(8, 22),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1, cv::LINE_8);
-
-            // Resize to 640x360 before encoding to keep JPEG under UDP limit
             static cv::Mat streamFrame;
             cv::resize(canvas, streamFrame, cv::Size(640, 360));
-
             static std::vector<uchar> jpegBuf;
             static const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 50};
             cv::imencode(".jpg", streamFrame, jpegBuf, params);
-
             if (jpegBuf.size() < 65000)
                 udp.send(reinterpret_cast<const char*>(jpegBuf.data()), jpegBuf.size());
             else
                 std::fprintf(stderr, "[WARN] JPEG too large: %zu bytes\n", jpegBuf.size());
+        } else if (!headless) {
+            // Local display via X11/VNC
+            cv::Mat canvas;
+            raw.copyTo(canvas);
+            for (const auto& det : detections) {
+                const cv::Rect& box = det.boundingBox;
+                if (box.width <= 0 || box.height <= 0) continue;
+                const bool hazard = det.confidence >= 0.55f;
+                const cv::Scalar color = hazard ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 200, 80);
+                cv::rectangle(canvas, box, color, 2);
+                std::snprintf(buf, sizeof(buf), "%.2f", det.confidence);
+                cv::putText(canvas, buf, cv::Point(box.x, std::max(box.y - 6, 12)),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_8);
+            }
+            std::snprintf(buf, sizeof(buf), "FPS:%.1f  Lat:%.1fms  Det:%zu",
+                          emaFps, latMs, detections.size());
+            cv::putText(canvas, buf, cv::Point(8, 22),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1, cv::LINE_8);
+            cv::imshow("YOLO", canvas);
+            if (cv::waitKey(1) == 'q') break;
         }
     }
 
-    if (!headless) { /* no GUI in telemetry mode */ }
+    if (!headless && !streamIp) cv::destroyAllWindows();
 
     const double totalSec = std::chrono::duration<double>(clock::now() - runStart).count();
     const double avgLatency = frameCount > 0 ? totalLatencyMs / frameCount : 0.0;
