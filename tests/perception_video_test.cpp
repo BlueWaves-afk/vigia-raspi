@@ -18,17 +18,22 @@
 #include "perception.hpp"
 
 #include <opencv2/core/ocl.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <openvino/openvino.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
+
+// UDP telemetry
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #ifdef __linux__
 #include <pthread.h>
@@ -41,6 +46,32 @@ static void pinToCore(int core) {
 static void pinToCore(int) {}
 #endif
 
+// Non-blocking UDP socket — fire-and-forget, never blocks inference loop
+struct UdpSender {
+    int fd{-1};
+    sockaddr_in addr{};
+
+    bool init(const char* ip, int port) {
+        fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) return false;
+        // Non-blocking — send never waits
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        inet_pton(AF_INET, ip, &addr.sin_addr);
+        return true;
+    }
+
+    void send(const char* json, std::size_t len) {
+        if (fd >= 0)
+            sendto(fd, json, len, 0, (sockaddr*)&addr, sizeof(addr));
+        // Non-blocking: if buffer full, packet is dropped — inference continues
+    }
+
+    ~UdpSender() { if (fd >= 0) close(fd); }
+};
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: perception_video_test [--headless] <video.mp4> [yolo_xml]\n";
@@ -49,12 +80,13 @@ int main(int argc, char** argv) {
 
     bool headless = false;
     bool useFp32 = false;
+    const char* streamIp = nullptr;
     int argIdx = 1;
     if (argIdx < argc && std::string(argv[argIdx]) == "--headless") { headless = true; ++argIdx; }
     if (argIdx < argc && std::string(argv[argIdx]) == "--fp32")     { useFp32  = true; ++argIdx; }
+    if (argIdx < argc && std::string(argv[argIdx]) == "--stream")   { ++argIdx; if (argIdx < argc) streamIp = argv[argIdx++]; }
     if (argIdx >= argc) {
-        std::cerr << "Usage: perception_video_test [--headless] [--fp32] <video.mp4> [yolo_xml]\n"
-                  << "  --fp32   Use FP32 model (default: INT8)\n";
+        std::cerr << "Usage: perception_video_test [--headless] [--fp32] [--stream <mac-ip>] <video.mp4> [yolo_xml]\n";
         return 1;
     }
 
@@ -91,11 +123,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!headless)
-        cv::namedWindow("YOLO", cv::WINDOW_NORMAL);
+    // UDP telemetry sender (non-blocking, fire-and-forget)
+    UdpSender udp;
+    if (streamIp) {
+        if (udp.init(streamIp, 5005))
+            std::printf("[INFO] Streaming detections to %s:5005\n", streamIp);
+        else
+            std::cerr << "[WARN] Failed to init UDP socket\n";
+    }
 
-    // Pre-allocated canvas — reused every frame, no per-frame clone
-    cv::Mat canvas;
+    // Pre-allocated JSON buffer — no heap alloc per frame
+    char jsonBuf[4096];
     char buf[64];
 
     // EMA FPS
@@ -128,34 +166,28 @@ int main(int argc, char** argv) {
         const double instantFps = 1000.0 / latMs;
         emaFps = (frameCount == 1) ? instantFps : kAlpha * instantFps + (1.0 - kAlpha) * emaFps;
 
-        if (!headless) {
-            // Reuse canvas allocation — copyTo only reallocates if size changes
-            raw.copyTo(canvas);
-
-            for (const auto& det : detections) {
-                const cv::Rect& box = det.boundingBox;
-                if (box.width <= 0 || box.height <= 0) continue;
-                const bool hazard = det.confidence >= 0.55f;
-                const cv::Scalar color = hazard ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 200, 80);
-                cv::rectangle(canvas, box, color, 2);
-                std::snprintf(buf, sizeof(buf), "%.2f", det.confidence);
-                cv::putText(canvas, buf,
-                            cv::Point(box.x, std::max(box.y - 6, 12)),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_8);
+        if (streamIp && udp.fd >= 0) {
+            // Serialize detections to compact JSON — no heap alloc
+            // Format: {"f":123,"fps":9.3,"dets":[{"c":0,"s":0.82,"x1":10,"y1":20,"x2":100,"y2":80},...]}
+            int pos = std::snprintf(jsonBuf, sizeof(jsonBuf),
+                                    "{\"f\":%llu,\"fps\":%.1f,\"dets\":[",
+                                    (unsigned long long)frameCount, emaFps);
+            for (std::size_t i = 0; i < detections.size() && pos < 4000; ++i) {
+                const auto& d = detections[i];
+                pos += std::snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos,
+                                     "%s{\"c\":%d,\"s\":%.2f,\"x1\":%d,\"y1\":%d,\"x2\":%d,\"y2\":%d}",
+                                     i ? "," : "",
+                                     d.classId, d.confidence,
+                                     d.boundingBox.x, d.boundingBox.y,
+                                     d.boundingBox.x + d.boundingBox.width,
+                                     d.boundingBox.y + d.boundingBox.height);
             }
-
-            // HUD: FPS + latency
-            std::snprintf(buf, sizeof(buf), "FPS:%.1f  Lat:%.1fms  Det:%zu",
-                          emaFps, latMs, detections.size());
-            cv::putText(canvas, buf, cv::Point(8, 22),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1, cv::LINE_8);
-
-            cv::imshow("YOLO", canvas);
-            if (cv::waitKey(1) == 'q') break;
+            std::snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "]}");
+            udp.send(jsonBuf, std::strlen(jsonBuf));
         }
     }
 
-    if (!headless) cv::destroyAllWindows();
+    if (!headless) { /* no GUI in telemetry mode */ }
 
     const double totalSec = std::chrono::duration<double>(clock::now() - runStart).count();
     const double avgLatency = frameCount > 0 ? totalLatencyMs / frameCount : 0.0;
