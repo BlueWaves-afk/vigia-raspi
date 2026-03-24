@@ -520,7 +520,7 @@ The guide covers Raspberry Pi OS configuration and performance tuning, building 
 
 ## About the Developer
 
-VIGIA-ARM was designed and built by **Tom Mathew** (National Institute of Technology, Rourkela) as a systems-level embedded AI project demonstrating hardware-aware co-design, production-quality architecture, and deep optimization across the full stack — from ARM SIMD intrinsics to multimodal fusion metrics.
+VIGIA-ARM was designed and built by **Tom Mathew** (National Institute of Technology, Rourkela) and Team (Ben Biju & Shreeram Balasubramanian) a systems-level embedded AI project demonstrating hardware-aware co-design, production-quality architecture, and deep optimization across the full stack — from ARM SIMD intrinsics to multimodal fusion metrics.
 
 **Skills demonstrated in this project:**
 
