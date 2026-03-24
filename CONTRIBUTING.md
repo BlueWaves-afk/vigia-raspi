@@ -251,12 +251,12 @@ If you still want to attempt the pre-compiled route (e.g., for a quick feasibili
 
 ```bash
 # Download an ARM64 archive (may not work on Pi OS — see warning above)
-wget https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.0/linux/openvino_toolkit_ubuntu20_2025.0.0.17942.1f68be9f594_arm64.tgz -O openvino_2025.tgz
+wget https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.0/linux/openvino_toolkit_ubuntu20_2025.0.0.17942.1f68be9f594_arm64.tgz -O openvino_2023.tgz
 
-sudo mkdir -p /opt/intel/openvino_2025
-sudo tar -xf openvino_2025.tgz -C /opt/intel/openvino_2025 --strip-components=1
+sudo mkdir -p /opt/intel/openvino_2023
+sudo tar -xf openvino_2023.tgz -C /opt/intel/openvino_2023 --strip-components=1
 
-echo "source /opt/intel/openvino_2025/setupvars.sh" >> ~/.bashrc
+echo "source /opt/intel/openvino_2023/setupvars.sh" >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -264,7 +264,7 @@ source ~/.bashrc
 
 Building OpenVINO from source is the **only reliable path** on Raspberry Pi OS. This compiles the ARM CPU plugin natively, ensuring correct memory alignment, and links KleidiAI micro-kernels directly into the plugin for optimized GEMM operations on Cortex-A72.
 
-> **Note on KleidiAI:** You do **not** need to clone or build KleidiAI separately. OpenVINO's build system fetches and compiles KleidiAI automatically when `-DENABLE_KLEIDIAI=ON` is set. The KleidiAI source is bundled as a dependency inside the OpenVINO repository.
+> **Note on KleidiAI:** KleidiAI's INT8 GEMM micro-kernels require `FEAT_DotProd` (`asimddp`) which is absent on the Cortex-A72. For the Pi 4, we use ACL (Arm Compute Library) as the NEON GEMM backend instead. KleidiAI is disabled at build time with `-DENABLE_KLEIDIAI=OFF` to ensure ACL is the active dispatch path.
 
 #### 7.1 Install Build Prerequisites
 
@@ -293,7 +293,7 @@ git clone --recurse-submodules https://github.com/openvinotoolkit/openvino.git
 cd openvino
 
 # Check out a known-good release tag
-git checkout 2025.4.2
+git checkout 2023.3.0
 git submodule update --init --recursive
 ```
 
@@ -303,9 +303,10 @@ git submodule update --init --recursive
 mkdir build && cd build
 
 cmake -DCMAKE_BUILD_TYPE=Release \
-      -DENABLE_KLEIDIAI=ON \
-      -DCMAKE_INSTALL_PREFIX=/opt/intel/openvino_2025 \
-      -DENABLE_INTEL_CPU=OFF \
+      -DENABLE_ARM_COMPUTE_CMAKE=ON \
+      -DENABLE_KLEIDIAI=OFF \
+      -DCMAKE_INSTALL_PREFIX=/opt/intel/openvino_2023 \
+      -DENABLE_INTEL_CPU=ON \
       -DENABLE_INTEL_GPU=OFF \
       -DENABLE_INTEL_NPU=OFF \
       -DENABLE_SAMPLES=OFF \
@@ -318,11 +319,10 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       ..
 ```
 
-**Flag rationale:**
-
 | Flag | Purpose |
 |------|---------|
-| `ENABLE_KLEIDIAI=ON` | Links KleidiAI NEON micro-kernels for INT8/FP32 GEMM |
+| `ENABLE_ARM_COMPUTE_CMAKE=ON` | Compiles ACL NEON GEMM kernels into the CPU plugin for Cortex-A72 |
+| `ENABLE_KLEIDIAI=OFF` | Disables KleidiAI (requires `FEAT_DotProd`/`asimddp`, absent on A72) |
 | `ENABLE_INTEL_*=OFF` | Disables x86-only plugins (GPU, NPU) that do not exist on ARM |
 | `THREADING=TBB` | Uses the system TBB library for multi-core dispatch |
 | `-mcpu=cortex-a72` | Generates code tuned specifically for the Pi 4's core |
@@ -334,7 +334,7 @@ cmake -DCMAKE_BUILD_TYPE=Release \
 # Ensure swap is at least 2 GB (see Section 3)
 make -j$(nproc)
 
-# Install to /opt/intel/openvino_2025
+# Install to /opt/intel/openvino_2023
 sudo make install
 ```
 
@@ -342,11 +342,11 @@ sudo make install
 
 ```bash
 # Add OpenVINO libraries to the linker search path
-echo "/opt/intel/openvino_2025/runtime/lib/aarch64" | sudo tee /etc/ld.so.conf.d/openvino.conf
+echo "/opt/intel/openvino_2023/runtime/lib/aarch64" | sudo tee /etc/ld.so.conf.d/openvino.conf
 sudo ldconfig
 
 # Add to your shell profile for CMake discovery
-echo 'export OpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake' >> ~/.bashrc
+echo 'export OpenVINO_DIR=/opt/intel/openvino_2023/runtime/cmake' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -354,11 +354,11 @@ source ~/.bashrc
 
 ```bash
 # Confirm the ARM CPU plugin exists
-ls /opt/intel/openvino_2025/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so
+ls /opt/intel/openvino_2023/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so
 
-# Verify KleidiAI is linked into the plugin
-strings /opt/intel/openvino_2025/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so | grep -i kleidiai
-# Expected output: kleidiai, MatMulKleidiAIExecutor, etc.
+# Verify ACL is linked into the plugin
+strings /opt/intel/openvino_2023/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so | grep -i "arm_compute\|ACLScheduler"
+# Expected output: ACLScheduler, arm_compute, etc.
 ```
 
 ---
@@ -376,16 +376,21 @@ mkdir -p build && cd build
 # Configure the project with CMake
 # If OpenVINO_DIR is set in your shell (see Section 7.5), CMake finds it automatically.
 # Otherwise, pass it explicitly:
-cmake -DOpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake ..
+cmake -DOpenVINO_DIR=/opt/intel/openvino_2023/runtime/cmake ..
 
-# Compile the visual test using all 4 cores
-make system_visual_test -j$(nproc)
+# Compile using all 4 cores
+make perception_video_test system_visual_test -j$(nproc)
+
+# Symlink assets so the binary can find them from the build directory
+ln -sf ../models models 2>/dev/null
+ln -sf ../hazard.mp4 hazard.mp4 2>/dev/null
 
 # Lock the CPU governor to maximum performance
-echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 
-# Run the test (assumes hazard.mp4 and models/ are in your project root)
-./system_visual_test --video ../hazard.mp4
+# Run the full pipeline (FP16 YOLO — production default)
+export DISPLAY=:1
+./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
 ```
 
 ---
@@ -508,11 +513,11 @@ Once connected via VNC, open a terminal in the VNC session and run:
 ```bash
 cd ~/vigia-raspi/build
 
-# Standard dashboard view
-./system_visual_test --video hazard.mp4
+# Full pipeline — FP16 YOLO, fullscreen (press Q to quit)
+./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
 
-# Fullscreen mode (press Q to quit)
-./system_visual_test -F --video hazard.mp4
+# Headless benchmark — maximum throughput (~10.3 FPS EMA)
+./system_visual_test --headless --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
 ```
 
 The OpenCV window will appear in the VNC session, not on your local display.
@@ -545,9 +550,11 @@ vncserver :1 -geometry 1280x720 -depth 24
 # 3. Open a new terminal on your Mac and connect via VNC
 open vnc://raspi4B.local:5901
 
-# 4. In the VNC session, run visual tests
+# 4. In the VNC session, source OpenVINO and run
+source /opt/intel/openvino_2023/setupvars.sh
 cd ~/vigia-raspi/build
-./system_visual_test -F --video hazard.mp4
+export DISPLAY=:1
+./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
 
 # 5. When finished, stop VNC to free resources
 vncserver -kill :1
@@ -595,7 +602,7 @@ vncserver -kill :1
 
 | Framework    | ARM CPU Efficiency | Notes                                          |
 |--------------|--------------------|------------------------------------------------|
-| **OpenVINO** | Excellent          | JIT + KleidiAI + NEON — best determinism       |
+| **OpenVINO** | Excellent          | JIT + ACL NEON GEMM — best determinism on A72  |
 | TFLite       | Good               | Good performance, but less runtime optimization |
 | ONNX Runtime | Adequate           | Limited ARM-specific tuning                    |
 
@@ -624,7 +631,7 @@ Switching from the Wayland compositor to X11 resolved clipboard sync issues betw
 **Issue: SIGBUS Crash During Model Compilation**
 The pre-compiled OpenVINO binary crashed at `ov::Core::compile_model()` with signal 7 (SIGBUS) due to memory alignment mismatches between the Ubuntu-targeted archive and Raspberry Pi OS.
 
-*Solution:* Build OpenVINO 2025.4.2 from source with `-DENABLE_KLEIDIAI=ON`. This ensures 16-byte alignment guards are active and all SIMD paths are compiled natively for the Cortex-A72.
+*Solution:* Build OpenVINO 2023.3.0 from source with `-DENABLE_ARM_COMPUTE_CMAKE=ON` and `-DENABLE_KLEIDIAI=OFF`. This compiles ACL's A72-tuned NEON GEMM kernels directly into the CPU plugin, bypassing the `FEAT_DotProd` requirement entirely.
 
 **Issue: SD Card Memory Faults (`mmap`)**
 Memory-mapping model weights from an SD card caused intermittent hangs and crashes.

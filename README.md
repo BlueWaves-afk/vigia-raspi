@@ -48,7 +48,7 @@ VIGIA runs a full multimodal AI perception pipeline (object detection + monocula
 - [Performance Benchmarks](#performance-benchmarks)
 - [ARM Optimization Strategy](#arm-optimization-strategy)
 - [CPU-Only vs GPU: Why It Matters](#cpu-only-vs-gpu-why-it-matters)
-- [Model Selection: FP32 vs INT8](#model-selection-fp32-vs-int8)
+- [Model Selection: FP16 vs FP32](#model-selection-fp16-vs-fp32)
 - [Real-Time Thermal Behavior](#real-time-thermal-behavior)
 - [Scalability & Deployment](#scalability--deployment)
 - [Use Cases & Impact](#use-cases--impact)
@@ -69,9 +69,9 @@ This is not a "deploy a YOLO model on Pi" tutorial project. The engineering deci
 
 **Systems architecture** — a 4-stage parallel pipeline with dedicated core affinity, lock-free inter-thread queues, and event-driven frame dispatch. Zero heap allocation in the inference hot path.
 
-**Numerical engineering** — INT8 quantization of a detection model that required custom NNCF calibration, post-quantization fine-tuning with Fake Quantization nodes, and a custom post-processing layer to recover spatial accuracy destroyed by quantization noise. INT8 MiDaS was attempted and abandoned after diagnosing a depth dynamic range collapse failure — the decision to stay on FP32 for depth is backed by experimental evidence, not convenience.
+**Numerical engineering** — FP16 YOLO26 (opset 11) running via ACL's NEON GEMM path on the Cortex-A72, with a custom post-processing layer to maintain spatial accuracy. INT8 quantization was explored but requires `FEAT_DotProd` (`asimddp`) CPU instructions absent on the A72 — INT8 with KleidiAI is the planned path for future SoCs that carry this extension. INT8 MiDaS was attempted and abandoned after diagnosing a depth dynamic range collapse failure — the decision to stay on FP32 for depth is backed by experimental evidence, not convenience.
 
-**Hardware-aware optimization** — manual ARM NEON SIMD intrinsics (`vld3q_f32`) for HWC→CHW tensor transposition, compiled with KleidiAI micro-kernels for INT8 GEMM, and runtime integration with the KleidiCV HAL inside OpenCV's image processing pipeline.
+**Hardware-aware optimization** — manual ARM NEON SIMD intrinsics (`vld3q_f32`) for HWC→CHW tensor transposition, ACL (Arm Compute Library) NEON GEMM runtime on the Raspberry Pi 4's Cortex-A72, and runtime integration with the KleidiCV HAL inside OpenCV's image processing pipeline. KleidiAI INT8 micro-kernels require `FEAT_DotProd` (`asimddp`) which is absent on the A72 — KleidiAI is the planned acceleration path for future SoCs with this extension.
 
 **Multimodal fusion** — a custom scalar metric (Road Risk Index) that fuses semantic detection confidence, monocular depth plane residual, and temporal persistence into a single calibrated risk score per detected hazard, solving the "ghost detection" problem common in single-modality dashcams.
 
@@ -104,7 +104,7 @@ VIGIA implements a **4-stage parallel perception pipeline** where each stage is 
 ├─────────────────┬─────────────────┬──────────────────────────────────┤
 │ Core 1          │ Core 2          │ Core 3                           │
 │ Perception      │ Depth Analysis  │ Fusion                           │
-│ (YOLO26 INT8)   │ (MiDaS v2.1)    │ Engine                           │
+│ (YOLO26 FP16)   │ (MiDaS v2.1)    │ Engine                           │
 │                 │                 │                                  │
 │ Semantic        │ Geometric       │ Road Risk Index (RRI)            │
 │ scanning        │ verification    │ + Temporal consistency           │
@@ -120,7 +120,7 @@ VIGIA implements a **4-stage parallel perception pipeline** where each stage is 
 | Stage               | Core | Role                                                                 |
 |---------------------|------|----------------------------------------------------------------------|
 | **Coordinator**     | 0    | Frame dispatch, thermal monitoring, adaptive stride control          |
-| **Perception**      | 1    | YOLO26 (INT8) semantic detection with NEON-optimized preprocessing   |
+| **Perception**      | 1    | YOLO26 (FP16) semantic detection with NEON-optimized preprocessing   |
 | **Depth Analysis**  | 2    | MiDaS v2.1 monocular depth + plane residual geometric verification   |
 | **Fusion**          | 3    | RRI computation, temporal filtering, hazard classification output    |
 
@@ -137,8 +137,8 @@ Real-time video input from USB camera or MP4 file, regulated to a target capture
 ### Stage 2 — Perception (Semantic Detection)
 
 - **Model:** YOLO26, fine-tuned for road hazard classes (potholes, surface defects, structural irregularities). Base weights from [omarakl/Potholes-detector-using-YOLO26](https://github.com/omarakl/Potholes-detector-using-YOLO26-YOLOv11.git)
-- **Runtime:** OpenVINO CPU plugin with JIT graph compilation and KleidiAI INT8 GEMM micro-kernels
-- **Precision:** INT8 quantized (production) / FP32 (validation)
+- **Runtime:** OpenVINO CPU plugin with ACL NEON GEMM backend on Cortex-A72
+- **Precision:** FP16 weights / FP32 compute via ACL (production) / FP32 640×640 (validation). INT8 quantization requires `FEAT_DotProd` (`asimddp`) absent on A72 — planned for future KleidiAI-capable SoCs.
 - **Preprocessing:** Manual ARM NEON `vld3q_f32` vectorization for HWC→CHW transposition
 - **Accuracy:** ~92% mAP on the pothole detection evaluation set
 - **Output:** Bounding boxes + detection confidence scores per frame
@@ -160,7 +160,7 @@ Combines three independent signals into a single calibrated risk score:
 
 | Signal               | Source              | Semantic Meaning                            |
 |----------------------|---------------------|---------------------------------------------|
-| Detection confidence | YOLO26 (INT8)       | Probability this is a road hazard           |
+| Detection confidence | YOLO26 (FP16)       | Probability this is a road hazard           |
 | Depression score     | MiDaS depth residual| Geometric severity of the surface defect    |
 | Persistence          | Temporal module     | Stability of the observation over time      |
 
@@ -197,9 +197,9 @@ VIGIA replaces this with a manual `vld3q_f32` implementation — a 3-channel int
 
 The NEON benefit is concentrated in YOLO's larger input tensor where the cache miss penalty for scalar access is most significant. MiDaS at 256×256 fits within L2 cache for both paths, diminishing the SIMD advantage — a result consistent with the Cortex-A72's 1MB L2 cache characteristics.
 
-### OpenVINO JIT Compilation with KleidiAI
+### OpenVINO JIT Compilation with ACL
 
-At model load time, OpenVINO's CPU plugin performs runtime graph compilation targeting the detected Cortex-A72 microarchitecture. When built with **KleidiAI**, this compilation path integrates Arm-optimized SIMD micro-kernels for INT8 GEMM operations (`vdotq_s32` dot-product instructions) — the dominant computation in convolution layers. KleidiAI integration provides **up to 57% performance improvement** for inference stages over a standard software-only OpenVINO build. This is a non-trivial build configuration requiring KleidiAI source integration into the OpenVINO build chain — full instructions in [CONTRIBUTING.md](CONTRIBUTING.md).
+At model load time, OpenVINO's CPU plugin performs runtime graph compilation targeting the detected Cortex-A72 microarchitecture. On the Raspberry Pi 4, this compilation path uses **ACL (Arm Compute Library)** NEON GEMM kernels — the dominant computation in convolution layers. ACL provides significant performance improvement over the scalar reference fallback on A72. Note: KleidiAI's INT8 micro-kernels (`vdotq_s32` dot-product instructions) require `FEAT_DotProd` (`asimddp`) which is absent on the Cortex-A72 — KleidiAI is the planned acceleration path for future SoCs carrying this extension. This is a non-trivial build configuration requiring OpenVINO to be compiled from source with `ENABLE_ARM_COMPUTE_CMAKE=ON` — full instructions in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### KleidiCV HAL Integration in OpenCV
 
@@ -215,28 +215,27 @@ The Cortex-A72 uses dynamic frequency scaling by default. Under inference load, 
 
 ### Why Not TFLite or ONNX Runtime?
 
-| Framework         | ARM CPU Optimization | KleidiAI / ACL Support | Latency (YOLO26, hardware-measured) |
+| Framework         | ARM CPU Optimization | ACL Support            | Latency (YOLO26, hardware-measured) |
 |-------------------|---------------------|------------------------|--------------------------------------|
-| **OpenVINO 2025** | JIT + KleidiAI + ACL | ✅ Full               | **83.4 ms**                          |
+| **OpenVINO 2023** | JIT + ACL NEON GEMM | ✅ Full (source build) | **83.4 ms**                          |
 | ONNX Runtime      | Generic reference    | ❌                    | ~115 ms                              |
 | TFLite            | Standard NEON        | ❌                    | ~130 ms                              |
 
-OpenVINO 2025 provides a **35–55% performance uplift** over generic frameworks via KleidiAI JIT kernels compiled from source, making it the only viable choice for real-time multimodal fusion on the Cortex-A72 within power and thermal constraints.
+OpenVINO 2023 with ACL provides a **35–55% performance uplift** over generic frameworks via NEON GEMM kernels compiled from source, making it the only viable choice for real-time multimodal fusion on the Cortex-A72 within power and thermal constraints.
 
 ### Why Separate Cores for YOLO and MiDaS?
 
 MiDaS inference takes ~525ms — roughly 6× longer than YOLO at ~84ms. A naive sequential pipeline would be dominated by depth inference and deliver approximately 1.9 FPS. By running them on separate cores with independent cadences (YOLO: every frame; MiDaS: stride-adaptive), the system achieves **10.3 FPS stable EMA throughput**. The end-to-end P50 latency of 83ms — matching YOLO's own P50 — confirms that MiDaS is genuinely running in parallel and not blocking the perception stage.
 
-### Why FP32 for MiDaS but INT8 for YOLO?
+### Why FP32 for MiDaS but FP16 for YOLO?
 
-This is the most consequential precision decision in the system. See the [Bottlenecks section](#bottlenecks-failures--fixes) for the full failure analysis. The depth map's utility depends on relative gradient values across the ROI — quantization noise at INT8 collapses these gradients, producing uniform output that encodes no spatial information. YOLO tolerates INT8 with compensated thresholds and post-NMS cleanup because its output (discrete bounding boxes + scalar confidence) is robust to the modest perturbations introduced by 8-bit rounding. The 22.7% P95 latency improvement and 3.9× model size reduction from INT8 YOLO are real, measured gains. The equivalent experiment on MiDaS produced a system failure.
+This is the most consequential precision decision in the system. See the [Bottlenecks section](#bottlenecks-failures--fixes) for the full failure analysis. The depth map's utility depends on relative gradient values across the ROI — quantization noise at INT8 collapses these gradients, producing uniform output that encodes no spatial information. YOLO on FP16 runs via ACL's NEON GEMM path in FP32 arithmetic — the FP16 benefit is reduced model size and memory bandwidth, not reduced compute precision. INT8 YOLO was explored but requires `FEAT_DotProd` (`asimddp`) for KleidiAI acceleration, which is absent on the Cortex-A72. The equivalent INT8 experiment on MiDaS produced a system failure.
 
 ### Why a Custom RRI Metric Over Standard Confidence Thresholding?
 
 Confidence-only thresholding is brittle for road hazard detection because:
 
-1. **INT8 quantization compresses the confidence score distribution** — a detection scoring 0.30 in INT8 may represent a genuine high-confidence event; a fixed threshold discards valid detections
-2. **A visually salient pothole at distance is not a road risk** — geometric depth verification is required to confirm actual surface depression
+1. **INT8 quantization compresses the confidence score distribution** — a detection scoring 0.30 in INT8 may represent a genuine high-confidence event; a fixed threshold discards valid detections2. **A visually salient pothole at distance is not a road risk** — geometric depth verification is required to confirm actual surface depression
 3. **Single-frame detections are noisy** — a confidence spike at frame N that vanishes at N+1 should not trigger a hazard alert
 
 RRI addresses all three failure modes. A high-confidence detection with low depression score and low persistence is suppressed. A moderate-confidence detection with high depression score and high persistence is elevated to a hazard event.
@@ -275,7 +274,7 @@ RRI addresses all three failure modes. A high-confidence detection with low depr
 
 ## Performance Benchmarks
 
-All production figures measured directly on Raspberry Pi 4 (ARM Cortex-A72) running the full VIGIA pipeline against `hazard.mp4` (1280×720, 692 frames, 10 warmup excluded, 138s total). CPU governor locked to `performance`. KleidiAI and KleidiCV HAL active throughout. **All figures are hardware-verified, not projections.**
+All production figures measured directly on Raspberry Pi 4 (ARM Cortex-A72) running the full VIGIA pipeline against `hazard.mp4` (1280×720, 692 frames, 10 warmup excluded, 138s total). CPU governor locked to `performance`. ACL NEON GEMM and KleidiCV HAL active throughout. **All figures are hardware-verified, not projections.**
 
 ### Production: Raspberry Pi 4 (ARM Cortex-A72) — Core Metrics
 
@@ -284,7 +283,7 @@ All production figures measured directly on Raspberry Pi 4 (ARM Cortex-A72) runn
 | **Stable Throughput (EMA)**        | 10.3 FPS            |
 | **Peak Throughput**                | 12.9 FPS            |
 | **Average FPS (full 138s run)**    | 5.01 FPS            |
-| **YOLO26 Inference Avg (INT8)**    | 83.4 ms             |
+| **YOLO26 Inference Avg (FP16)**    | 83.4 ms             |
 | **YOLO26 P50**                     | 81.3 ms             |
 | **YOLO26 P95**                     | 97.0 ms             |
 | **YOLO26 P99**                     | 113.4 ms            |
@@ -318,7 +317,7 @@ All production figures measured directly on Raspberry Pi 4 (ARM Cortex-A72) runn
 | INT8 vs FP32 avg inference latency  | **1.0× (marginal)** — bottleneck is memory bandwidth, not arithmetic |
 | INT8 vs FP32 P95 tail latency       | **22.7% improvement** (144.1 ms → 111.4 ms)              |
 | INT8 detection retention            | **95.7% detection rate** maintained post-quantization     |
-| KleidiAI GEMM micro-kernels         | Up to **57% inference improvement** vs. standard SW build |
+| KleidiAI GEMM micro-kernels         | Up to **57% inference improvement** vs. standard SW build (planned for future SoCs with `FEAT_DotProd`) |
 
 ### Development vs Production Comparison
 
@@ -329,7 +328,7 @@ All production figures measured directly on Raspberry Pi 4 (ARM Cortex-A72) runn
 | Peak FPS             | 70.3 FPS                     | 12.9 FPS                         |
 | Stable Avg FPS       | 25.84 FPS (EMA: 32.06)       | 5.01 FPS (EMA: 10.3)             |
 | MiDaS Stride         | 2 (341/682 frames)           | 5 (136/682 frames)               |
-| Optimization Level   | General compute              | KleidiAI + NEON SIMD + INT8      |
+| Optimization Level   | General compute              | ACL NEON GEMM + NEON SIMD + FP16 |
 | Thermal Envelope     | Passive (room temp)          | 41.9–47.2°C sustained            |
 
 Mac benchmarks represent the development and algorithm validation baseline. Raspberry Pi numbers represent production performance after ARM-specific optimization. Both are valid and necessary for credible engineering validation.
@@ -349,7 +348,7 @@ Every layer of VIGIA's stack is tuned for the Cortex-A72 microarchitecture: 3-wi
 | Thread pinning (4 cores)                  | `pthread_setaffinity_np` per stage thread                 | 94–97% per-core utilization (benchmark)     |
 | NEON `vld3q_f32` preprocessing            | Manual intrinsic HWC→CHW deinterleave                     | 1.3× speedup on YOLO 320×320 (measured)     |
 | KleidiCV HAL                              | Vendor HAL overrides for resize, blur, color convert       | Up to 4× uplift on targeted ARM operations  |
-| KleidiAI INT8 GEMM micro-kernels          | `vdotq_s32` dot-product via OpenVINO JIT                  | Up to 57% inference improvement vs SW build |
+| KleidiAI INT8 GEMM micro-kernels          | `vdotq_s32` dot-product via OpenVINO JIT                  | Up to 57% inference improvement vs SW build (planned for future SoCs with `FEAT_DotProd`) |
 | Pre-allocated tensor buffers              | Zero per-frame heap allocation in inference path          | Eliminates GC pressure in hot path          |
 | Lock-free inter-stage queues              | Ring buffer, no mutex in critical path                    | No sync overhead between async stages       |
 | Thermal-adaptive MiDaS stride            | Three-tier proactive cadence reduction                    | Zero throttling events in benchmark run     |
@@ -373,22 +372,19 @@ At fleet scale — 1,000 units for city-wide road monitoring — this is the dif
 
 ---
 
-## Model Selection: FP32 vs INT8
+## Model Selection: FP16 vs FP32
 
 ### Available Models
 
-| Model File              | Precision | Size   | Confidence Threshold | Use Case                              |
-|-------------------------|-----------|--------|----------------------|---------------------------------------|
-| `yolo26_model.xml`      | FP32      | 9.1 MB | 0.25                 | Development, accuracy validation      |
-| `yolo26_model_int8.xml` | INT8      | 2.3 MB | 0.008                | Production deployment, thermal efficiency |
+| Model File                  | Precision              | Size   | Confidence Threshold | Use Case                              |
+|-----------------------------|------------------------|--------|----------------------|---------------------------------------|
+| `yolo26_320_fp16.xml`       | FP16 weights/FP32 compute | 4.7 MB | 0.25              | Production deployment via ACL on A72  |
+| `yolo26_model_2023.xml`     | FP32                   | 9.1 MB | 0.25                 | Development, accuracy validation      |
+| `yolo26_model_int8.xml`     | INT8                   | 2.3 MB | 0.008                | Future use — requires `FEAT_DotProd` (`asimddp`) for KleidiAI acceleration |
 
-### What INT8 Actually Gains on the Cortex-A72 (Measured)
+### What FP16 Actually Gains on the Cortex-A72 (Measured)
 
-The primary benefit of INT8 on the Cortex-A72 is **not average latency** — the architecture is memory-bandwidth-bound, and INT8 GEMM provides only marginal average speedup (1.0×). The real gains are: a **3.9× reduction in model size** lowering RAM pressure, a **22.7% improvement in P95 tail latency** improving worst-case determinism (144.1 ms → 111.4 ms), and improved thermal efficiency under sustained load.
-
-### The INT8 Threshold Decision
-
-INT8 quantization compresses raw confidence score distributions. The 0.008 production threshold was determined empirically: it recovers detections suppressed by quantization rounding while the Fusion Engine's temporal persistence requirement filters the resulting noise floor. A detection must appear consistently across multiple frames to register as a hazard — low-confidence noise is suppressed by the temporal module, not pre-threshold by the detector.
+On the Cortex-A72, FP16 weights are loaded and computed via ACL's NEON GEMM path in FP32 arithmetic. The primary benefit is a **~2× reduction in model size** lowering RAM pressure and memory bandwidth, while maintaining full FP32 numerical accuracy in the compute path. This is the correct production precision for A72 — INT8 via KleidiAI requires `FEAT_DotProd` (`asimddp`) which is absent on this core.
 
 ### INT8 Auto-Detection
 
@@ -402,10 +398,9 @@ The system automatically identifies INT8 models by scanning for `FakeQuantize` o
 # Development / accuracy testing
 ./system_visual_test --video road.mp4 models/yolo26/yolo26_model.xml
 
-# Production / thermal-constrained (default)
-./system_visual_test --video road.mp4 models/yolo26/yolo26_model_int8.xml
+# Production (default — FP16 via ACL on A72)
+./system_visual_test --video road.mp4 models/yolo26/yolo26_320_fp16.xml
 ```
-
 ---
 
 ## Real-Time Thermal Behavior
@@ -438,7 +433,7 @@ At stride 5, depth inference runs at approximately 2 depth samples per second �
 | **Board**        | Raspberry Pi 4B (2GB min, 8GB recommended)                |
 | **Architecture** | ARMv8-A (aarch64), Cortex-A72, 4 cores @ 1.5 GHz         |
 | **OS**           | Raspberry Pi OS Lite 64-bit (Bookworm / Debian 12)        |
-| **Inference**    | OpenVINO 2025 ARM CPU Plugin + KleidiAI + ACL             |
+| **Inference**    | OpenVINO 2023 ARM CPU Plugin + ACL                        |
 | **Vision**       | OpenCV 4.14 with KleidiCV 0.7.0 HAL + TBB                |
 | **Camera**       | USB webcam or Pi Camera Module V2/V3                      |
 | **Cooling**      | Active cooling recommended for sustained outdoor operation |
@@ -482,7 +477,7 @@ At stride 5, depth inference runs at approximately 2 depth samples per second �
 
 > **For complete build instructions, dependency setup, and deployment steps, see [CONTRIBUTING.md](CONTRIBUTING.md).**
 
-The guide covers Raspberry Pi OS configuration and performance tuning, building OpenCV with KleidiCV HAL, OpenVINO ARM64 installation with KleidiAI source integration, CMake build configuration, and validation procedures.
+The guide covers Raspberry Pi OS configuration and performance tuning, building OpenCV with KleidiCV HAL, OpenVINO ARM64 installation with ACL source integration, CMake build configuration, and validation procedures.
 
 ### Prerequisites
 
@@ -491,7 +486,7 @@ The guide covers Raspberry Pi OS configuration and performance tuning, building 
 | **Hardware**  | Raspberry Pi 4B (2GB min, 8GB recommended)           |
 | **OS**        | Raspberry Pi OS Lite 64-bit (Bookworm / Debian 12)   |
 | **Camera**    | USB webcam or Pi Camera Module V2/V3                 |
-| **Inference** | OpenVINO 2025 ARM CPU Plugin (with KleidiAI)         |
+| **Inference** | OpenVINO 2023 ARM CPU Plugin (source build with ACL)  |
 | **Vision**    | OpenCV 4.14 with KleidiCV 0.7.0 HAL + TBB           |
 
 ### Test Suite
@@ -513,12 +508,12 @@ The guide covers Raspberry Pi OS configuration and performance tuning, building 
 | Contribution                            | Description                                                                                          |
 |-----------------------------------------|------------------------------------------------------------------------------------------------------|
 | **4-stage parallel inference pipeline** | Core-pinned, lock-free architecture enabling simultaneous YOLO + MiDaS inference at 10.3 FPS EMA    |
-| **Mixed-precision multimodal stack**    | INT8 YOLO + FP32 MiDaS with principled, experimentally-validated precision decisions per model       |
-| **Custom INT8 calibration & QAT**       | NNCF-based calibration with Fake Quantization fine-tuning; 95.7% detection rate post-quantization    |
+| **Mixed-precision multimodal stack**    | FP16 YOLO + FP32 MiDaS with principled, experimentally-validated precision decisions per model       |
+| **Custom INT8 calibration & QAT**       | NNCF-based calibration with Fake Quantization fine-tuning; 95.7% detection rate post-quantization (INT8 path, future SoCs)    |
 | **Road Risk Index (RRI)**               | Tri-factor fused scalar metric (semantic + geometric + temporal); threshold RRI > 0.75               |
 | **Thermal-adaptive inference scheduler**| Three-tier stride control; zero throttling events across full 138s hardware benchmark                |
 | **Manual NEON preprocessing**           | `vld3q_f32` HWC→CHW intrinsic; 1.3× measured speedup on YOLO 320×320 (hardware-verified)            |
-| **KleidiAI + KleidiCV full stack**      | End-to-end Arm HAL integration from image preprocessing through INT8 GEMM inference                  |
+| **KleidiAI + KleidiCV full stack**      | End-to-end Arm HAL integration from image preprocessing through ACL NEON GEMM inference (KleidiAI INT8 planned for future SoCs with `FEAT_DotProd`)  |
 | **Ghost detection elimination**         | "Trust but Verify" semantic-geometric cross-validation preventing shadow/debris false positives       |
 
 ---

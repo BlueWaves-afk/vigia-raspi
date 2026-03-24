@@ -1227,7 +1227,7 @@ int main(int argc, char** argv) {
 
     if (argc < 2) {
         std::cerr << "Usage: system_visual_test [-F] [--headless] [--fp32] (--video <video_mp4> | --cam [camera_index]) [yolo_xml] [midas_xml] [target_fps]\n"
-                  << "  --fp32      Use FP32 YOLO model (default: INT8)\n";
+                  << "  --fp32      Use FP32 YOLO model (default: FP16)\n";
         return 1;
     }
 
@@ -1252,7 +1252,7 @@ int main(int argc, char** argv) {
         argIndex++;
     }
 
-    // Optional --fp32 flag: use FP32 model instead of INT8
+    // Optional --fp32 flag: use FP32 model instead of FP16
     if (argIndex < argc && std::string(argv[argIndex]) == "--fp32") {
         useFp32 = true;
         argIndex++;
@@ -1290,7 +1290,7 @@ int main(int argc, char** argv) {
     const std::string yoloModel = (argIndex < argc)
         ? argv[argIndex++]
         : (useFp32 ? "models/yolo26/yolo26_model.xml"
-                   : "models/yolo26/yolo26_model_int8.xml");
+                   : "models/yolo26/yolo26_320_fp16.xml");
     const std::string midasModel = (argIndex < argc)
         ? argv[argIndex++]
         : "models/midasv21/openvino_midas_v21_small_256.xml";
