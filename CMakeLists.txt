@@ -1,6 +1,6 @@
 ################################################################################
 #  VIGIA-RASPI — Multi-Agent Road Intelligence System
-#  Target: Raspberry Pi 4 (Cortex-A72 / aarch64 / Debian Trixie)
+#  Target: Raspberry Pi 5 (Cortex-A76 / aarch64 / Debian Trixie)
 #
 #  Build:
 #    mkdir -p build && cd build
@@ -19,12 +19,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS        OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # clangd / IDE support
 
-# ── Cortex-A72 Optimization Flags ────────────────────────────────────────────
-# -mcpu=cortex-a72   : schedule for the Pi 4's quad-core A72
+# ── Cortex-A76 Optimization Flags ────────────────────────────────────────────
+# -mcpu=cortex-a76   : schedule for the Pi 5's quad-core A76 (FEAT_DotProd)
 # -O3                : aggressive optimisation (auto-vectorise, inline, unroll)
 # -ftree-vectorize   : ensure NEON auto-vectorisation even if -O2 is overridden
 # -Wall -Wextra      : catch common mistakes at compile time
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=cortex-a72 -O3 -ftree-vectorize")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=cortex-a76 -O3 -ftree-vectorize")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-unused-parameter")
 
 # ── Dependency Discovery ─────────────────────────────────────────────────────

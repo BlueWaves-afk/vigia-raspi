@@ -1,8 +1,8 @@
 # Contributing to VIGIA
 
-Thank you for your interest in contributing to **VIGIA** — a real-time autonomous pothole detection system designed for edge deployment on Raspberry Pi 4.
+Thank you for your interest in contributing to **VIGIA** — a real-time autonomous pothole detection system designed for edge deployment on Raspberry Pi 5.
 
-This guide covers the development environment setup, build instructions, and performance tuning required to contribute effectively. The stack follows a **hardware-software co-design** philosophy, maximizing throughput from the Pi's ARM Cortex-A72 cores without GPUs, cloud inference, or external accelerators.
+This guide covers the development environment setup, build instructions, and performance tuning required to contribute effectively. The stack follows a **hardware-software co-design** philosophy, maximizing throughput from the Pi's ARM Cortex-A76 cores (with KleidiAI INT8 acceleration) without GPUs, cloud inference, or external accelerators.
 
 > **Before you begin:** Please read the project [README.md](README.md) for an architectural overview and the [LICENSE](LICENSE) for usage terms.
 
@@ -30,11 +30,11 @@ This guide covers the development environment setup, build instructions, and per
 
 | Component  | Specification                                           |
 |------------|---------------------------------------------------------|
-| **Board**  | Raspberry Pi 4B (8 GB strongly recommended)             |
-| **OS**     | Raspberry Pi OS Lite (64-bit), Debian 12 (Bookworm)     |
-| **CPU**    | ARM Cortex-A72 (ARMv8-A), 4 cores                       |
-| **Cooling**| Active cooling / heatsink required                      |
-| **Camera** | USB webcam or Pi Camera Module (V2 / V3)                |
+| **Board**  | Raspberry Pi 5 (4 GB min, 8 GB recommended)             |
+| **OS**     | Raspberry Pi OS Lite (64-bit), Debian 13 (Trixie)       |
+| **CPU**    | ARM Cortex-A76 (ARMv8.2-A), 4 cores @ 2.4 GHz          |
+| **Cooling**| Active cooling / heatsink required for sustained inference |
+| **Camera** | USB webcam or Pi Camera Module (V2 / V3 / HQ)         |
 
 <img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/fce7fb6b-8b3d-47c0-95e1-278481f6c9cf" />
 
@@ -42,7 +42,7 @@ This guide covers the development environment setup, build instructions, and per
 
 ## 2. OS Foundation
 
-> **Important:** A minimal OS image is critical for real-time performance. A desktop environment introduces background processes that compete for CPU cycles and increase scheduling jitter. Use the 64-bit Debian 12 image, as it is the most suitable base for this project.
+> **Important:** A minimal OS image is critical for real-time performance. A desktop environment introduces background processes that compete for CPU cycles and increase scheduling jitter. Use the 64-bit Debian 13 (Trixie) Lite image.
 
 ### 2.1 Flash the OS
 
@@ -66,9 +66,9 @@ Reboot after applying changes.
 
 ### 2.3 CPU Scaling Governor
 
-By default, the Pi 4 uses the `ondemand` governor, which dynamically scales CPU frequency to conserve power. For real-time inference, this introduces latency spikes as the CPU transitions between frequency states.
+By default, the Pi 5 uses the `ondemand` governor, which dynamically scales CPU frequency to conserve power. For real-time inference, this introduces latency spikes as the CPU transitions between frequency states.
 
-**Fix:** Lock the CPU at its maximum clock speed (1.5 GHz / 1.8 GHz):
+**Fix:** Lock the CPU at its maximum clock speed (2.4 GHz):
 
 ```bash
 # Set to performance mode (persists until next reboot)
@@ -153,21 +153,21 @@ sudo apt install -y \
 
 ## 5. Arm KleidiAI & KleidiCV
 
-KleidiAI provides highly optimized NEON SIMD micro-kernels for AI workloads on ARM. KleidiCV extends this to image preprocessing (resize, filter, color conversion) and is linked into OpenCV as a hardware abstraction layer (HAL).
+KleidiAI provides highly optimized NEON SIMD micro-kernels for AI workloads on ARM — including INT8 GEMM via `FEAT_DotProd` (`asimddp`), which the Cortex-A76 supports natively. KleidiCV extends this to image preprocessing (resize, filter, color conversion) and is linked into OpenCV as a hardware abstraction layer (HAL).
 
 ### 5.1 Build and Install KleidiCV
 
 ```bash
-# Clone the repository
+# Clone the repository (26.03+ recommended)
 git clone https://gitlab.arm.com/kleidi/kleidicv.git
 cd kleidicv
 
-# Configure with Raspberry Pi 4-specific optimizations
-# -mcpu=cortex-a72 targets the Pi 4's CPU cores directly
+# Configure with Raspberry Pi 5-specific optimizations
+# -mcpu=cortex-a76 targets the Pi 5's CPU cores directly
 cmake -S . -B build \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CXX_FLAGS="-mcpu=cortex-a72" \
-      -DCMAKE_C_FLAGS="-mcpu=cortex-a72"
+      -DCMAKE_CXX_FLAGS="-mcpu=cortex-a76" \
+      -DCMAKE_C_FLAGS="-mcpu=cortex-a76"
 
 # Build using all 4 cores
 cmake --build build --parallel $(nproc)
@@ -181,6 +181,8 @@ sudo cmake --install build
 ## 6. OpenCV 4.x with KleidiCV
 
 OpenCV must be built from source with the `WITH_KLEIDICV` flag to utilize the NEON-optimized HAL kernels installed above. The `KLEIDICV_DIR` variable points OpenCV to the HAL bridge files.
+
+> **Headless builds:** Set `WITH_GTK=OFF` — the Pi 5 demo stack runs without GTK, and `cv::namedWindow` is skipped in `--headless` mode. GTK is only needed if you want OpenCV GUI windows over VNC.
 
 ### 6.1 Clone Repositories
 
@@ -211,12 +213,13 @@ cmake -D CMAKE_BUILD_TYPE=RELEASE \
       -D CPU_BASELINE=DETECT \
       -D WITH_TBB=ON \
       -D WITH_V4L=ON \
-      -D WITH_OPENGL=ON \
+      -D WITH_GTK=OFF \
+      -D WITH_OPENGL=OFF \
       -D BUILD_EXAMPLES=OFF \
       -D BUILD_TESTS=OFF \
       -D OPENCV_ENABLE_NONFREE=ON \
-      -D CMAKE_CXX_FLAGS="-mcpu=cortex-a72 -O3 -ftree-vectorize" \
-      -D CMAKE_C_FLAGS="-mcpu=cortex-a72 -O3 -ftree-vectorize" ..
+      -D CMAKE_CXX_FLAGS="-mcpu=cortex-a76 -O3 -ftree-vectorize" \
+      -D CMAKE_C_FLAGS="-mcpu=cortex-a76 -O3 -ftree-vectorize" ..
 
 # Build and install — this will take approximately 1–2 hours
 make -j$(nproc)
@@ -224,7 +227,7 @@ sudo make install
 sudo ldconfig
 ```
 
-> **Note:** The build takes approximately 1–2 hours on a Pi 4 with active cooling. Ensure adequate swap space is configured (see [Section 3](#3-memory-configuration)).
+> **Note:** The build takes approximately 1–2 hours on a Pi 5 with active cooling. Ensure adequate swap space is configured (see [Section 3](#3-memory-configuration)).
 
 ---
 
@@ -233,8 +236,8 @@ sudo ldconfig
 OpenVINO is the preferred inference backend for VIGIA on ARM. It provides:
 
 - **JIT compilation** of model graphs at load time
-- **KleidiAI integration** for NEON-optimized GEMM kernels on Cortex-A72
-- **Runtime kernel selection** tuned for the ARMv8-A microarchitecture
+- **KleidiAI integration** for INT8 GEMM micro-kernels on Cortex-A76 (`FEAT_DotProd`)
+- **Runtime kernel selection** tuned for the ARMv8.2-A microarchitecture
 - **Async inference API** with pre-allocated tensor buffers
 
 ### Option A: Pre-compiled Archive (Not Recommended)
@@ -262,9 +265,9 @@ source ~/.bashrc
 
 ### Option B: Build from Source with KleidiAI (Recommended)
 
-Building OpenVINO from source is the **only reliable path** on Raspberry Pi OS. This compiles the ARM CPU plugin natively, ensuring correct memory alignment, and links KleidiAI micro-kernels directly into the plugin for optimized GEMM operations on Cortex-A72.
+Building OpenVINO from source is the **only reliable path** on Raspberry Pi OS. This compiles the ARM CPU plugin natively, ensuring correct memory alignment, and links KleidiAI INT8 micro-kernels directly into the plugin for optimized GEMM operations on Cortex-A76.
 
-> **Note on KleidiAI:** KleidiAI's INT8 GEMM micro-kernels require `FEAT_DotProd` (`asimddp`) which is absent on the Cortex-A72. For the Pi 4, we use ACL (Arm Compute Library) as the NEON GEMM backend instead. KleidiAI is disabled at build time with `-DENABLE_KLEIDIAI=OFF` to ensure ACL is the active dispatch path.
+> **Note on KleidiAI:** The Cortex-A76 in the Pi 5 implements `FEAT_DotProd` (`asimddp`), enabling KleidiAI's INT8 GEMM fast path (`fullyconnected_kleidiai`, `kleidiai`). Build with `-DENABLE_KLEIDIAI=ON`. ACL is not required on Pi 5 — KleidiAI is the primary acceleration path for INT8 YOLO inference.
 
 #### 7.1 Install Build Prerequisites
 
@@ -292,8 +295,8 @@ cd ~
 git clone --recurse-submodules https://github.com/openvinotoolkit/openvino.git
 cd openvino
 
-# Check out a known-good release tag
-git checkout 2023.3.0
+# Check out the release used on Pi 5
+git checkout 2025.4.2
 git submodule update --init --recursive
 ```
 
@@ -303,9 +306,9 @@ git submodule update --init --recursive
 mkdir build && cd build
 
 cmake -DCMAKE_BUILD_TYPE=Release \
-      -DENABLE_ARM_COMPUTE_CMAKE=ON \
-      -DENABLE_KLEIDIAI=OFF \
-      -DCMAKE_INSTALL_PREFIX=/opt/intel/openvino_2023 \
+      -DENABLE_KLEIDIAI=ON \
+      -DENABLE_ARM_COMPUTE_CMAKE=OFF \
+      -DCMAKE_INSTALL_PREFIX=/opt/intel/openvino_2025 \
       -DENABLE_INTEL_CPU=ON \
       -DENABLE_INTEL_GPU=OFF \
       -DENABLE_INTEL_NPU=OFF \
@@ -314,18 +317,18 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_PYTHON=OFF \
       -DENABLE_WHEEL=OFF \
       -DTHREADING=TBB \
-      -DCMAKE_CXX_FLAGS="-mcpu=cortex-a72" \
-      -DCMAKE_C_FLAGS="-mcpu=cortex-a72" \
+      -DCMAKE_CXX_FLAGS="-mcpu=cortex-a76" \
+      -DCMAKE_C_FLAGS="-mcpu=cortex-a76" \
       ..
 ```
 
 | Flag | Purpose |
 |------|---------|
-| `ENABLE_ARM_COMPUTE_CMAKE=ON` | Compiles ACL NEON GEMM kernels into the CPU plugin for Cortex-A72 |
-| `ENABLE_KLEIDIAI=OFF` | Disables KleidiAI (requires `FEAT_DotProd`/`asimddp`, absent on A72) |
+| `ENABLE_KLEIDIAI=ON` | Compiles KleidiAI INT8 GEMM micro-kernels for Cortex-A76 (`FEAT_DotProd`) |
+| `ENABLE_ARM_COMPUTE_CMAKE=OFF` | ACL not needed — KleidiAI is the primary INT8 path on A76 |
 | `ENABLE_INTEL_*=OFF` | Disables x86-only plugins (GPU, NPU) that do not exist on ARM |
 | `THREADING=TBB` | Uses the system TBB library for multi-core dispatch |
-| `-mcpu=cortex-a72` | Generates code tuned specifically for the Pi 4's core |
+| `-mcpu=cortex-a76` | Generates code tuned specifically for the Pi 5's core |
 
 #### 7.4 Build and Install
 
@@ -334,7 +337,7 @@ cmake -DCMAKE_BUILD_TYPE=Release \
 # Ensure swap is at least 2 GB (see Section 3)
 make -j$(nproc)
 
-# Install to /opt/intel/openvino_2023
+# Install to /opt/intel/openvino_2025
 sudo make install
 ```
 
@@ -342,11 +345,12 @@ sudo make install
 
 ```bash
 # Add OpenVINO libraries to the linker search path
-echo "/opt/intel/openvino_2023/runtime/lib/aarch64" | sudo tee /etc/ld.so.conf.d/openvino.conf
+echo "/opt/intel/openvino_2025/runtime/lib/aarch64" | sudo tee /etc/ld.so.conf.d/openvino.conf
 sudo ldconfig
 
 # Add to your shell profile for CMake discovery
-echo 'export OpenVINO_DIR=/opt/intel/openvino_2023/runtime/cmake' >> ~/.bashrc
+echo 'export OpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake' >> ~/.bashrc
+echo 'source /opt/intel/openvino_2025/setupvars.sh' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -354,11 +358,15 @@ source ~/.bashrc
 
 ```bash
 # Confirm the ARM CPU plugin exists
-ls /opt/intel/openvino_2023/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so
+ls /opt/intel/openvino_2025/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so
 
-# Verify ACL is linked into the plugin
-strings /opt/intel/openvino_2023/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so | grep -i "arm_compute\|ACLScheduler"
-# Expected output: ACLScheduler, arm_compute, etc.
+# Verify KleidiAI is linked into the plugin
+strings /opt/intel/openvino_2025/runtime/lib/aarch64/libopenvino_arm_cpu_plugin.so | grep -i "kleidiai"
+# Expected output: kleidiai, fullyconnected_kleidiai, etc.
+
+# Runtime verification — run YOLO inference and confirm KleidiAI dispatch:
+ONEDNN_VERBOSE=1 ./perception_video_test --headless hazard.mp4 models/yolo26/yolo26_model_int8.xml 2>&1 | grep -i kleidiai | head -5
+# Expected: fullyconnected_kleidiai or similar KleidiAI kernel names
 ```
 
 ---
@@ -376,7 +384,7 @@ mkdir -p build && cd build
 # Configure the project with CMake
 # If OpenVINO_DIR is set in your shell (see Section 7.5), CMake finds it automatically.
 # Otherwise, pass it explicitly:
-cmake -DOpenVINO_DIR=/opt/intel/openvino_2023/runtime/cmake ..
+cmake -DOpenVINO_DIR=/opt/intel/openvino_2025/runtime/cmake ..
 
 # Compile using all 4 cores
 make perception_video_test system_visual_test -j$(nproc)
@@ -388,9 +396,8 @@ ln -sf ../hazard.mp4 hazard.mp4 2>/dev/null
 # Lock the CPU governor to maximum performance
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 
-# Run the full pipeline (FP16 YOLO — production default)
-export DISPLAY=:1
-./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
+# Run the full pipeline (INT8 YOLO — production default on Pi 5)
+./system_visual_test --headless --video hazard.mp4 models/yolo26/yolo26_model_int8.xml
 ```
 
 ---
@@ -436,7 +443,7 @@ All pinning is guarded by `#if defined(__linux__) && defined(__aarch64__)` so it
 | TBB workers (OpenVINO)   | Core 2 | Left unassigned — TBB scheduler uses available cores        |
 | UI / Dashboard (`main`)  | Core 3 | Rendering, dashboard compositing, and keyboard input        |
 
-> **Why 4 threads on 4 cores?** The Pi 4 has four identical Cortex-A72 cores. Pinning eliminates cross-core migration, which flushes the L1/L2 cache and adds approximately 1–2 ms of jitter per migration. Core 2 is intentionally left unpinned so that OpenVINO's internal TBB threads can use it for parallel operator execution without competing with the capture or UI threads.
+> **Why 4 threads on 4 cores?** The Pi 5 has four Cortex-A76 cores. Pinning eliminates cross-core migration, which flushes the L1/L2 cache and adds approximately 1–2 ms of jitter per migration. Core 2 is intentionally left unpinned so that OpenVINO's internal TBB threads can use it for parallel operator execution without competing with the capture or UI threads.
 
 This pinning strategy ensures deterministic scheduling and prevents camera I/O from competing with inference workloads.
 
@@ -495,12 +502,12 @@ vncserver -list
 
 **Option 1 — Terminal:**
 ```bash
-open vnc://raspi4B.local:5901
+open vnc://raspi5.local:5901
 ```
 
 **Option 2 — Finder:**
 1. Press `Cmd + K` (or Finder → Go → Connect to Server)
-2. Enter: `vnc://raspi4B.local:5901`
+2. Enter: `vnc://raspi5.local:5901`
 3. Click **Connect**
 4. Enter the VNC password set earlier
 
@@ -513,11 +520,11 @@ Once connected via VNC, open a terminal in the VNC session and run:
 ```bash
 cd ~/vigia-raspi/build
 
-# Full pipeline — FP16 YOLO, fullscreen (press Q to quit)
-./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
+# Full pipeline — INT8 YOLO, fullscreen (press Q to quit)
+./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_model_int8.xml
 
-# Headless benchmark — maximum throughput (~10.3 FPS EMA)
-./system_visual_test --headless --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
+# Headless benchmark — maximum throughput (~11 FPS full pipeline)
+./system_visual_test --headless --video hazard.mp4 models/yolo26/yolo26_model_int8.xml
 ```
 
 The OpenCV window will appear in the VNC session, not on your local display.
@@ -542,19 +549,19 @@ ps aux | grep vnc
 
 ```bash
 # 1. SSH into the Pi
-ssh vigiasense@raspi4B.local
+ssh vigiasense@raspi5.local
 
 # 2. Start the VNC server (if not already running)
 vncserver :1 -geometry 1280x720 -depth 24
 
 # 3. Open a new terminal on your Mac and connect via VNC
-open vnc://raspi4B.local:5901
+open vnc://raspi5.local:5901
 
 # 4. In the VNC session, source OpenVINO and run
-source /opt/intel/openvino_2023/setupvars.sh
+source /opt/intel/openvino_2025/setupvars.sh
 cd ~/vigia-raspi/build
 export DISPLAY=:1
-./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_320_fp16.xml
+./system_visual_test -F --video hazard.mp4 models/yolo26/yolo26_model_int8.xml
 
 # 5. When finished, stop VNC to free resources
 vncserver -kill :1
@@ -602,7 +609,7 @@ vncserver -kill :1
 
 | Framework    | ARM CPU Efficiency | Notes                                          |
 |--------------|--------------------|------------------------------------------------|
-| **OpenVINO** | Excellent          | JIT + ACL NEON GEMM — best determinism on A72  |
+| **OpenVINO** | Excellent          | JIT + KleidiAI INT8 — best determinism on A76  |
 | TFLite       | Good               | Good performance, but less runtime optimization |
 | ONNX Runtime | Adequate           | Limited ARM-specific tuning                    |
 
@@ -631,7 +638,7 @@ Switching from the Wayland compositor to X11 resolved clipboard sync issues betw
 **Issue: SIGBUS Crash During Model Compilation**
 The pre-compiled OpenVINO binary crashed at `ov::Core::compile_model()` with signal 7 (SIGBUS) due to memory alignment mismatches between the Ubuntu-targeted archive and Raspberry Pi OS.
 
-*Solution:* Build OpenVINO 2023.3.0 from source with `-DENABLE_ARM_COMPUTE_CMAKE=ON` and `-DENABLE_KLEIDIAI=OFF`. This compiles ACL's A72-tuned NEON GEMM kernels directly into the CPU plugin, bypassing the `FEAT_DotProd` requirement entirely.
+*Solution:* Build OpenVINO 2025.4.2 from source with `-DENABLE_KLEIDIAI=ON` and `-mcpu=cortex-a76`. This compiles KleidiAI's A76-tuned INT8 GEMM kernels directly into the CPU plugin.
 
 **Issue: SD Card Memory Faults (`mmap`)**
 Memory-mapping model weights from an SD card caused intermittent hangs and crashes.

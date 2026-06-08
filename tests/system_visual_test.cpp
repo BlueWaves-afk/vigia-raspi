@@ -2,9 +2,9 @@
  * @file system_visual_test.cpp
  * @brief VIGIA full-pipeline visual integration test
  *
- * Optimized for Raspberry Pi 4 (Cortex-A72 / aarch64 / Debian Trixie)
- *   • OpenCV 4.14  — KleidiCV 0.7.0 HAL + TBB parallel backend
- *   • OpenVINO 2025 — CPU plugin with KleidiAI + NEON backend
+ * Optimized for Raspberry Pi 5 (Cortex-A76 / aarch64 / Debian Trixie)
+ *   • OpenCV 4.x   — KleidiCV 26.03 HAL + TBB parallel backend (GTK off)
+ *   • OpenVINO 2025.4.2 — CPU plugin with KleidiAI INT8 backend
  *
  * Optimization map (keyed to user requirements):
  *
@@ -1290,7 +1290,7 @@ int main(int argc, char** argv) {
     const std::string yoloModel = (argIndex < argc)
         ? argv[argIndex++]
         : (useFp32 ? "models/yolo26/yolo26_model.xml"
-                   : "models/yolo26/yolo26_320_fp16.xml");
+                   : "models/yolo26/yolo26_model_int8.xml");
     const std::string midasModel = (argIndex < argc)
         ? argv[argIndex++]
         : "models/midasv21/openvino_midas_v21_small_256.xml";
@@ -1571,17 +1571,17 @@ int main(int argc, char** argv) {
 
         char fmtBuf[32];
 
-        cv::namedWindow("VIGIA Dashboard", cv::WINDOW_NORMAL);
-        if (startFullscreen) {
-            cv::setWindowProperty("VIGIA Dashboard",
-                                  cv::WND_PROP_FULLSCREEN,
-                                  cv::WINDOW_FULLSCREEN);
-        } else {
-            cv::resizeWindow("VIGIA Dashboard", dashboardSize.width, dashboardSize.height);
-        }
         if (headlessMode) {
             std::cout << "[vigia-test] Headless mode: display disabled for maximum throughput\n";
-            cv::destroyAllWindows();
+        } else {
+            cv::namedWindow("VIGIA Dashboard", cv::WINDOW_NORMAL);
+            if (startFullscreen) {
+                cv::setWindowProperty("VIGIA Dashboard",
+                                      cv::WND_PROP_FULLSCREEN,
+                                      cv::WINDOW_FULLSCREEN);
+            } else {
+                cv::resizeWindow("VIGIA Dashboard", dashboardSize.width, dashboardSize.height);
+            }
         }
 
         auto lastRenderTs = std::chrono::steady_clock::now();
@@ -1960,7 +1960,9 @@ int main(int argc, char** argv) {
         coordinator.stop();
         bus.flush();
 
-        cv::destroyAllWindows();
+        if (!headlessMode) {
+            cv::destroyAllWindows();
+        }
 
         const auto summary = bus.summary();
         std::cout << "\n===== System Visual Test Summary =====\n";

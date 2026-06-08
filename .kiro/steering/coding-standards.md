@@ -36,6 +36,6 @@
 - **Never commit INT8 MiDaS** — dynamic range collapse failure is documented. See `docs/int8_midas_failure.md`.
 
 ## Build
-- Always compile with `-mcpu=cortex-a72 -O3 -ftree-vectorize` (set in CMakeLists.txt).
-- `make -j$(nproc)` on Pi 4 uses all 4 cores for compilation.
+- Always compile with `-mcpu=cortex-a76 -O3 -ftree-vectorize` (set in CMakeLists.txt).
+- `make -j$(nproc)` on Pi 5 uses all 4 cores for compilation.
 - CPU governor must be `performance` before running any benchmark: `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`

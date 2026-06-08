@@ -294,7 +294,7 @@ void PerceptionAgent::loadNetwork(const std::string& modelXmlPath,
         core_->set_property("CPU", ov::enable_mmap(false));
         std::cout << "[TRACE] <<< ov::enable_mmap(false) set successfully" << std::flush << std::endl;
 
-        // Threading config for Raspberry Pi 4 (4× Cortex-A72 @ 1.5GHz):
+        // Threading config for Raspberry Pi 5 (4× Cortex-A76 @ 2.4GHz):
         // - num_streams(1): Single inference stream for minimum latency
         // - inference_num_threads(4): Use all 4 cores to parallelize ops
         // This prevents core saturation and context-switching overhead.

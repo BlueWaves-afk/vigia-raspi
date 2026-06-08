@@ -2,7 +2,7 @@
  * @file perception_video_test.cpp
  * @brief YOLO-only detection benchmark — no MiDaS, no temporal, no fusion.
  *
- * Optimized for maximum FPS / minimum latency on Raspberry Pi 4:
+ * Optimized for maximum FPS / minimum latency on Raspberry Pi 5:
  *   - INT8 model by default (2.3 MB, lowest latency)
  *   - Shared ov::Core (single plugin init)
  *   - grab()+retrieve() skip: only decodes when inference has consumed the last frame
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     const std::string modelPath = (argIdx < argc)
         ? argv[argIdx]
         : (useFp32 ? "models/yolo26/yolo26_model.xml"
-                   : "models/yolo26/yolo26_320_fp16.xml");
+                   : "models/yolo26/yolo26_model_int8.xml");
 
     // ── OpenCV: let TBB use all cores, disable OpenCL ──────────────
     cv::setNumThreads(0);

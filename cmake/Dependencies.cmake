@@ -3,7 +3,7 @@
 #
 #  Hard requirements:
 #    • OpenCV  ≥ 4.x   (built with KleidiCV HAL + TBB backend)
-#    • OpenVINO 2025    (CPU plugin with ACL / NEON on aarch64)
+#    • OpenVINO 2025    (CPU plugin with KleidiAI INT8 on aarch64 / Cortex-A76)
 ################################################################################
 
 # ── POSIX Threads ─────────────────────────────────────────────────────────────
