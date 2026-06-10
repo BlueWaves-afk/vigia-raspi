@@ -1,0 +1,18 @@
+# Block binary and compilation bloat
+build/
+dist/
+bin/
+*.o
+*.a
+*.so
+*.out
+
+# Block systemic tracking and package metadata
+.git/
+.cache/
+node_modules/
+package-lock.json
+Cargo.lock
+
+# Session local traces
+.context_snapshot.md
