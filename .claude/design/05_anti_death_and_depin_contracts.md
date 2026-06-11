@@ -16,7 +16,7 @@
 | **Single MsgPack allocation permitted** | `msgpack::sbuffer` construction is the one sanctioned heap allocation. All other data (snapshot structs, Paho client, TLS context, GPIO handle) is pre-allocated at node startup. |
 | **Paho `async_client` must be pre-connected at node startup** | Connecting to the MQTT broker for the first time during the emergency sequence wastes 2–5 seconds of the power window on DNS and TCP setup. The client connects at startup, keeps the session alive with PINGREQ/PINGRESP, and calls only `publish()` during the emergency. |
 | **`execute_emergency_sequence()` is not reentrant** | Protected by `std::atomic_flag emergency_in_progress_`. A second GPIO assertion during an ongoing sequence is silently ignored — we are already executing. |
-| **Raw frame pixels are NOT transmitted** | The 829 MB `/dev/shm` frame buffer cannot be transmitted over LTE in 15 seconds. The MQTT payload carries the compact **frame metadata sidecar** (§3), the latest `SpatialLatent` (S_t), and the STM32-signed `SignedEt` (E_t). Frame pixels serve as local forensic evidence until the power cut eliminates them. |
+| **Raw frame pixels are NOT transmitted** | The 829 MB `/dev/shm` frame buffer cannot be transmitted over LTE in 15 seconds. The MQTT payload carries the compact **frame metadata sidecar** (§3), the latest `SpatialLatent` (S_t), and the Pico 2-signed `SignedEt` (E_t). Frame pixels serve as local forensic evidence until the power cut eliminates them. |
 
 ---
 
@@ -644,7 +644,7 @@ root: map(7)
 │
 ├── "signed_et"            : map(6) | nil
 │   ├── "sequence"         : uint32        (monotonic counter — anti-replay key)
-│   ├── "stm32_timestamp_us": uint64
+│   ├── "mcu_timestamp_us": uint64
 │   ├── "et_hash"          : bin(32)       SHA-256(EtHashInput) — see §8.3
 │   ├── "ecdsa_sig"        : bin(64)       secp256r1 raw R∥S (32+32 bytes)
 │   ├── "imu_cal_status"   : uint8
@@ -847,8 +847,8 @@ def validate_event(mqtt_payload_bytes: bytes) -> dict:
     # See §8.2.
 
     # ── Step 3: Reconstruct EtHashInput bytes for SHA-256 verification ────
-    # The EtHashInput struct layout is IDENTICAL to the STM32 definition in
-    # 03_stm32_firmware_contracts.md §6.3.2.
+    # The EtHashInput struct layout is IDENTICAL to the Pico 2 definition in
+    # 03_pico2_firmware_contracts.md §6.3.2.
     # Layout (96 bytes, little-endian, explicit zero-padding):
     #   [16B] device_id (UUID bytes)
     #   [8B]  timestamp_us
@@ -884,10 +884,10 @@ def validate_event(mqtt_payload_bytes: bytes) -> dict:
         "BB2x"        # fix_type, satellites + 2 zero-pad bytes
         "f",          # hdop
         device_uuid_bytes,
-        signed_et["stm32_timestamp_us"],
+        signed_et["mcu_timestamp_us"],
         signed_et["sequence"],
         # IMU fields reconstructed from signed_et metadata
-        # (these were packed by the STM32 from BNO085 output)
+        # (these were packed by the Pico 2 from BNO085 output)
         *extract_quaternion(signed_et),      # q_w, q_x, q_y, q_z
         *extract_lin_accel(signed_et),       # ax, ay, az
         signed_et.get("imu_cal_status", 0),
@@ -906,7 +906,7 @@ def validate_event(mqtt_payload_bytes: bytes) -> dict:
     return et_input, signed_et, payload
 ```
 
-> **Implementation note for the server team:** The `struct.pack` format string above must be kept byte-for-byte identical to the `EtHashInput` struct in `03_stm32_firmware_contracts.md`. Any field reordering or type change in either location breaks ECDSA verification for ALL devices. This struct is the cryptographic contract between the STM32 firmware and the server — treat it with the same rigor as an ABI.
+> **Implementation note for the server team:** The `struct.pack` format string above must be kept byte-for-byte identical to the `EtHashInput` struct in `03_pico2_firmware_contracts.md`. Any field reordering or type change in either location breaks ECDSA verification for ALL devices. This struct is the cryptographic contract between the Pico 2 firmware and the server — treat it with the same rigor as an ABI.
 
 ### 8.2 Anti-Replay Check
 
@@ -944,7 +944,7 @@ def verify_et_hash(et_input_bytes: bytes, received_et_hash: bytes) -> None:
     """
     Verifies the et_hash field matches SHA-256(EtHashInput).
     The ATECC608A computed this hash internally via atcab_sha();
-    we re-derive it from the struct to confirm the STM32 signed what it claimed.
+    we re-derive it from the struct to confirm the Pico 2 signed what it claimed.
     """
     computed_hash = hashlib.sha256(et_input_bytes).digest()
 
@@ -954,7 +954,7 @@ def verify_et_hash(et_input_bytes: bytes, received_et_hash: bytes) -> None:
             f"Received:  {received_et_hash.hex()}\n"
             f"Computed:  {computed_hash.hex()}\n"
             f"The ATECC608A signed a different payload than what was transmitted. "
-            f"Possible STM32 firmware bug or data corruption in transit."
+            f"Possible Pico 2 firmware bug or data corruption in transit."
         )
 ```
 
@@ -1080,7 +1080,7 @@ def process_attestation_event(mqtt_payload_bytes: bytes) -> None:
         cosmos3_payload = {
             "device_id":       device_id,
             "event_type":      "road_hazard_attested",
-            "timestamp_us":    signed_et["stm32_timestamp_us"],
+            "timestamp_us":    signed_et["mcu_timestamp_us"],
             "sequence":        signed_et["sequence"],
             "gps_location":    {
                 "lat": payload["frame_metadata"][-1]["lat"],
@@ -1201,7 +1201,7 @@ The VIGIA ADAS DePIN Edge Node specification is complete across five documents:
 |---|---|---|
 | `01_system_architecture_and_roadmap.md` | Master Architecture & 6-Phase Roadmap | APPROVED |
 | `02_ros2_node_contracts.md` | ROS 2 Node Interface Contracts | APPROVED |
-| `03_stm32_firmware_contracts.md` | STM32F411 Black Pill Firmware Contracts | APPROVED |
+| `03_pico2_firmware_contracts.md` | Raspberry Pi Pico 2 Firmware Contracts | APPROVED |
 | `04_onnx_vision_engine_contracts.md` | ONNX Runtime Vision Engine Contracts | APPROVED |
 | `05_anti_death_and_depin_contracts.md` | Anti-Death Storage & DePIN Attestation | **AWAITING APPROVAL** |
 

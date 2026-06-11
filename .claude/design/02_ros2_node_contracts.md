@@ -15,7 +15,7 @@
 | Mixed precision | **YOLOv26 → INT8. MiDaS → FP32.** INT8 MiDaS is prohibited | `VisionNode` session allows INT8; `DepthNode` session locks FP32 |
 | LTE security | **TLS 1.2 mutual auth assumed** (SIM7600 firmware confirmed capable) | Phase 5 MQTT spec will mandate `AT+CSSLCFG` client cert load |
 | `SpatialLatent` type | **`float32[]` dynamic array** — layer-dimension agnostic | `vigia_msgs/msg/SpatialLatent.msg` uses unbounded array |
-| BNO085 bus | **SPI1 on STM32 Black Pill (PA5/PA6/PA7/PA4), 4 MHz, DMA** — mandatory | STM32 Phase 2 firmware spec will enforce SPI1 with DMA channel 2 |
+| BNO085 bus | **SPI0 on Pico 2 (GP18/GP19/GP16/GP17), 3 MHz, DMA** — mandatory | Pico 2 Phase 2 firmware spec will enforce SPI0 with DMA |
 
 ---
 
@@ -195,7 +195,7 @@ float32          inference_latency_ms
 ### 4.5 `vigia_msgs/msg/ImuSample.msg`
 ```
 # BNO085 NDOF fusion mode output — calibrated quaternion + gravity-free linear accel
-# All values forwarded verbatim from STM32 COBS packet. Gravity compensation done Pi-side.
+# All values forwarded verbatim from Pico 2 COBS packet. Gravity compensation done Pi-side.
 std_msgs/Header  header
 float32          q_w                 # Unit quaternion (world←body orientation)
 float32          q_x
@@ -224,11 +224,11 @@ bool             valid_fix           # fix_type >= 2 AND hdop <= 2.5
 
 ### 4.7 `vigia_msgs/msg/SignedEt.msg`
 ```
-# Kinematic context E_t signed by STM32 ATECC608A (secp256r1 ECDSA)
+# Kinematic context E_t signed by Pico 2 ATECC608A (secp256r1 ECDSA)
 # The Pi forwards this payload verbatim — it does NOT re-sign or modify.
 std_msgs/Header  header
-uint32           sequence            # Monotonic counter from STM32 (anti-replay)
-uint64           stm32_timestamp_us  # STM32 hardware timer at signing time
+uint32           sequence            # Monotonic counter from sensor hub (anti-replay)
+uint64           mcu_timestamp_us    # Pico 2 hardware timer at signing time
 uint8[32]        et_hash             # SHA-256( IMU_quaternion ∥ GPS_PVT ∥ timestamp ∥ device_id )
 uint8[64]        ecdsa_signature     # secp256r1 DER-encoded signature from ATECC608A
 uint8[]          device_cert_der     # X.509 DER certificate chain (device + intermediate)
@@ -248,7 +248,7 @@ vigia_msgs/DetectionArray   detections
 vigia_msgs/DepthMap         depth_map
 vigia_msgs/ImuSample        imu_sample          # Sample at event time
 vigia_msgs/GpsPvt           gps_pvt             # Fix at event time
-vigia_msgs/SignedEt         signed_et           # Pre-signed E_t from STM32
+vigia_msgs/SignedEt         signed_et           # Pre-signed E_t from Pico 2
 float32[]                   spatial_latent      # S_t — unsigned in Phase 1
 ```
 
@@ -593,7 +593,7 @@ Step 3 — ISS computation:
 
 ### 6.5 `SensorBridgeNode`
 
-**Responsibility:** Read COBS-framed binary packets from the STM32 over `/dev/ttyACM0`. Decode and validate each packet. Verify ECDSA signature on `SIGNED_ET` packets. Publish IMU, GPS, and signed kinematic context to the ROS 2 graph.
+**Responsibility:** Read COBS-framed binary packets from the Pico 2 over `/dev/ttyACM0`. Decode and validate each packet. Verify ECDSA signature on `SIGNED_ET` packets. Publish IMU, GPS, and signed kinematic context to the ROS 2 graph.
 
 **File:** `vigia_edge_node/src/sensor_bridge_node.cpp` + `sensor_bridge_node.hpp`
 
@@ -612,7 +612,7 @@ Step 3 — ISS computation:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `serial_port` | `string` | `/dev/ttyACM0` | STM32 USB-CDC device path |
+| `serial_port` | `string` | `/dev/ttyACM0` | Pico 2 USB-CDC device path |
 | `baud_rate` | `int` | `921600` | Serial line speed |
 | `ecdsa_verify_enabled` | `bool` | `true` | Verify ECDSA sig on SIGNED_ET packets; drop packet if invalid |
 | `device_cert_path` | `string` | `/etc/vigia/device_cert.pem` | Expected device certificate for ECDSA verification |
@@ -714,7 +714,7 @@ State: CAPTURING_SNAPSHOT  (budget: ≤2.0s)
   ▼
 State: SERIALIZING          (budget: ≤3.0s)
   │  msgpack::pack(payload)   → std::vector<uint8_t> blob
-  │  Attach: E_t (pre-signed by STM32), S_t (unsigned Phase 1)
+  │  Attach: E_t (pre-signed by Pico 2), S_t (unsigned Phase 1)
   ▼
 State: MQTT_CONNECTING      (budget: ≤5.0s, with 3 retries × 1.5s backoff)
   │  mqtt::async_client connect to broker:8883 (TLS 1.2 mutual auth)
@@ -873,4 +873,4 @@ vigia_msgs/
 
 ---
 
-*Next document: `.claude/design/03_stm32_firmware_contracts.md` — STM32 Black Pill firmware spec: BNO085 SPI1 DMA driver, NEO-M8N UBX parser, ATECC608A signing pipeline, COBS packet encoder, and USB-CDC transmit loop.*
+*Next document: `.claude/design/03_pico2_firmware_contracts.md` — Pico 2 firmware spec: BNO085 SPI0 DMA driver, NEO-M8N UBX parser, ATECC608A signing pipeline, COBS packet encoder, and USB-CDC transmit loop.*
