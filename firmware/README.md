@@ -91,6 +91,53 @@ VIGIA_GPS seq=0 lat=37.1234567 lon=-122.1234567 speed_ms=0.00 fix_type=3 satelli
 
 Without GPS wired you still get `VIGIA_PING` (link test).
 
+## BNO085 IMU (SPI0)
+
+Wire the BNO085 (BN-085 breakout) to the Pico 2 header:
+
+| BNO085 pin | Pico 2 GPIO | Pico pin | Notes |
+|------------|-------------|----------|-------|
+| **SCL** | GP18 | Pin 24 | SPI SCK |
+| **AD0** | GP19 | Pin 25 | SPI MOSI |
+| **SDA** | GP16 | Pin 21 | SPI MISO |
+| **CS** | GP17 | Pin 22 | Chip select (active LOW) |
+| **INT** | GP20 | Pin 26 | Interrupt (active LOW) |
+| **RST** | GP21 | Pin 27 | Reset (active LOW) |
+| **PS0** | **GP22** | **Pin 29** | **WAKE — must wire to Pico, not only 3.3 V** |
+| **PS1** | 3.3 V | — | Solder jumper or wire to 3.3 V (SPI mode) |
+| **VCC** | 3.3 V | Pin 36 | Sensor rail |
+| **GND** | GND | Pin 38 | Common ground |
+
+> **PS0 is critical for SPI.** After reset it becomes the WAKE line. Remove any PS0→3.3 V jumper and wire **PS0 → GP22** instead. **PS1** must be HIGH at reset (jumper to 3.3 V).
+
+If init fails, check `imu_stage` in `VIGIA_PING`:
+
+| `imu_stage` | Meaning |
+|-------------|---------|
+| 0 | Not started |
+| 1 | Boot timeout — no INT after reset (check PS1=HIGH, wiring) |
+| 2 | Rotation vector enable failed |
+| 3 | Linear accel enable failed |
+| 4 | Ready |
+| 5 | No sensor data within 3 s after enable (check PS0→GP22, PS1→3.3 V) |
+
+> Power BNO085 from a **dedicated 3.3 V sensor rail** when GPS + IMU + ATECC are all populated — see [power-distribution.md](../docs/power-distribution.md).
+
+Rebuild and reflash. On the Pi you should see `VIGIA_IMU` lines @ 10 Hz (bench debug) alongside GPS:
+
+```
+VIGIA_IMU seq=0 qw=0.9980 qx=0.0120 qy=-0.0030 qz=0.0550 ax=0.010 ay=-0.020 az=0.150 cal=3 valid=1 qnorm=1.0000
+```
+
+Bench checks (Milestone 1):
+
+- `imu_ready=1` in `VIGIA_PING` when init succeeded
+- Quaternion norm `qnorm` ≈ 1.0 ± 0.02 when stationary
+- Rotate board 90° — quaternion components change predictably
+- GPS lines still print (`VIGIA_GPS` unchanged)
+
+Disable IMU USB debug: rebuild with `-DVIGIA_IMU_DEBUG_USB=0` in CMake.
+
 ## Next step
 
-When link + GPS work, move to separate VSYS power + **data-only USB** per [power-distribution.md](../docs/power-distribution.md), then add BNO085 + ATECC608A.
+When link + GPS + IMU work, move to separate VSYS power + **data-only USB** per [power-distribution.md](../docs/power-distribution.md), then add ATECC608A and `VIGIA_IMU` @ 100 Hz wire protocol (Milestone 2).
