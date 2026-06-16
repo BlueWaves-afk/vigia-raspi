@@ -2,8 +2,8 @@
  * vigia_pico_hello — Pi ↔ Pico 2 USB CDC link + NEO-M8N GPS + BNO085 IMU.
  *
  * USB serial (/dev/ttyACM0 on the Pi):
- *   VIGIA_GPS  — parsed fix @ 1 Hz
- *   VIGIA_IMU  — quaternion + linear accel @ 10 Hz (bench debug, M1)
+ *   VIGIA_GPS  — parsed fix @ 1 Hz (+ timestamp_us)
+ *   VIGIA_IMU  — quaternion + linear accel @ ~100 Hz (each new sample)
  *   VIGIA_PING — link heartbeat @ 1 Hz (when no GPS frames yet)
  *
  * GPS wiring (UART1):
@@ -40,9 +40,11 @@ static const char *source_name(neo_m8n_source_t src) {
 }
 
 static void print_gps_line(uint32_t seq, const neo_m8n_report_t *r) {
-    printf("VIGIA_GPS seq=%lu lat=%.7f lon=%.7f speed_ms=%.2f fix_type=%u "
-           "satellites=%u hdop=%.2f valid=%u src=%s\n",
+    const uint64_t timestamp_us = time_us_64();
+    printf("VIGIA_GPS seq=%lu timestamp_us=%llu lat=%.7f lon=%.7f speed_ms=%.2f "
+           "fix_type=%u satellites=%u hdop=%.2f valid=%u src=%s\n",
            (unsigned long)seq,
+           (unsigned long long)timestamp_us,
            r->latitude,
            r->longitude,
            (double)r->speed_ms,
@@ -92,11 +94,13 @@ static void print_ping_line(uint32_t seq, uint64_t uptime_ms, uint32_t boot_ms) 
 
 #if VIGIA_IMU_DEBUG_USB
 static void print_imu_line(uint32_t seq, const bno085_report_t *r) {
+    const uint64_t timestamp_us = time_us_64();
     const float norm = sqrtf((r->qw * r->qw) + (r->qx * r->qx) + (r->qy * r->qy) +
                              (r->qz * r->qz));
-    printf("VIGIA_IMU seq=%lu qw=%.4f qx=%.4f qy=%.4f qz=%.4f "
+    printf("VIGIA_IMU seq=%lu timestamp_us=%llu qw=%.4f qx=%.4f qy=%.4f qz=%.4f "
            "ax=%.3f ay=%.3f az=%.3f cal=%u valid=%u qnorm=%.4f\n",
            (unsigned long)seq,
+           (unsigned long long)timestamp_us,
            (double)r->qw,
            (double)r->qx,
            (double)r->qy,
@@ -129,25 +133,18 @@ int main(void) {
     sleep_ms(1500);
 
     absolute_time_t next_gps_print = make_timeout_time_ms(1000);
-#if VIGIA_IMU_DEBUG_USB
-    absolute_time_t next_imu_print = make_timeout_time_ms(500);
-#endif
 
     while (true) {
         neo_m8n_poll();
         bno085_poll();
 
 #if VIGIA_IMU_DEBUG_USB
-        if (absolute_time_diff_us(get_absolute_time(), next_imu_print) <= 0) {
+        if (bno085_ready()) {
             bno085_report_t imu;
-            /* Only print when bno085_get_report() returns true, meaning a new
-             * sample has arrived since the last call.  Discarding the flag with
-             * (void) would repeat stale values every 500 ms. */
-            if (bno085_ready() && bno085_get_report(&imu) && imu.valid) {
+            while (bno085_get_report(&imu) && imu.valid) {
                 print_imu_line(imu_seq++, &imu);
             }
             fflush(stdout);
-            next_imu_print = make_timeout_time_ms(500);
         }
 #endif
 
