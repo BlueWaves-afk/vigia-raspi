@@ -26,6 +26,8 @@ public:
     void start();
     void stop();
 
+    bool isRunning() const { return running_.load(); }
+
     const SensorState& state() const { return state_; }
     SensorState& state() { return state_; }
 
