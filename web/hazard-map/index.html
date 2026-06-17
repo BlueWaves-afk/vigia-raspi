@@ -6,135 +6,539 @@
   <title>VIGIA Hazard Map</title>
   <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, sans-serif; }
-    #map { width: 100vw; height: 100vh; }
-    #panel {
-      position: absolute; top: 12px; left: 12px; z-index: 2;
-      background: rgba(20, 20, 24, 0.92); color: #eee;
-      padding: 14px 16px; border-radius: 8px; max-width: 320px;
-      font-size: 13px; line-height: 1.5;
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --sidebar-w: 300px;
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3248;
+      --text: #e2e8f0;
+      --muted: #7c839e;
+      --accent: #6366f1;
+      --red: #ef4444;
+      --orange: #f97316;
+      --yellow: #eab308;
+      --green: #22c55e;
     }
-    #panel h1 { font-size: 15px; margin-bottom: 8px; }
-    #panel label { display: block; margin-top: 8px; color: #aaa; }
-    #panel input, #panel select {
-      width: 100%; margin-top: 4px; padding: 6px 8px;
-      border: 1px solid #444; border-radius: 4px; background: #111; color: #eee;
+
+    html, body { height: 100%; background: var(--bg); font-family: system-ui, -apple-system, sans-serif; color: var(--text); }
+
+    /* ── Layout ─────────────────────────────────────────────────── */
+    #app { display: flex; height: 100vh; }
+
+    #sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      background: var(--bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      z-index: 10;
     }
-    #status { margin-top: 10px; color: #8cf; }
-    #detail {
-      position: absolute; bottom: 12px; left: 12px; right: 12px; z-index: 2;
-      background: rgba(20, 20, 24, 0.92); color: #eee;
-      padding: 12px 16px; border-radius: 8px; display: none;
-      max-height: 30vh; overflow: auto; font-size: 13px;
+
+    #map-wrap { flex: 1; position: relative; }
+    #map { width: 100%; height: 100%; }
+
+    /* ── Sidebar header ─────────────────────────────────────────── */
+    #sidebar-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    #sidebar-header h1 {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    #sidebar-header p { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Stats ──────────────────────────────────────────────────── */
+    #stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .stat-cell {
+      background: var(--surface);
+      padding: 12px 14px;
+      text-align: center;
+    }
+    .stat-cell .num { font-size: 22px; font-weight: 700; color: var(--text); }
+    .stat-cell .lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+
+    /* ── Controls ───────────────────────────────────────────────── */
+    #controls { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+
+    .ctrl-row { margin-bottom: 12px; }
+    .ctrl-row:last-child { margin-bottom: 0; }
+    .ctrl-row label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; display: block; margin-bottom: 5px; }
+    .ctrl-row input[type=range] { width: 100%; accent-color: var(--accent); }
+    .ctrl-row input[type=number], .ctrl-row input[type=text] {
+      width: 100%; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 5px; color: var(--text); padding: 6px 10px; font-size: 13px;
+    }
+    .ctrl-row .range-val { font-size: 13px; font-weight: 600; color: var(--text); }
+
+    .ctrl-row .row-inline { display: flex; align-items: center; gap: 8px; }
+    .ctrl-row .row-inline input[type=number] { width: 70px; }
+
+    /* ── Refresh button ─────────────────────────────────────────── */
+    #btn-refresh {
+      width: 100%; padding: 8px; background: var(--accent); color: #fff;
+      border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: opacity .15s;
+    }
+    #btn-refresh:hover { opacity: .85; }
+    #btn-refresh:disabled { opacity: .4; cursor: default; }
+
+    /* ── Status bar ─────────────────────────────────────────────── */
+    #status-bar {
+      padding: 8px 16px;
+      font-size: 11px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      min-height: 32px;
+    }
+    #status-bar.error { color: #f87171; }
+
+    /* ── Legend ─────────────────────────────────────────────────── */
+    #legend { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    #legend h3 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+    .legend-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 12px; }
+    .legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── Last updated ───────────────────────────────────────────── */
+    #sidebar-footer {
+      margin-top: auto;
+      padding: 10px 16px;
+      font-size: 11px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Detail panel ───────────────────────────────────────────── */
+    #detail-panel {
+      position: absolute;
+      top: 0; right: 0; bottom: 0;
+      width: 340px;
+      background: var(--bg);
+      border-left: 1px solid var(--border);
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      transform: translateX(100%);
+      transition: transform .25s ease;
+    }
+    #detail-panel.open { transform: translateX(0); }
+
+    #detail-header {
+      padding: 14px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #detail-header h2 { font-size: 13px; font-weight: 700; flex: 1; }
+    #btn-close {
+      background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px; line-height: 1;
+    }
+    #btn-close:hover { color: var(--text); }
+
+    #detail-body { flex: 1; overflow-y: auto; padding: 14px 16px; }
+
+    .detail-meta { margin-bottom: 14px; }
+    .detail-meta .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .detail-meta .row .k { color: var(--muted); }
+    .detail-meta .row .v { font-weight: 500; }
+
+    .score-bar-wrap { margin: 12px 0; }
+    .score-bar-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .score-bar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+    .score-bar-fill { height: 100%; border-radius: 3px; transition: width .3s; }
+
+    #detail-obs-title { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: .05em; margin: 14px 0 8px; }
+    .obs-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .obs-card .obs-top { display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .obs-card .obs-rri { font-weight: 700; }
+    .obs-card .obs-dev { color: var(--muted); font-size: 11px; }
+    .obs-card .obs-scores { display: flex; gap: 8px; color: var(--muted); font-size: 11px; }
+    .obs-card .obs-time { color: var(--muted); font-size: 11px; margin-top: 3px; }
+
+    #detail-loading {
+      display: flex; align-items: center; justify-content: center;
+      height: 80px; color: var(--muted); font-size: 13px;
+    }
+
+    /* ── MapLibre popup ─────────────────────────────────────────── */
+    .maplibregl-popup-content {
+      background: var(--surface) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: 8px !important;
+      padding: 10px 12px !important;
+      color: var(--text) !important;
+      font-family: system-ui, sans-serif !important;
+      font-size: 12px !important;
+      min-width: 160px;
+    }
+    .maplibregl-popup-tip { border-top-color: var(--border) !important; }
+    .popup-hazard-id { font-size: 10px; color: var(--muted); margin-bottom: 4px; }
+    .popup-severity { font-size: 18px; font-weight: 700; }
+    .popup-meta { color: var(--muted); margin-top: 4px; }
+    .popup-hint { margin-top: 6px; color: var(--accent); font-size: 11px; }
+
+    /* ── Responsive ─────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      #sidebar { width: 100%; height: auto; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border); }
+      #app { flex-direction: column; }
+      #detail-panel { width: 100%; }
     }
   </style>
 </head>
 <body>
-  <div id="panel">
-    <h1>VIGIA Hazard Map</h1>
-    <label>API base URL
-      <input id="apiBase" value="http://127.0.0.1:8080" />
-    </label>
-    <label>Min severity (RRI)
-      <input id="minSeverity" type="number" min="0" max="1" step="0.05" value="0.75" />
-    </label>
-    <label>Auto-refresh (seconds, 0 = off)
-      <input id="refreshSec" type="number" min="0" value="5" />
-    </label>
-    <div id="status">Loading…</div>
+<div id="app">
+  <!-- ── Sidebar ───────────────────────────────────────────────── -->
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <h1>⚠ VIGIA Hazard Map</h1>
+      <p>Real-time road hazard intelligence</p>
+    </div>
+
+    <div id="stats-grid">
+      <div class="stat-cell"><div class="num" id="stat-active">—</div><div class="lbl">Active hazards</div></div>
+      <div class="stat-cell"><div class="num" id="stat-obs">—</div><div class="lbl">Total observations</div></div>
+      <div class="stat-cell"><div class="num" id="stat-devices">—</div><div class="lbl">Devices</div></div>
+      <div class="stat-cell"><div class="num" id="stat-24h">—</div><div class="lbl">Last 24 h</div></div>
+    </div>
+
+    <div id="controls">
+      <div class="ctrl-row">
+        <label>Min severity (RRI) — <span class="range-val" id="sev-val">0.60</span></label>
+        <input type="range" id="minSeverity" min="0" max="1" step="0.05" value="0.60" />
+      </div>
+      <div class="ctrl-row">
+        <label>API server</label>
+        <input type="text" id="apiBase" value="http://127.0.0.1:8080" />
+      </div>
+      <div class="ctrl-row">
+        <div class="row-inline">
+          <label style="flex:1;margin:0">Auto-refresh (s)</label>
+          <input type="number" id="refreshSec" min="0" value="10" />
+        </div>
+      </div>
+      <div class="ctrl-row">
+        <button id="btn-refresh">Refresh now</button>
+      </div>
+    </div>
+
+    <div id="status-bar">Waiting for map…</div>
+
+    <div id="legend">
+      <h3>Severity (RRI)</h3>
+      <div class="legend-row"><div class="legend-dot" style="background:#ef4444"></div>Critical ≥ 0.85</div>
+      <div class="legend-row"><div class="legend-dot" style="background:#f97316"></div>High ≥ 0.75</div>
+      <div class="legend-row"><div class="legend-dot" style="background:#eab308"></div>Medium ≥ 0.60</div>
+      <div class="legend-row"><div class="legend-dot" style="background:#22c55e"></div>Low &lt; 0.60</div>
+    </div>
+
+    <div id="sidebar-footer" id="last-updated">—</div>
   </div>
-  <div id="detail"></div>
-  <div id="map"></div>
 
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-  <script>
-    const map = new maplibregl.Map({
-      container: 'map',
-      style: 'https://demotiles.maplibre.org/style.json',
-      center: [77.5946, 12.9716],
-      zoom: 14,
+  <!-- ── Map ──────────────────────────────────────────────────── -->
+  <div id="map-wrap">
+    <div id="map"></div>
+
+    <!-- Detail panel slides in from the right -->
+    <div id="detail-panel">
+      <div id="detail-header">
+        <h2 id="detail-title">Hazard detail</h2>
+        <button id="btn-close" title="Close">✕</button>
+      </div>
+      <div id="detail-body">
+        <div id="detail-loading">Select a hazard on the map</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+// ── Config ────────────────────────────────────────────────────────────────
+const SOURCE_ID  = 'hazards';
+const CIRCLE_ID  = 'hazards-circle';
+const LABEL_ID   = 'hazards-label';
+
+// ── Map init ─────────────────────────────────────────────────────────────
+const map = new maplibregl.Map({
+  container: 'map',
+  // OpenFreeMap — free, no API key, real road tiles
+  style: 'https://tiles.openfreemap.org/styles/liberty',
+  center: [77.5946, 12.9716],
+  zoom: 13,
+  attributionControl: false,
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-left');
+
+// ── State ─────────────────────────────────────────────────────────────────
+let refreshTimer   = null;
+let lastUpdated    = null;
+let currentHazardId = null;
+const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 16 });
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function apiBase() { return document.getElementById('apiBase').value.replace(/\/$/, ''); }
+function minSev()  { return parseFloat(document.getElementById('minSeverity').value); }
+
+function severityColor(score) {
+  if (score >= 0.85) return '#ef4444';
+  if (score >= 0.75) return '#f97316';
+  if (score >= 0.60) return '#eab308';
+  return '#22c55e';
+}
+
+function fmtTime(iso) {
+  try {
+    return new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+  } catch { return iso; }
+}
+
+function fmtScore(v) { return (typeof v === 'number') ? v.toFixed(2) : '—'; }
+
+function setStatus(msg, isError = false) {
+  const el = document.getElementById('status-bar');
+  el.textContent = msg;
+  el.className = isError ? 'error' : '';
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const r = await fetch(`${apiBase()}/v1/stats`);
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('stat-active').textContent  = d.active_hazards ?? '—';
+    document.getElementById('stat-obs').textContent     = d.total_observations ?? '—';
+    document.getElementById('stat-devices').textContent = d.total_devices ?? '—';
+    document.getElementById('stat-24h').textContent     = d.obs_last_24h ?? '—';
+  } catch { /* non-fatal */ }
+}
+
+// ── Fetch + render hazards ────────────────────────────────────────────────
+async function loadHazards() {
+  const btn = document.getElementById('btn-refresh');
+  btn.disabled = true;
+
+  try {
+    const b   = map.getBounds();
+    const bbox = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+    const url  = `${apiBase()}/v1/hazards?bbox=${bbox}&min_severity=${minSev()}`;
+
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const geo = await r.json();
+
+    // Inject colour into each feature for paint expression
+    (geo.features || []).forEach(f => {
+      f.properties._color  = severityColor(f.properties.severity_score);
+      f.properties._radius = Math.max(8, Math.min(22, 8 + (f.properties.observation_count - 1) * 2));
     });
-    map.addControl(new maplibregl.NavigationControl());
 
-    let markers = [];
-    let refreshTimer = null;
-
-    function clearMarkers() {
-      markers.forEach(m => m.remove());
-      markers = [];
+    if (map.getSource(SOURCE_ID)) {
+      map.getSource(SOURCE_ID).setData(geo);
     }
 
-    function severityColor(score) {
-      if (score >= 0.85) return '#e53935';
-      if (score >= 0.75) return '#fb8c00';
-      return '#fdd835';
-    }
+    const count = geo.features?.length ?? 0;
+    lastUpdated = new Date();
+    setStatus(`${count} hazard${count !== 1 ? 's' : ''} in view`);
+    document.getElementById('sidebar-footer').textContent =
+      `Updated ${lastUpdated.toLocaleTimeString()}`;
 
-    async function fetchHazards() {
-      const base = document.getElementById('apiBase').value.replace(/\/$/, '');
-      const minSev = document.getElementById('minSeverity').value;
-      const b = map.getBounds();
-      const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
-      const url = `${base}/v1/hazards?bbox=${bbox}&min_severity=${minSev}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    }
+    await loadStats();
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
 
-    async function showDetail(hazardId) {
-      const base = document.getElementById('apiBase').value.replace(/\/$/, '');
-      const res = await fetch(`${base}/v1/hazards/${hazardId}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const el = document.getElementById('detail');
-      el.style.display = 'block';
-      const obs = (data.observations || []).map(o =>
-        `<li>RRI ${o.rri?.toFixed?.(2) ?? o.rri} @ ${o.observed_at} (${o.trust_level})</li>`
-      ).join('');
-      el.innerHTML = `
-        <strong>Hazard ${data.hazard_id?.slice(0, 8)}…</strong>
-        severity=${data.severity_score?.toFixed?.(2)} observations=${data.observation_count}
-        <ul>${obs || '<li>No observations</li>'}</ul>`;
-    }
+// ── Map layers ────────────────────────────────────────────────────────────
+map.on('load', () => {
+  map.addSource(SOURCE_ID, {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
 
-    async function refresh() {
-      const status = document.getElementById('status');
-      try {
-        const geo = await fetchHazards();
-        clearMarkers();
-        (geo.features || []).forEach(f => {
-          const [lon, lat] = f.geometry.coordinates;
-          const score = f.properties.severity_score;
-          const el = document.createElement('div');
-          el.style.width = '14px';
-          el.style.height = '14px';
-          el.style.borderRadius = '50%';
-          el.style.background = severityColor(score);
-          el.style.border = '2px solid #fff';
-          el.style.cursor = 'pointer';
-          const m = new maplibregl.Marker({ element: el })
-            .setLngLat([lon, lat])
-            .addTo(map);
-          el.addEventListener('click', () => showDetail(f.properties.hazard_id));
-          markers.push(m);
-        });
-        status.textContent = `${geo.features?.length ?? 0} hazards in view`;
-      } catch (e) {
-        status.textContent = `Error: ${e.message}`;
-      }
-    }
+  map.addLayer({
+    id: CIRCLE_ID,
+    type: 'circle',
+    source: SOURCE_ID,
+    paint: {
+      'circle-radius': ['get', '_radius'],
+      'circle-color':  ['get', '_color'],
+      'circle-opacity': 0.9,
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-opacity': 0.8,
+    },
+  });
 
-    function setupRefresh() {
-      if (refreshTimer) clearInterval(refreshTimer);
-      const sec = parseInt(document.getElementById('refreshSec').value, 10);
-      if (sec > 0) refreshTimer = setInterval(refresh, sec * 1000);
-    }
+  map.addLayer({
+    id: LABEL_ID,
+    type: 'symbol',
+    source: SOURCE_ID,
+    layout: {
+      'text-field': ['to-string', ['get', 'observation_count']],
+      'text-size': 10,
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+      'text-allow-overlap': true,
+    },
+    paint: {
+      'text-color': '#fff',
+      'text-halo-color': 'rgba(0,0,0,0.3)',
+      'text-halo-width': 1,
+    },
+  });
 
-    map.on('load', () => { refresh(); setupRefresh(); });
-    map.on('moveend', refresh);
-    document.getElementById('minSeverity').addEventListener('change', refresh);
-    document.getElementById('refreshSec').addEventListener('change', setupRefresh);
-  </script>
+  loadHazards();
+  setupRefresh();
+});
+
+// ── Hover popup ───────────────────────────────────────────────────────────
+map.on('mouseenter', CIRCLE_ID, (e) => {
+  map.getCanvas().style.cursor = 'pointer';
+  const f  = e.features[0];
+  const p  = f.properties;
+  const score = typeof p.severity_score === 'number' ? p.severity_score : parseFloat(p.severity_score);
+  popup
+    .setLngLat(e.lngLat)
+    .setHTML(`
+      <div class="popup-hazard-id">${(p.hazard_id || '').slice(0, 8)}…</div>
+      <div class="popup-severity" style="color:${severityColor(score)}">RRI ${fmtScore(score)}</div>
+      <div class="popup-meta">${p.observation_count} observation${p.observation_count !== 1 ? 's' : ''}</div>
+      <div class="popup-meta">Last seen ${fmtTime(p.last_seen)}</div>
+      <div class="popup-hint">Click for details</div>
+    `)
+    .addTo(map);
+});
+
+map.on('mouseleave', CIRCLE_ID, () => {
+  map.getCanvas().style.cursor = '';
+  popup.remove();
+});
+
+// ── Click → detail panel ──────────────────────────────────────────────────
+map.on('click', CIRCLE_ID, (e) => {
+  const hazardId = e.features[0].properties.hazard_id;
+  if (hazardId) openDetail(hazardId);
+});
+
+// ── Detail panel ─────────────────────────────────────────────────────────
+async function openDetail(hazardId) {
+  currentHazardId = hazardId;
+  const panel = document.getElementById('detail-panel');
+  const body  = document.getElementById('detail-body');
+  panel.classList.add('open');
+  body.innerHTML = '<div id="detail-loading">Loading…</div>';
+
+  try {
+    const r = await fetch(`${apiBase()}/v1/hazards/${hazardId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+
+    document.getElementById('detail-title').textContent =
+      `Hazard ${d.hazard_id.slice(0, 8)}…`;
+
+    const score = d.severity_score ?? 0;
+
+    const scoreBarColor = severityColor(score);
+
+    const scores = [
+      ['RRI (overall)', score],
+    ];
+
+    // Build observation rows
+    const obsRows = (d.observations || []).map(o => {
+      const rri = typeof o.rri === 'number' ? o.rri : parseFloat(o.rri ?? 0);
+      return `
+        <div class="obs-card">
+          <div class="obs-top">
+            <span class="obs-rri" style="color:${severityColor(rri)}">RRI ${fmtScore(rri)}</span>
+            <span class="obs-dev">${o.device_id}</span>
+          </div>
+          <div class="obs-scores">
+            <span>YOLO ${fmtScore(o.yolo_conf)}</span>
+            <span>Geo ${fmtScore(o.geometry_conf)}</span>
+            <span>Temp ${fmtScore(o.temporal_conf)}</span>
+            <span>ISS ${fmtScore(o.iss)}</span>
+          </div>
+          <div class="obs-time">${fmtTime(o.observed_at)} · ${o.trust_level}</div>
+        </div>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="detail-meta">
+        <div class="row"><span class="k">Hazard ID</span><span class="v">${d.hazard_id.slice(0,8)}…</span></div>
+        <div class="row"><span class="k">Severity</span><span class="v" style="color:${scoreBarColor}">${fmtScore(score)}</span></div>
+        <div class="row"><span class="k">Observations</span><span class="v">${d.observation_count}</span></div>
+        <div class="row"><span class="k">Location</span><span class="v">${d.centroid.lat.toFixed(5)}, ${d.centroid.lon.toFixed(5)}</span></div>
+        <div class="row"><span class="k">First seen</span><span class="v">${fmtTime(d.first_seen)}</span></div>
+        <div class="row"><span class="k">Last seen</span><span class="v">${fmtTime(d.last_seen)}</span></div>
+        <div class="row"><span class="k">Status</span><span class="v">${d.status}</span></div>
+      </div>
+
+      <div class="score-bar-wrap">
+        <div class="score-bar-label"><span>Severity score</span><span>${fmtScore(score)}</span></div>
+        <div class="score-bar">
+          <div class="score-bar-fill" style="width:${Math.round(score * 100)}%;background:${scoreBarColor}"></div>
+        </div>
+      </div>
+
+      <div id="detail-obs-title">
+        Observations (${(d.observations || []).length} shown)
+      </div>
+      ${obsRows || '<p style="color:var(--muted);font-size:12px">No observations found.</p>'}
+    `;
+  } catch (e) {
+    body.innerHTML = `<p style="color:#f87171;font-size:13px;padding:12px">Failed to load: ${e.message}</p>`;
+  }
+}
+
+document.getElementById('btn-close').addEventListener('click', () => {
+  document.getElementById('detail-panel').classList.remove('open');
+  currentHazardId = null;
+});
+
+// ── Auto-refresh ──────────────────────────────────────────────────────────
+function setupRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  const sec = parseInt(document.getElementById('refreshSec').value, 10);
+  if (sec > 0) refreshTimer = setInterval(loadHazards, sec * 1000);
+}
+
+// ── Event wiring ──────────────────────────────────────────────────────────
+document.getElementById('btn-refresh').addEventListener('click', loadHazards);
+document.getElementById('minSeverity').addEventListener('input', e => {
+  document.getElementById('sev-val').textContent = parseFloat(e.target.value).toFixed(2);
+  loadHazards();
+});
+document.getElementById('refreshSec').addEventListener('change', setupRefresh);
+document.getElementById('apiBase').addEventListener('change', () => { loadHazards(); loadStats(); });
+map.on('moveend', loadHazards);
+</script>
 </body>
 </html>

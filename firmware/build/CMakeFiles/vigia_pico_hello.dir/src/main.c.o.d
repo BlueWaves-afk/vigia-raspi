@@ -1,32 +1,34 @@
 CMakeFiles/vigia_pico_hello.dir/src/main.c.o: \
  /Users/ben/Desktop/vigia-raspi/firmware/src/main.c \
- /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/stdio.h \
+ /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/math.h \
+ /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/reent.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/_ansi.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/newlib.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/_newlib_version.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/config.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/machine/ieeefp.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/features.h \
+ /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stddef.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/cdefs.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/machine/_default_types.h \
- /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stddef.h \
- /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdarg.h \
- /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/reent.h \
- /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/_ansi.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/_types.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/machine/_types.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/lock.h \
+ /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/_ansi.h \
+ /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/stdio.h \
+ /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdarg.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/stdio.h \
- /Users/ben/pico-sdk/src/rp2_common/hardware_gpio/include/hardware/gpio.h \
- /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico.h \
- /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico/types.h \
- /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico/assert.h \
+ /Users/ben/Desktop/vigia-raspi/firmware/src/bno085_driver.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdbool.h \
- /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/assert.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdint.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/stdint.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/_intsup.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/_stdint.h \
+ /Users/ben/pico-sdk/src/rp2_common/hardware_spi/include/hardware/spi.h \
+ /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico.h \
+ /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico/types.h \
+ /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico/assert.h \
+ /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/assert.h \
  /Users/ben/Desktop/vigia-raspi/firmware/build/generated/pico_base/pico/version.h \
  /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico/config.h \
  /Users/ben/Desktop/vigia-raspi/firmware/build/generated/pico_base/pico/config_autogen.h \
@@ -42,10 +44,14 @@ CMakeFiles/vigia_pico_hello.dir/src/main.c.o: \
  /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/addressmap.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/sio.h \
  /Users/ben/pico-sdk/src/common/pico_base_headers/include/pico/error.h \
- /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/sio.h \
+ /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/spi.h \
  /Users/ben/pico-sdk/src/rp2_common/hardware_base/include/hardware/address_mapped.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/accessctrl.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/accessctrl.h \
+ /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/spi.h \
+ /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/dreq.h \
+ /Users/ben/pico-sdk/src/rp2_common/hardware_gpio/include/hardware/gpio.h \
+ /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/sio.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/interp.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/pads_bank0.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/pads_bank0.h \
@@ -63,7 +69,6 @@ CMakeFiles/vigia_pico_hello.dir/src/main.c.o: \
  /Users/ben/pico-sdk/src/rp2_common/hardware_uart/include/hardware/uart.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/uart.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/uart.h \
- /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/dreq.h \
  /Users/ben/pico-sdk/src/rp2_common/hardware_resets/include/hardware/resets.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/resets.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/resets.h \

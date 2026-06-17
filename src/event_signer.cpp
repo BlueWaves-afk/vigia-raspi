@@ -95,13 +95,15 @@ bool EventSigner::loadKey()
     return !hmac_key_.empty();
 }
 
-std::string EventSigner::canonicalPayload(const HazardObservation& obs) const
+std::string EventSigner::canonicalPayload(
+    const HazardObservation& obs,
+    const std::string& eventId,
+    const std::string& observedAt) const
 {
+    // Keys sorted alphabetically to match Python's json.dumps(sort_keys=True).
+    // No std::fixed — default stream precision (6 sig figs, no trailing zeros)
+    // matches Python json.dumps float output for single-precision values.
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(6);
-
-    const std::string eventId = uuidBytesToString(obs.event_id);
-    const std::string observedAt = formatObservedAtIso8601();
 
     oss << '{'
         << "\"device_id\":\"" << obs.device_id << "\","
@@ -179,15 +181,17 @@ std::string EventSigner::hmacSha256Base64(const std::string& data) const
 
 std::string EventSigner::signEnvelope(const HazardObservation& obs) const
 {
-    const std::string canonical = canonicalPayload(obs);
+    // Generate both IDs once so canonical and envelope share the same values.
+    const std::string eventId    = uuidBytesToString(obs.event_id);
+    const std::string observedAt = formatObservedAtIso8601();  // single call
+
+    const std::string canonical   = canonicalPayload(obs, eventId, observedAt);
     const std::string payloadHash = sha256Hex(canonical);
-    const std::string signature = hmacSha256Base64(canonical);
+    const std::string signature   = hmacSha256Base64(canonical);
 
+    // Envelope uses the same eventId/observedAt as canonical so the server's
+    // re-computed HMAC (strip signature, sort keys, re-serialize) will match.
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(6);
-
-    const std::string eventId = uuidBytesToString(obs.event_id);
-    const std::string observedAt = formatObservedAtIso8601();
 
     oss << '{'
         << "\"event_id\":\"" << eventId << "\","

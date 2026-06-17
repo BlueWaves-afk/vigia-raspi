@@ -79,4 +79,7 @@ CMakeFiles/vigia_pico_hello.dir/src/neo_m8n_driver.c.o: \
  /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/timer.h \
  /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/timer.h \
  /Users/ben/pico-sdk/src/rp2_common/pico_stdio_usb/include/pico/stdio_usb.h \
- /Users/ben/Desktop/vigia-raspi/firmware/src/vigia_pins.h
+ /Users/ben/Desktop/vigia-raspi/firmware/src/vigia_pins.h \
+ /Users/ben/pico-sdk/src/rp2_common/hardware_spi/include/hardware/spi.h \
+ /Users/ben/pico-sdk/src/rp2350/hardware_structs/include/hardware/structs/spi.h \
+ /Users/ben/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/spi.h

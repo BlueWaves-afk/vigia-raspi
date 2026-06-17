@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from typing import Any, Generator
 
 import psycopg2
 import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -32,9 +33,26 @@ DATABASE_URL = os.environ.get(
     "postgresql://vigia:vigia_dev@127.0.0.1:5432/vigia",
 )
 MERGE_RADIUS_M = float(os.environ.get("HAZARD_MERGE_RADIUS_M", "5"))
+POOL_MIN = int(os.environ.get("DB_POOL_MIN", "2"))
+POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
 TRUST_LEVEL_SIGNED = "software_signed"
 
-app = FastAPI(title="VIGIA Hazard Server", version="1.0.0")
+# ---------------------------------------------------------------------------
+# Connection pool — created once at startup, shared across all requests.
+# ---------------------------------------------------------------------------
+_pool: ThreadedConnectionPool | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _pool
+    _pool = ThreadedConnectionPool(POOL_MIN, POOL_MAX, DATABASE_URL)
+    yield
+    if _pool:
+        _pool.closeall()
+
+
+app = FastAPI(title="VIGIA Hazard Server", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,11 +78,17 @@ class BatchIngestResponse(BaseModel):
 
 @contextmanager
 def get_conn() -> Generator[Any, None, None]:
-    conn = psycopg2.connect(DATABASE_URL)
+    """Borrow a connection from the pool; roll back and return on any error."""
+    if _pool is None:
+        raise RuntimeError("Connection pool not initialised")
+    conn = _pool.getconn()
     try:
         yield conn
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        _pool.putconn(conn)
 
 
 def _parse_events(body: Any) -> list[dict[str, Any]]:
@@ -258,6 +282,33 @@ def health():
         return JSONResponse(status_code=503, content={"status": "error", "detail": str(exc)})
 
 
+@app.get("/v1/stats")
+def stats() -> dict[str, Any]:
+    """Aggregate stats for the map sidebar."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                (SELECT COUNT(*)
+                    FROM hazard_entities WHERE status = 'active') AS active_hazards,
+                (SELECT COUNT(*)
+                    FROM observations)                             AS total_observations,
+                (SELECT COUNT(DISTINCT device_id)
+                    FROM observations)                            AS total_devices,
+                (SELECT COUNT(*)
+                    FROM observations
+                    WHERE ingested_at > now() - INTERVAL '24 hours') AS obs_last_24h
+            """
+        )
+        row = cur.fetchone()
+    return {
+        "active_hazards":    int(row[0]),
+        "total_observations": int(row[1]),
+        "total_devices":     int(row[2]),
+        "obs_last_24h":      int(row[3]),
+    }
+
+
 @app.post("/v1/events", response_model=IngestResult | BatchIngestResponse)
 async def ingest_events(
     request: Request,
@@ -355,7 +406,11 @@ def list_hazards(
 
 
 @app.get("/v1/hazards/{hazard_id}")
-def get_hazard(hazard_id: str) -> dict[str, Any]:
+def get_hazard(
+    hazard_id: str,
+    obs_limit: int = Query(default=50, ge=1, le=500),
+    obs_offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
     with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
@@ -393,8 +448,9 @@ def get_hazard(hazard_id: str) -> dict[str, Any]:
             FROM observations
             WHERE hazard_id = %s
             ORDER BY observed_at DESC
+            LIMIT %s OFFSET %s
             """,
-            (hazard_id,),
+            (hazard_id, obs_limit, obs_offset),
         )
         observations = cur.fetchall()
 
@@ -435,6 +491,8 @@ def get_hazard(hazard_id: str) -> dict[str, Any]:
         "status": hazard["status"],
         "h3_index": hazard["h3_index"],
         "observations": obs_list,
+        "obs_limit": obs_limit,
+        "obs_offset": obs_offset,
     }
 
 

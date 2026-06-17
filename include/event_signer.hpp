@@ -22,7 +22,9 @@ public:
     std::string signEnvelope(const HazardObservation& obs) const;
 
 private:
-    std::string canonicalPayload(const HazardObservation& obs) const;
+    std::string canonicalPayload(const HazardObservation& obs,
+                                const std::string& eventId,
+                                const std::string& observedAt) const;
     std::string sha256Hex(const std::string& data) const;
     std::string hmacSha256Base64(const std::string& data) const;
 

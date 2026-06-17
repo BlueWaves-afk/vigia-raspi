@@ -83,6 +83,7 @@ set(CMAKE_TARGET_DEFINITIONS_ASM
   "PICO_RP2350=1"
   "PICO_TARGET_NAME=\"vigia_pico_hello\""
   "PICO_USE_BLOCKED_RAM=0"
+  "VIGIA_IMU_DEBUG_USB=1"
   )
 
 # The include file search paths:
@@ -147,6 +148,7 @@ set(CMAKE_ASM_TARGET_INCLUDE_PATH
   "/Users/ben/pico-sdk/src/common/boot_picobin_headers/include"
   "/Users/ben/pico-sdk/src/rp2350/boot_stage2/include"
   "/Users/ben/pico-sdk/src/rp2_common/pico_fix/rp2040_usb_device_enumeration/include"
+  "/Users/ben/pico-sdk/src/rp2_common/hardware_spi/include"
   )
 
 # The set of dependency files which are needed:
@@ -187,6 +189,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/Users/ben/pico-sdk/src/rp2_common/hardware_gpio/gpio.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_gpio/gpio.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_gpio/gpio.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/hardware_irq/irq.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_irq/irq.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_irq/irq.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.c.o.d"
+  "/Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/hardware_ticks/ticks.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_ticks/ticks.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_ticks/ticks.c.o.d"
@@ -220,6 +223,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/Users/ben/pico-sdk/src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/pico_stdlib/stdlib.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_stdlib/stdlib.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_stdlib/stdlib.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.c" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.c.o.d"
+  "/Users/ben/Desktop/vigia-raspi/firmware/src/bno085_driver.c" "CMakeFiles/vigia_pico_hello.dir/src/bno085_driver.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/src/bno085_driver.c.o.d"
   "/Users/ben/Desktop/vigia-raspi/firmware/src/main.c" "CMakeFiles/vigia_pico_hello.dir/src/main.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/src/main.c.o.d"
   "/Users/ben/Desktop/vigia-raspi/firmware/src/neo_m8n_driver.c" "CMakeFiles/vigia_pico_hello.dir/src/neo_m8n_driver.c.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/src/neo_m8n_driver.c.o.d"
   "/Users/ben/pico-sdk/src/rp2_common/pico_cxx_options/new_delete.cpp" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_cxx_options/new_delete.cpp.o" "gcc" "CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_cxx_options/new_delete.cpp.o.d"

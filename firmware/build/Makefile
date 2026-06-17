@@ -1079,6 +1079,30 @@ Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.c.s
 .PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.c.s
 
+Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.o: Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.o
+.PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.o
+
+# target to build an object file
+Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.o
+.PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.o
+
+Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.i: Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.i
+.PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.i
+
+# target to preprocess a source file
+Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.i
+.PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.i
+
+Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.s: Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.s
+.PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.s
+
+# target to generate assembly for a file
+Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.s
+.PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.c.s
+
 Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.o: Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.c.o
 .PHONY : Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.o
 
@@ -1967,6 +1991,30 @@ Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.c.s
 .PHONY : Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.c.s
 
+src/bno085_driver.o: src/bno085_driver.c.o
+.PHONY : src/bno085_driver.o
+
+# target to build an object file
+src/bno085_driver.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/src/bno085_driver.c.o
+.PHONY : src/bno085_driver.c.o
+
+src/bno085_driver.i: src/bno085_driver.c.i
+.PHONY : src/bno085_driver.i
+
+# target to preprocess a source file
+src/bno085_driver.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/src/bno085_driver.c.i
+.PHONY : src/bno085_driver.c.i
+
+src/bno085_driver.s: src/bno085_driver.c.s
+.PHONY : src/bno085_driver.s
+
+# target to generate assembly for a file
+src/bno085_driver.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/vigia_pico_hello.dir/build.make CMakeFiles/vigia_pico_hello.dir/src/bno085_driver.c.s
+.PHONY : src/bno085_driver.c.s
+
 src/main.o: src/main.c.o
 .PHONY : src/main.o
 
@@ -2139,6 +2187,9 @@ help:
 	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.o"
 	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.i"
 	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_pll/pll.s"
+	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.o"
+	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.i"
+	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_spi/spi.s"
 	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.o"
 	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.i"
 	@echo "... Users/ben/pico-sdk/src/rp2_common/hardware_sync/sync.s"
@@ -2250,6 +2301,9 @@ help:
 	@echo "... Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.o"
 	@echo "... Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.i"
 	@echo "... Users/ben/pico-sdk/src/rp2_common/pico_unique_id/unique_id.s"
+	@echo "... src/bno085_driver.o"
+	@echo "... src/bno085_driver.i"
+	@echo "... src/bno085_driver.s"
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"

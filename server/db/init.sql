@@ -42,6 +42,11 @@ CREATE TABLE observations (
 CREATE INDEX idx_observations_location ON observations USING GIST (location);
 CREATE INDEX idx_observations_device_id ON observations (device_id);
 CREATE INDEX idx_observations_observed_at ON observations (observed_at);
+CREATE INDEX idx_observations_hazard_id ON observations (hazard_id);
+CREATE INDEX idx_observations_hazard_class ON observations (hazard_class);
+-- Fast anti-replay watermark check
+CREATE INDEX idx_device_registry_device_id ON device_registry (device_id);
 
 CREATE INDEX idx_hazard_entities_centroid ON hazard_entities USING GIST (centroid);
 CREATE INDEX idx_hazard_entities_status ON hazard_entities (status);
+CREATE INDEX idx_hazard_entities_last_seen ON hazard_entities (last_seen DESC);
