@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ImuSample.msg"
   "msg/GpsPvt.msg"
   "msg/SignedEt.msg"
+  "msg/SensorHealth.msg"
   "msg/HazardEvent.msg"
   DEPENDENCIES std_msgs sensor_msgs
 )

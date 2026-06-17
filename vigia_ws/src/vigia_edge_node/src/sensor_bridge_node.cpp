@@ -1,191 +1,485 @@
+//
+// sensor_bridge_node.cpp — Pico 2 ↔ Pi ROS2 bridge
+//
+// Phase 1 (active):  text lines over USB CDC → ImuSample + GpsPvt topics
+// Phase 2 (pending): COBS binary SignedEtPacket → SignedEt topic
+//
+// Auto-detects wire protocol by first received byte:
+//   'V' (0x56) → text mode (bringup firmware)
+//   0x00       → COBS binary mode (Phase 2 firmware)
+//
+// Read loop uses select() + 256-byte chunk reads, matching Ben's SensorBridge
+// efficiency approach. IMU history ring buffer (200 samples) enables
+// timestamp-aligned GPS-IMU fusion queries from FusionNode.
+//
+
 #include "sensor_bridge_node.hpp"
-#include <termios.h>
+
 #include <fcntl.h>
+#include <sys/select.h>
+#include <termios.h>
 #include <unistd.h>
-#include <cstring>
+#include <cassert>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <optional>
+#include <string>
+#include <string_view>
 
 using namespace std::chrono_literals;
 
-// Packet type IDs — must match STM32 firmware definitions.
-static constexpr uint8_t PKT_IMU       = 0x01;
-static constexpr uint8_t PKT_GPS       = 0x02;
-static constexpr uint8_t PKT_SIGNED_ET = 0x03;
+// ── SignedEtPacket layout (must match firmware atecc608a_driver.h) ─────────
 
-// --------------------------------------------------------------------------
-// COBS decoder
-// --------------------------------------------------------------------------
+#pragma pack(push, 1)
+struct SignedEtPacketPi {
+    uint8_t  magic;
+    uint8_t  version;
+    uint64_t timestamp_us;
+    uint32_t sequence;
+    float    qw, qx, qy, qz;
+    float    ax, ay, az;
+    uint8_t  cal_status;
+    uint8_t  _imu_pad[3];
+    double   latitude;
+    double   longitude;
+    float    speed_ms;
+    uint8_t  fix_type;
+    uint8_t  satellites;
+    uint8_t  _gps_pad[1];
+    uint8_t  et_hash[32];
+    uint8_t  ecdsa_sig[64];
+};
+#pragma pack(pop)
+static_assert(sizeof(SignedEtPacketPi) == 173, "SignedEtPacket size mismatch with firmware");
 
-bool CobsDecoder::feed(uint8_t byte)
-{
-    frame_ready = false;
-    if (byte == 0x00) {
-        // End of COBS frame.
-        if (len > 0) {
-            frame_ready = true;
-            return true;
-        }
-        reset();
-        return false;
-    }
-    if (copy == 0) {
-        if (code != 0xFF) {
-            if (len < kMaxPacket) buf[len++] = 0x00;
-        }
-        code = byte;
-        copy = byte;
+// ── Text-line parsers (Phase 1 protocol) ──────────────────────────────────
+
+std::optional<SensorBridgeNode::ImuLine>
+SensorBridgeNode::parse_imu(std::string_view sv) {
+    if (sv.size() < 10 || sv.substr(0, 10) != "VIGIA_IMU ") return std::nullopt;
+    const std::string s(sv);
+    ImuLine o{};
+    unsigned seq = 0, cal = 0, valid = 0;
+    unsigned long long ts = 0;
+    float qnorm = 0;
+    if (std::sscanf(s.c_str(),
+        "VIGIA_IMU seq=%u timestamp_us=%llu qw=%f qx=%f qy=%f qz=%f "
+        "ax=%f ay=%f az=%f cal=%u valid=%u qnorm=%f",
+        &seq, &ts, &o.qw, &o.qx, &o.qy, &o.qz,
+        &o.ax, &o.ay, &o.az, &cal, &valid, &qnorm) < 11)
+        return std::nullopt;
+    o.seq = seq; o.timestamp_us = ts;
+    o.cal_status = static_cast<uint8_t>(cal); o.valid = (valid != 0);
+    return o;
+}
+
+std::optional<SensorBridgeNode::GpsLine>
+SensorBridgeNode::parse_gps(std::string_view sv) {
+    if (sv.size() < 10 || sv.substr(0, 10) != "VIGIA_GPS ") return std::nullopt;
+    const std::string s(sv);
+    GpsLine o{};
+    unsigned seq = 0, fix_type = 0, sats = 0, valid = 0;
+    unsigned long long ts = 0;
+    char src_buf[32]{};
+    int n = std::sscanf(s.c_str(),
+        "VIGIA_GPS seq=%u timestamp_us=%llu lat=%lf lon=%lf speed_ms=%f "
+        "fix_type=%u satellites=%u hdop=%f valid=%u src=%31s",
+        &seq, &ts, &o.latitude, &o.longitude, &o.speed_ms,
+        &fix_type, &sats, &o.hdop, &valid, src_buf);
+    if (n < 9) {
+        n = std::sscanf(s.c_str(),
+            "VIGIA_GPS seq=%u lat=%lf lon=%lf speed_ms=%f "
+            "fix_type=%u satellites=%u hdop=%f valid=%u",
+            &seq, &o.latitude, &o.longitude, &o.speed_ms,
+            &fix_type, &sats, &o.hdop, &valid);
+        if (n < 8) return std::nullopt;
     } else {
-        --copy;
-        if (len < kMaxPacket) buf[len++] = byte;
-        if (copy == 0 && code != 0xFF) {
-            // consumed a block
+        o.timestamp_us = ts;
+    }
+    o.seq = seq;
+    o.fix_type   = static_cast<uint8_t>(fix_type);
+    o.satellites = static_cast<uint8_t>(sats);
+    o.valid      = (valid != 0);
+    return o;
+}
+
+// ── COBS decoder (Pi-side, Phase 2) ───────────────────────────────────────
+
+size_t SensorBridgeNode::decode_cobs(const uint8_t * src, size_t src_len,
+                                     uint8_t * dst, size_t dst_cap) {
+    if (!src || !dst || src_len < 2) return 0;
+    size_t write = 0, read = 0;
+    while (read < src_len) {
+        uint8_t code = src[read++];
+        if (code == 0) break;
+        for (uint8_t i = 1; i < code; ++i) {
+            if (read >= src_len || write >= dst_cap) return 0;
+            dst[write++] = src[read++];
+        }
+        if (code < 0xFF) {
+            if (write >= dst_cap) return 0;
+            dst[write++] = 0x00;
         }
     }
-    if (copy == 0) {
-        code = 0;
+    // Remove the trailing implicit 0x00 appended for every group terminator
+    // when it falls at end-of-payload (COBS artefact — last group zero is
+    // structural, not part of the original data).
+    if (write > 0 && dst[write - 1] == 0x00) --write;
+    return write;
+}
+
+// ── Node constructor ───────────────────────────────────────────────────────
+
+SensorBridgeNode::SensorBridgeNode(const rclcpp::NodeOptions & opts)
+: Node("sensor_bridge_node", opts)
+{
+    declare_parameter("serial_device", "/dev/ttyACM0");
+    declare_parameter("baud_rate",     115200);
+
+    serial_device_ = get_parameter("serial_device").as_string();
+    baud_rate_     = get_parameter("baud_rate").as_int();
+
+    pub_imu_ = create_publisher<vigia_msgs::msg::ImuSample>(
+        "/vigia/imu", vigia::qos::sensor_stream());
+    pub_gps_ = create_publisher<vigia_msgs::msg::GpsPvt>(
+        "/vigia/gps", vigia::qos::sensor_stream());
+    pub_et_ = create_publisher<vigia_msgs::msg::SignedEt>(
+        "/vigia/signed_et", vigia::qos::signed_et());
+    pub_health_ = create_publisher<vigia_msgs::msg::SensorHealth>(
+        "/vigia/sensor_health", rclcpp::SystemDefaultsQoS());
+
+    // Health published at 1 Hz
+    health_timer_ = create_wall_timer(1s, [this](){ publish_health(); });
+
+    // Open serial after executor starts — avoid blocking spin()
+    init_timer_ = create_wall_timer(100ms, [this](){
+        init_timer_->cancel();
+        open_serial_and_start();
+    });
+
+    RCLCPP_INFO(get_logger(), "SensorBridgeNode: device=%s baud=%d",
+                serial_device_.c_str(), baud_rate_);
+}
+
+SensorBridgeNode::~SensorBridgeNode()
+{
+    running_.store(false);
+    if (reader_thread_.joinable()) reader_thread_.join();
+    if (fd_ >= 0) ::close(fd_);
+}
+
+// ── Serial open ───────────────────────────────────────────────────────────
+
+void SensorBridgeNode::open_serial_and_start()
+{
+    fd_ = ::open(serial_device_.c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
+    if (fd_ < 0) {
+        RCLCPP_WARN(get_logger(), "Cannot open %s: %s — retry in 2s",
+                    serial_device_.c_str(), strerror(errno));
+        init_timer_ = create_wall_timer(2s, [this](){
+            init_timer_->cancel();
+            open_serial_and_start();
+        });
+        return;
     }
-    return false;
-}
 
-void CobsDecoder::reset()
-{
-    len = code = copy = 0;
-    frame_ready = false;
-}
-
-// --------------------------------------------------------------------------
-// SensorBridgeNode
-// --------------------------------------------------------------------------
-
-SensorBridgeNode::SensorBridgeNode(const rclcpp::NodeOptions & options)
-: Node("sensor_bridge_node", options)
-{
-    declare_parameter("serial_port",          "/dev/ttyACM0");
-    declare_parameter("baud_rate",            921600);
-    declare_parameter("ecdsa_verify_enabled", true);
-    declare_parameter("device_cert_path",     "/etc/vigia/device_cert.pem");
-
-    serial_port_          = get_parameter("serial_port").as_string();
-    baud_rate_            = get_parameter("baud_rate").as_int();
-    ecdsa_verify_enabled_ = get_parameter("ecdsa_verify_enabled").as_bool();
-    device_cert_path_     = get_parameter("device_cert_path").as_string();
-
-    pub_imu_ = create_publisher<vigia_msgs::msg::ImuSample>("/vigia/imu", vigia::qos::sensor_stream());
-    pub_gps_ = create_publisher<vigia_msgs::msg::GpsPvt>("/vigia/gps", vigia::qos::sensor_stream());
-    pub_et_  = create_publisher<vigia_msgs::msg::SignedEt>("/vigia/signed_et", vigia::qos::signed_et());
-
-    if (open_serial(serial_port_, baud_rate_)) {
-        RCLCPP_INFO(get_logger(), "SensorBridgeNode: %s @ %d baud", serial_port_.c_str(), baud_rate_);
-    } else {
-        RCLCPP_WARN(get_logger(), "SensorBridgeNode: %s not available — running without STM32",
-                    serial_port_.c_str());
-    }
-
-    // 1 ms poll timer — at 921600 baud, a 34-byte packet arrives in ~0.37 ms.
-    timer_ = create_wall_timer(1ms, std::bind(&SensorBridgeNode::poll_serial, this));
-}
-
-bool SensorBridgeNode::open_serial(const std::string & port, int baud)
-{
-    serial_fd_ = ::open(port.c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
-    if (serial_fd_ < 0) return false;
-
-    termios tty{};
-    tcgetattr(serial_fd_, &tty);
-    cfsetispeed(&tty, B921600);
-    tty.c_cflag  = CS8 | CLOCAL | CREAD;
-    tty.c_iflag  = IGNPAR;
-    tty.c_oflag  = 0;
-    tty.c_lflag  = 0;
+    struct termios tty{};
+    tcgetattr(fd_, &tty);
+    cfmakeraw(&tty);
+    const speed_t spd = (baud_rate_ == 115200) ? B115200 : B9600;
+    cfsetispeed(&tty, spd);
+    cfsetospeed(&tty, spd);
+    tty.c_cflag |= (CLOCAL | CREAD | CS8);
     tty.c_cc[VMIN]  = 0;
-    tty.c_cc[VTIME] = 0;
-    tcsetattr(serial_fd_, TCSANOW, &tty);
-    return true;
+    tty.c_cc[VTIME] = 1;
+    tcsetattr(fd_, TCSANOW, &tty);
+
+    // Remove O_NONBLOCK — read_loop drives timing via select()
+    int fl = fcntl(fd_, F_GETFL, 0);
+    fcntl(fd_, F_SETFL, fl & ~O_NONBLOCK);
+
+    proto_   = WireProto::kUnknown;
+    running_.store(true);
+    reader_thread_ = std::thread([this](){ read_loop(); });
+    RCLCPP_INFO(get_logger(), "SensorBridgeNode: port open, reader started");
 }
 
-void SensorBridgeNode::poll_serial()
+// ── Read loop (select + 256-byte chunks) ──────────────────────────────────
+
+void SensorBridgeNode::read_loop()
 {
-    if (serial_fd_ < 0) return;
+    static constexpr size_t kChunk = 256;
+    char       chunk[kChunk];
+    std::string pending;
+    pending.reserve(512);
 
-    uint8_t byte_buf[256];
-    ssize_t n = ::read(serial_fd_, byte_buf, sizeof(byte_buf));
-    if (n <= 0) return;
+    // COBS accumulator
+    std::vector<uint8_t> cobs_acc;
+    cobs_acc.reserve(256);
+    bool in_cobs_frame = false;
 
-    for (ssize_t i = 0; i < n; ++i) {
-        decoder_.feed(byte_buf[i]);
-        if (decoder_.frame_ready) {
-            dispatch_packet(decoder_.buf, decoder_.len);
-            decoder_.reset();
+    while (running_.load()) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd_, &rfds);
+        struct timeval tv{0, 200'000};  // 200 ms timeout — same as Ben's SensorBridge
+
+        int sel = ::select(fd_ + 1, &rfds, nullptr, nullptr, &tv);
+        if (sel < 0) {
+            if (errno == EINTR) continue;
+            RCLCPP_ERROR(get_logger(), "select() error: %s", strerror(errno));
+            break;
+        }
+        if (sel == 0) continue;  // timeout — loop and check running_
+
+        ssize_t n = ::read(fd_, chunk, kChunk);
+        if (n <= 0) {
+            if (!running_.load()) break;
+            continue;
+        }
+
+        for (ssize_t i = 0; i < n; ++i) {
+            const uint8_t byte = static_cast<uint8_t>(chunk[i]);
+
+            // Protocol detection on first meaningful byte
+            if (proto_ == WireProto::kUnknown) {
+                if (byte == 0x56 /* 'V' */) {
+                    proto_ = WireProto::kText;
+                    RCLCPP_INFO(get_logger(), "SensorBridgeNode: detected text protocol (Phase 1)");
+                } else if (byte == 0x00) {
+                    proto_ = WireProto::kCobs;
+                    RCLCPP_INFO(get_logger(), "SensorBridgeNode: detected COBS binary protocol (Phase 2)");
+                    in_cobs_frame = false;
+                    cobs_acc.clear();
+                    continue;  // leading 0x00 is delimiter, not data
+                } else {
+                    // Unrecognised — wait for next byte
+                    continue;
+                }
+            }
+
+            if (proto_ == WireProto::kText) {
+                if (byte == '\n' || byte == '\r') {
+                    if (!pending.empty()) {
+                        process_text_line(pending);
+                        pending.clear();
+                    }
+                } else {
+                    pending += static_cast<char>(byte);
+                }
+            } else {
+                // COBS mode: accumulate bytes between 0x00 delimiters
+                if (byte == 0x00) {
+                    if (in_cobs_frame && !cobs_acc.empty()) {
+                        process_cobs_frame(cobs_acc.data(), cobs_acc.size());
+                    }
+                    cobs_acc.clear();
+                    in_cobs_frame = true;
+                } else {
+                    if (in_cobs_frame) {
+                        cobs_acc.push_back(byte);
+                    }
+                }
+            }
         }
     }
 }
 
-void SensorBridgeNode::dispatch_packet(const uint8_t* data, size_t len)
-{
-    if (len < 1) return;
-    uint8_t pkt_type = data[0];
+// ── Text protocol dispatch ─────────────────────────────────────────────────
 
-    if (pkt_type == PKT_IMU && len >= 34) {
-        // Layout: [type(1)] [q_w,q_x,q_y,q_z,ax,ay,az : 7×float32] [cal(1)]
+void SensorBridgeNode::process_text_line(const std::string & line)
+{
+    if (auto imu = parse_imu(line)) {
+        if (last_imu_seq_ > 0 && imu->seq <= last_imu_seq_) {
+            cnt_imu_gaps_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (last_imu_seq_ > 0 && imu->seq > last_imu_seq_ + 1)
+            cnt_imu_gaps_.fetch_add(imu->seq - last_imu_seq_ - 1, std::memory_order_relaxed);
+        last_imu_seq_ = imu->seq;
+        cnt_imu_.fetch_add(1, std::memory_order_relaxed);
+
+        // Push to history ring buffer
+        ImuSnapshot snap;
+        snap.timestamp_us = imu->timestamp_us;
+        snap.qw = imu->qw; snap.qx = imu->qx;
+        snap.qy = imu->qy; snap.qz = imu->qz;
+        snap.ax = imu->ax; snap.ay = imu->ay; snap.az = imu->az;
+        snap.cal_status = imu->cal_status;
+        snap.valid = imu->valid;
+        push_imu_history(snap);
+
         auto msg = std::make_unique<vigia_msgs::msg::ImuSample>();
-        msg->header.stamp = now();
-        float vals[7];
-        std::memcpy(vals, data + 1, 28);
-        msg->q_w          = vals[0];
-        msg->q_x          = vals[1];
-        msg->q_y          = vals[2];
-        msg->q_z          = vals[3];
-        msg->lin_accel_x  = vals[4];
-        msg->lin_accel_y  = vals[5];
-        msg->lin_accel_z  = vals[6];
-        msg->calibration_status = data[29];
+        msg->header.stamp    = now();
+        msg->header.frame_id = "imu";
+        msg->q_w = imu->qw; msg->q_x = imu->qx;
+        msg->q_y = imu->qy; msg->q_z = imu->qz;
+        msg->lin_accel_x = imu->ax;
+        msg->lin_accel_y = imu->ay;
+        msg->lin_accel_z = imu->az;
+        msg->calibration_status = imu->cal_status;
         pub_imu_->publish(std::move(msg));
         return;
     }
 
-    if (pkt_type == PKT_GPS && len >= 26) {
-        // Layout: [type(1)] [lat,lon : 2×float64] [alt,speed,course,hdop : 4×float32]
-        //         [fix_type(1)] [sats(1)] [valid(1)]
+    if (auto gps = parse_gps(line)) {
+        if (last_gps_seq_ > 0 && gps->seq <= last_gps_seq_) {
+            cnt_gps_gaps_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (last_gps_seq_ > 0 && gps->seq > last_gps_seq_ + 1)
+            cnt_gps_gaps_.fetch_add(gps->seq - last_gps_seq_ - 1, std::memory_order_relaxed);
+        last_gps_seq_ = gps->seq;
+        cnt_gps_.fetch_add(1, std::memory_order_relaxed);
+
         auto msg = std::make_unique<vigia_msgs::msg::GpsPvt>();
-        msg->header.stamp = now();
-        std::memcpy(&msg->latitude,  data + 1, 8);
-        std::memcpy(&msg->longitude, data + 9, 8);
-        float f4[4];
-        std::memcpy(f4, data + 17, 16);
-        msg->altitude_m  = f4[0];
-        msg->speed_ms    = f4[1];
-        msg->course_deg  = f4[2];
-        msg->hdop        = f4[3];
-        msg->fix_type         = data[33];
-        msg->satellites_used  = data[34];
-        msg->valid_fix        = (data[35] != 0);
+        msg->header.stamp    = now();
+        msg->header.frame_id = "gps";
+        msg->lat             = gps->latitude;
+        msg->lon             = gps->longitude;
+        msg->speed_ms        = gps->speed_ms;
+        msg->fix_type        = gps->fix_type;
+        msg->satellites_used = gps->satellites;
+        msg->hdop            = gps->hdop;
+        msg->valid_fix       = gps->valid;
         pub_gps_->publish(std::move(msg));
         return;
     }
 
-    if (pkt_type == PKT_SIGNED_ET && len >= 101) {
-        uint32_t seq;
-        std::memcpy(&seq, data + 1, 4);
-
-        // Anti-replay: drop out-of-order or repeated sequence numbers.
-        if (seq <= last_sequence_) {
-            RCLCPP_WARN(get_logger(), "SignedEt replay? seq=%u last=%u — dropped", seq, last_sequence_);
-            return;
-        }
-
-        // TODO: ECDSA verification via mbedTLS when ecdsa_verify_enabled_ is true.
-        // For Phase 1 STM32 integration stub, verification is skipped.
-        if (ecdsa_verify_enabled_) {
-            // mbedtls_pk_verify() call here — implemented in Phase 2.
-        }
-
-        last_sequence_ = seq;
-        auto msg = std::make_unique<vigia_msgs::msg::SignedEt>();
-        msg->header.stamp = now();
-        msg->sequence     = seq;
-        std::memcpy(&msg->stm32_timestamp_us, data + 5, 8);
-        std::memcpy(msg->et_hash.data(),       data + 13, 32);
-        std::memcpy(msg->ecdsa_signature.data(), data + 45, 64);
-        pub_et_->publish(std::move(msg));
+    if (line.size() >= 10 && line.substr(0, 10) == "VIGIA_PING") {
+        cnt_ping_.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
+
+    if (!line.empty())
+        cnt_parse_errors_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// ── COBS binary dispatch (Phase 2) ────────────────────────────────────────
+
+void SensorBridgeNode::process_cobs_frame(const uint8_t * src, size_t src_len)
+{
+    static uint8_t decoded[256];
+    size_t dec_len = decode_cobs(src, src_len, decoded, sizeof(decoded));
+
+    if (dec_len != sizeof(SignedEtPacketPi)) {
+        cnt_parse_errors_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    SignedEtPacketPi pkt;
+    std::memcpy(&pkt, decoded, sizeof(pkt));
+
+    if (pkt.magic != 0xE7 || pkt.version != 0x02) {
+        cnt_parse_errors_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // Anti-replay
+    if (last_et_seq_ > 0 && pkt.sequence <= last_et_seq_) {
+        cnt_imu_gaps_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    last_et_seq_ = pkt.sequence;
+
+    // Also push IMU data from the COBS packet into the history ring buffer
+    ImuSnapshot snap;
+    snap.timestamp_us = pkt.timestamp_us;
+    snap.qw = pkt.qw; snap.qx = pkt.qx; snap.qy = pkt.qy; snap.qz = pkt.qz;
+    snap.ax = pkt.ax; snap.ay = pkt.ay; snap.az = pkt.az;
+    snap.cal_status = pkt.cal_status;
+    snap.valid = true;
+    push_imu_history(snap);
+    cnt_imu_.fetch_add(1, std::memory_order_relaxed);
+    cnt_gps_.fetch_add(1, std::memory_order_relaxed);
+
+    auto msg = std::make_unique<vigia_msgs::msg::SignedEt>();
+    msg->header.stamp    = now();
+    msg->header.frame_id = "pico2";
+    msg->timestamp_us    = pkt.timestamp_us;
+    msg->sequence        = pkt.sequence;
+    msg->q_w = pkt.qw; msg->q_x = pkt.qx; msg->q_y = pkt.qy; msg->q_z = pkt.qz;
+    msg->lin_accel_x     = pkt.ax;
+    msg->lin_accel_y     = pkt.ay;
+    msg->lin_accel_z     = pkt.az;
+    msg->calibration_status = pkt.cal_status;
+    msg->lat             = pkt.latitude;
+    msg->lon             = pkt.longitude;
+    msg->speed_ms        = pkt.speed_ms;
+    msg->fix_type        = pkt.fix_type;
+    msg->satellites_used = pkt.satellites;
+    msg->valid_fix       = (pkt.fix_type >= 2);
+    std::copy(pkt.et_hash,   pkt.et_hash   + 32, msg->et_hash.begin());
+    std::copy(pkt.ecdsa_sig, pkt.ecdsa_sig + 64, msg->ecdsa_sig.begin());
+
+    // sig_valid = false until mbedTLS verify is wired (Phase 2 — requires real SE)
+    // TODO Phase 2: mbedtls_ecdsa_verify(pubkey, pkt.et_hash, &sig_point)
+    msg->sig_valid = false;
+
+    pub_et_->publish(std::move(msg));
+}
+
+// ── IMU history ring buffer ────────────────────────────────────────────────
+
+void SensorBridgeNode::push_imu_history(const ImuSnapshot & snap)
+{
+    std::lock_guard<std::mutex> lk(imu_history_mutex_);
+    imu_history_[imu_history_head_] = snap;
+    imu_history_head_ = (imu_history_head_ + 1) % kImuHistorySize;
+    if (imu_history_count_ < kImuHistorySize) ++imu_history_count_;
+}
+
+std::optional<SensorBridgeNode::ImuSnapshot>
+SensorBridgeNode::imu_at_or_before(uint64_t target_us) const
+{
+    std::lock_guard<std::mutex> lk(imu_history_mutex_);
+    if (imu_history_count_ == 0) return std::nullopt;
+
+    // Reverse scan from most recent entry
+    const size_t count = imu_history_count_;
+    std::optional<ImuSnapshot> best;
+    for (size_t i = 0; i < count; ++i) {
+        size_t idx = (imu_history_head_ + kImuHistorySize - 1 - i) % kImuHistorySize;
+        const auto & s = imu_history_[idx];
+        if (s.timestamp_us <= target_us) {
+            if (!best || s.timestamp_us > best->timestamp_us)
+                best = s;
+            break;  // ring buffer is time-ordered — first match is the best
+        }
+    }
+    return best;
+}
+
+// ── Health publisher ───────────────────────────────────────────────────────
+
+void SensorBridgeNode::publish_health()
+{
+    const uint64_t imu_cnt = cnt_imu_.load(std::memory_order_relaxed);
+
+    // Measure IMU Hz over the last 1-second window
+    float imu_hz = 0.f;
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (last_imu_cnt_snapshot_ > 0) {
+        auto dt_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now_tp - last_imu_time_).count();
+        if (dt_us > 0) {
+            imu_hz = static_cast<float>((imu_cnt - last_imu_cnt_snapshot_) * 1'000'000ULL)
+                   / static_cast<float>(dt_us);
+        }
+    }
+    last_imu_time_         = now_tp;
+    last_imu_cnt_snapshot_ = imu_cnt;
+
+    auto msg = std::make_unique<vigia_msgs::msg::SensorHealth>();
+    msg->header.stamp     = now();
+    msg->imu_count        = imu_cnt;
+    msg->gps_count        = cnt_gps_.load(std::memory_order_relaxed);
+    msg->ping_count       = cnt_ping_.load(std::memory_order_relaxed);
+    msg->imu_seq_gaps     = cnt_imu_gaps_.load(std::memory_order_relaxed);
+    msg->gps_seq_gaps     = cnt_gps_gaps_.load(std::memory_order_relaxed);
+    msg->parse_errors     = cnt_parse_errors_.load(std::memory_order_relaxed);
+    msg->imu_hz_measured  = imu_hz;
+    msg->port_open        = (fd_ >= 0);
+    pub_health_->publish(std::move(msg));
 }

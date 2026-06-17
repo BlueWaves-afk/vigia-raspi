@@ -48,6 +48,9 @@ anti_death_node:
     ups_gpio_line: 17
     ups_gpio_active_low: true
     power_window_seconds: 15.0
-    mqtt_broker_host: ""        # Set to MQTT broker hostname before deployment
-    mqtt_broker_port: 8883
-    mqtt_topic_prefix: "vigia/events"
+    # AWS Telemetry API Gateway — VIGIA Telemetry API (sq2ri2n51g), prod stage
+    # Full URL: https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/telemetry
+    aws_telemetry_url: "https://sq2ri2n51g.execute-api.us-east-1.amazonaws.com/prod/telemetry"
+    # Ed25519 device key — 32-byte seed, generated once per device
+    # Provision: see docs/device_provisioning.md
+    device_key_path: "/etc/vigia/device_ed25519.key"
