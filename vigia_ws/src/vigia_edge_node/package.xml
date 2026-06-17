@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>vigia_edge_node</name>
+  <version>1.0.0</version>
+  <description>VIGIA ADAS DePIN edge node — 6 ROS 2 nodes in one process with SCHED_FIFO pinning.</description>
+  <maintainer email="tommathew670@gmail.com">Tom Mathew</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>vigia_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -2,8 +2,29 @@
 ## ROS 2 Node Interface Contracts
 **Document:** `02_ros2_node_contracts.md`  
 **Depends on:** `01_system_architecture_and_roadmap.md` (APPROVED)  
-**Status:** AWAITING APPROVAL — No implementation until sign-off  
+**Status:** IMPLEMENTED — All 6 nodes written; pending colcon build on Pi  
 **Scope:** Phase 1 (OS & Zero-Copy Middleware) + Phase 4 (Algorithmic Fusion & ISS)
+
+## Implementation Status (2026-06-17)
+
+All source files written to `vigia_ws/src/vigia_edge_node/src/`:
+
+| Node | File | Status | Notes |
+|---|---|---|---|
+| `CameraNode` | `camera_node.cpp` | ✅ Written | Seqlock shm write + IPC publish; pre-alloc buffers |
+| `VisionNode` | `vision_node.cpp` | ✅ Written | NEON `vld3q_u8` transpose; ONNX INT8; ACL EP commented out pending build verify |
+| `DepthNode` | `depth_node.cpp` | ✅ Written | FP32 only; thermal adaptive stride; zero-copy tensor read |
+| `FusionNode` | `fusion_node.cpp` | ✅ Written | Gravity comp (Eigen quaternion); Kalman 2D; ISS; RRI |
+| `SensorBridgeNode` | `sensor_bridge_node.cpp` | ✅ Written | COBS state machine; anti-replay seq check; ECDSA stub |
+| `AntiDeathNode` | `anti_death_node.cpp` | ✅ Written | State machine skeleton; GPIO stub (libgpiod Phase 5) |
+
+**Shared headers:** `rt_thread.hpp`, `vigia_qos.hpp`, `shm_ring_buffer.hpp`  
+**Entry point:** `main.cpp` with `mlockall(MCL_CURRENT|MCL_FUTURE)` + RT thread launch order  
+**Known TODOs before Phase 1 complete:**
+- Enable KleidiAI ACL EP in VisionNode once ONNX Runtime confirmed built with ACL support
+- Replace GPIO sysfs stub in AntiDeathNode with `libgpiod` `event_wait()` (Phase 5)
+- YOLO NMS postprocessing in VisionNode (port from `src/perception.cpp`)
+- ECDSA mbedTLS verify in SensorBridgeNode (Phase 2)
 
 ---
 

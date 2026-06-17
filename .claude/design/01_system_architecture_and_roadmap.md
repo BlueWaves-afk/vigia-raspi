@@ -1,9 +1,20 @@
 # VIGIA ADAS DePIN Edge Node
 ## Master System Architecture & Engineering Roadmap
 **Document:** `01_system_architecture_and_roadmap.md`  
-**Status:** APPROVED FOR PHASE 1 SPRINT  
+**Status:** PHASE 1 IN PROGRESS — Node source written, ROS2 building from source on Pi  
 **Competition Target:** Samsung Solve for Tomorrow 2026  
 **Classification:** Spec-Driven Development — No implementation before node contracts are signed off
+
+## Implementation Status Log
+
+| Date | Action | Notes |
+|---|---|---|
+| 2026-06-17 | Pi SSH access confirmed via Tailscale (100.114.1.98) | vigiasense@raspberrypi, Debian Trixie, kernel 6.12.75+rpt |
+| 2026-06-17 | PREEMPT_RT kernel installed (`linux-image-6.12.73+deb13-rt-arm64`) | **NOT YET BOOTED** — Pi firmware requires manual config; deferred to physical access |
+| 2026-06-17 | ROS2 Jazzy binary install failed | Ubuntu Noble `libpython3.12t64` not available on Debian Trixie (Python 3.13 only) |
+| 2026-06-17 | ROS2 Jazzy from-source build started on Pi | `~/ros2_jazzy/` — build log at `~/ros2_build.log`; ~45-60 min |
+| 2026-06-17 | All 6 ROS2 nodes written | `vigia_ws/src/vigia_edge_node/src/` — see doc 02 for contracts |
+| 2026-06-17 | `vigia_msgs` package written | 8 custom message definitions in `vigia_ws/src/vigia_msgs/msg/` |
 
 ---
 
