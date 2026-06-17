@@ -1,7 +1,9 @@
 #include "coordinator.hpp"
+#include "sensor_bridge.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <iostream>
 #include <fstream>
@@ -70,6 +72,29 @@ void Coordinator::stop() {
     if (captureThread_.joinable()) captureThread_.join();
     if (mainThread_.joinable())    mainThread_.join();
     if (midasThread_.joinable())   midasThread_.join();
+}
+
+/* ===================== Sensor Bridge ===================== */
+
+void Coordinator::setSensorBridge(SensorBridge& bridge)
+{
+    sensorBridge_ = &bridge;
+}
+
+Coordinator::SensorSnapshot Coordinator::querySensors() const
+{
+    SensorSnapshot snap{};
+    if (!sensorBridge_)
+        return snap;
+
+    const auto proc = sensorProcessor_.process(sensorBridge_->state());
+
+    snap.imuIss   = proc.imuIss;
+    snap.speedMs  = proc.speedMs;
+    snap.gpsLat   = proc.gpsLat;
+    snap.gpsLon   = proc.gpsLon;
+    snap.gpsValid = proc.gpsValid;
+    return snap;
 }
 
 /* ===================== Capture Loop ===================== */
@@ -157,7 +182,15 @@ void Coordinator::midasLoop() {
                 fin.roughness       = geom.roughness;
                 fin.persistence     = temporal.persistence;
                 fin.stability       = temporal.stability;
-                fusion_.fuse(fin);  // InstrumentedFusionEngine records to bus
+                // M6: inject sensor snapshot captured at enqueue time
+                fin.imuIss   = work.sensors.imuIss;
+                fin.speedMs  = work.sensors.speedMs;
+                fin.gpsLat   = work.sensors.gpsLat;
+                fin.gpsLon   = work.sensors.gpsLon;
+                fin.gpsValid = work.sensors.gpsValid;
+
+                auto fout = fusion_.fuse(fin);
+                publishResult(det, fout);
             }
         }
     } catch (const std::exception& e) {
@@ -215,24 +248,31 @@ void Coordinator::processFrame() {
         currentIdx = frameIndex_;
     }
 
+    /* ---------- Sensor snapshot (once per frame) ---------- */
+    const SensorSnapshot sensors = querySensors();
+
     /* ---------- YOLO (Core 1 — every frame) ---------- */
     auto detections = perception_.runInference(frame);
 
     /* ---------- MiDaS (Core 2 — async, stride-gated) ---------- */
     if (currentIdx % midasStride_ == 0) {
-        // Pass detections so midasLoop can run the full fusion chain
-        midasQueue_.push({currentIdx, frame.clone(), detections});
+        midasQueue_.push({currentIdx, frame.clone(), detections, sensors});
     }
 
-    // Fusion uses YOLO-only baseline; MiDaS results arrive asynchronously
-    // via InstrumentedAnalyticalAgent → InstrumentationBus → tryPopFrame.
+    // YOLO-only baseline fusion — MiDaS geometry arrives asynchronously.
     for (const auto& det : detections) {
         if (det.classId != POTHOLE_CLASS_ID)
             continue;
-        FusionOutput fout{};
-        fout.finalConfidence    = det.confidence;
-        fout.geometryConfidence = 0.0f;
-        fout.temporalConfidence = 0.0f;
+
+        FusionInput fin{};
+        fin.yoloConfidence = det.confidence;
+        fin.imuIss         = sensors.imuIss;
+        fin.speedMs        = sensors.speedMs;
+        fin.gpsLat         = sensors.gpsLat;
+        fin.gpsLon         = sensors.gpsLon;
+        fin.gpsValid       = sensors.gpsValid;
+
+        FusionOutput fout  = fusion_.fuse(fin);
         publishResult(det, fout);
     }
 
@@ -318,8 +358,16 @@ void Coordinator::publishResult(
         << " conf="   << out.finalConfidence
         << " geo="    << out.geometryConfidence
         << " tmp="    << out.temporalConfidence
-        << " stride=" << midasStride_
-        << "\n";
+        << " stride=" << midasStride_;
+
+    if (out.gpsValid) {
+        std::cout
+            << std::fixed
+            << " lat="  << out.latitude
+            << " lon="  << out.longitude
+            << " spd="  << out.speedMs << "m/s";
+    }
+    std::cout << "\n";
 #else
     (void)det; (void)out;
 #endif

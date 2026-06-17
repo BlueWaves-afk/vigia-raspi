@@ -74,16 +74,30 @@ FusionOutput FusionEngine::fuse(
             in.stability
         );
 
-    // Tunable weights (EXPLICIT BY DESIGN)
-    constexpr float W_DET = 0.40f;
-    constexpr float W_GEO = 0.35f;
-    constexpr float W_TMP = 0.25f;
+    // M6: ISS motion gate — zero contribution when vehicle is nearly stationary
+    // (parked / garage) to suppress false positives from door slams, engine idle.
+    const float issContrib = (in.speedMs < 1.0f) ? 0.0f : clamp01(in.imuIss);
+
+    // Updated weights for M6 multimodal fusion (sum = 1.0)
+    constexpr float W_DET = 0.35f;
+    constexpr float W_GEO = 0.25f;
+    constexpr float W_TMP = 0.15f;
+    constexpr float W_ISS = 0.25f;
 
     out.finalConfidence = clamp01(
         W_DET * clamp01(in.yoloConfidence) +
         W_GEO * out.geometryConfidence +
-        W_TMP * out.temporalConfidence
+        W_TMP * out.temporalConfidence +
+        W_ISS * issContrib
     );
+
+    // M6: geo-tag passthrough — FusionEngine trusts the caller's validity check
+    if (in.gpsValid) {
+        out.latitude  = in.gpsLat;
+        out.longitude = in.gpsLon;
+        out.speedMs   = in.speedMs;
+        out.gpsValid  = true;
+    }
 
     return out;
 }

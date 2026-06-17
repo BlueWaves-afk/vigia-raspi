@@ -13,9 +13,12 @@
 #include "analytical.hpp"
 #include "temporal.hpp"
 #include "fusion.hpp"
+#include "sensor_processor.hpp"
 #include "safe_queue.hpp"
 
 namespace vigia {
+
+class SensorBridge;  // forward-declared; include sensor_bridge.hpp only in .cpp
 
 class Coordinator {
 public:
@@ -31,6 +34,11 @@ public:
     void start();
     void stop();
 
+    // M6: wire in a live SensorBridge — call before start().
+    // The bridge must outlive the Coordinator.
+    // If never called the pipeline runs vision-only (ISS = 0, no geo-tag).
+    void setSensorBridge(SensorBridge& bridge);
+
 private:
     void captureLoop();
     void processLoop();
@@ -45,11 +53,24 @@ private:
 
     void publishResult(const Detection& det, const FusionOutput& out) const;
 
+    // M6: build a sensor-aware FusionInput snapshot for the current frame.
+    // Returns cached zero-sensor input when no bridge is wired.
+    struct SensorSnapshot {
+        float imuIss{0.0f};
+        float speedMs{0.0f};
+        double gpsLat{0.0};
+        double gpsLon{0.0};
+        bool gpsValid{false};
+    };
+    SensorSnapshot querySensors() const;
+
 private:
     PerceptionAgent& perception_;
     AnalyticalAgent& analytical_;
     TemporalAnalyzer& temporal_;
     FusionEngine& fusion_;
+    SensorBridge* sensorBridge_{nullptr};
+    mutable SensorProcessor sensorProcessor_;
 
     long targetFrameTimeMs_;
 
@@ -64,11 +85,12 @@ private:
     std::mutex bufferMutex_;
     std::uint64_t frameIndex_;
 
-    // MiDaS work queue: carries frame + YOLO detections for fusion on Core 2
+    // MiDaS work queue: carries frame + YOLO detections + sensor snapshot for Core 2
     struct MidasWork {
         std::uint64_t frameIdx;
         cv::Mat frame;
         std::vector<Detection> detections;
+        SensorSnapshot sensors;  // M6: captured at enqueue time — consistent with frame
     };
     SafeQueue<MidasWork> midasQueue_;
 

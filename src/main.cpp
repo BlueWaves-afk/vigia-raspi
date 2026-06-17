@@ -12,6 +12,7 @@
 #include "analytical.hpp"
 #include "temporal.hpp"
 #include "fusion.hpp"
+#include "sensor_bridge.hpp"
 
 namespace {
 
@@ -82,6 +83,7 @@ int main(int argc, char** argv)
         : "models/midasv21/openvino_midas_v21_small_256.xml";
     const int targetFps   = (argc > 3) ? std::max(1, std::atoi(argv[3])) : 30;
     const int cameraIndex = (argc > 4) ? std::atoi(argv[4]) : 0;
+    const std::string sensorPort = (argc > 5) ? argv[5] : "/dev/ttyACM0";
     const std::string device = "CPU";
 
     try {
@@ -96,20 +98,29 @@ int main(int argc, char** argv)
         vigia::TemporalAnalyzer temporal;
         vigia::FusionEngine     fusion;
 
+        // M6: sensor bridge — start before Coordinator so the first frames
+        // already have IMU/GPS state.  Tolerates Pico not being plugged in;
+        // the bridge logs a warning and Coordinator falls back to vision-only.
+        vigia::SensorBridge bridge(vigia::SensorBridge::Config{sensorPort, 115200});
+        bridge.start();
+
         vigia::Coordinator coordinator(
             perception, analytical, temporal, fusion, targetFps
         );
+        coordinator.setSensorBridge(bridge);
 
         coordinator.start();
 
         std::cout << "[vigia] Pipeline running (FPS target: "
-                  << targetFps << "). Press Ctrl+C to stop.\n";
+                  << targetFps << ", sensor port: " << sensorPort
+                  << "). Press Ctrl+C to stop.\n";
 
         while (g_running.load())
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         std::cout << "\n[vigia] Shutting down...\n";
         coordinator.stop();
+        bridge.stop();
 
     } catch (const std::exception& ex) {
         std::cerr << "[vigia] Fatal: " << ex.what() << '\n';

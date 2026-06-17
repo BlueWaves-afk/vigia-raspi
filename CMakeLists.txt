@@ -49,6 +49,9 @@ set(VIGIA_LIB_SOURCES
     src/sensor_packet.cpp
     src/sensor_state.cpp
     src/sensor_bridge.cpp
+    src/iss_filter.cpp
+    src/iss_compute.cpp
+    src/sensor_processor.cpp
 )
 
 add_library(vigia_lib STATIC ${VIGIA_LIB_SOURCES})
