@@ -349,22 +349,46 @@ async def ingest_events(
 
 @app.get("/v1/hazards")
 def list_hazards(
-    bbox: str = Query(..., description="minLon,minLat,maxLon,maxLat"),
+    bbox: str | None = Query(default=None, description="minLon,minLat,maxLon,maxLat"),
     min_severity: float = Query(default=0.0, ge=0.0, le=1.0),
+    all_hazards: bool = Query(default=False, alias="all"),
+    limit: int = Query(default=500, ge=1, le=2000),
 ) -> dict[str, Any]:
-    try:
-        min_lon, min_lat, max_lon, max_lat = (float(v) for v in bbox.split(","))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="bbox must be minLon,minLat,maxLon,maxLat") from exc
+    """Return active hazard entities as GeoJSON.
 
-    if min_lon >= max_lon or min_lat >= max_lat:
-        raise HTTPException(status_code=400, detail="Invalid bbox bounds")
+    Use ``?all=1`` (or omit bbox on low-zoom map) to fetch every active hazard.
+    Bbox filtering uses numeric lat/lon bounds — PostGIS ST_Intersects on a
+    geography polygon fails for world-spanning envelopes.
+    """
+    geo_clause = ""
+    params: list[Any] = [min_severity]
 
-    envelope = f"SRID=4326;POLYGON(({min_lon} {min_lat},{max_lon} {min_lat},{max_lon} {max_lat},{min_lon} {max_lat},{min_lon} {min_lat}))"
+    if not all_hazards and bbox:
+        try:
+            min_lon, min_lat, max_lon, max_lat = (float(v) for v in bbox.split(","))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="bbox must be minLon,minLat,maxLon,maxLat") from exc
+
+        if min_lon >= max_lon or min_lat >= max_lat:
+            raise HTTPException(status_code=400, detail="Invalid bbox bounds")
+
+        lon_span = max_lon - min_lon
+        lat_span = max_lat - min_lat
+        # Near-global viewport — skip geo filter (polygon intersection is unreliable).
+        if lon_span < 350 and lat_span < 170:
+            geo_clause = """
+              AND ST_X(centroid::geometry) >= %s
+              AND ST_X(centroid::geometry) <= %s
+              AND ST_Y(centroid::geometry) >= %s
+              AND ST_Y(centroid::geometry) <= %s
+            """
+            params.extend([min_lon, max_lon, min_lat, max_lat])
+
+    params.append(limit)
 
     with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """
+            f"""
             SELECT
                 hazard_id::text AS id,
                 ST_Y(centroid::geometry) AS lat,
@@ -378,10 +402,11 @@ def list_hazards(
             FROM hazard_entities
             WHERE status = 'active'
               AND severity_score >= %s
-              AND ST_Intersects(centroid, ST_GeogFromText(%s))
+              {geo_clause}
             ORDER BY last_seen DESC
+            LIMIT %s
             """,
-            (min_severity, envelope),
+            params,
         )
         rows = cur.fetchall()
 

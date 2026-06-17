@@ -97,6 +97,12 @@
     }
     #btn-refresh:hover { opacity: .85; }
     #btn-refresh:disabled { opacity: .4; cursor: default; }
+    #btn-world {
+      width: 100%; margin-top: 8px; padding: 8px; background: var(--surface2);
+      color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+      font-size: 13px; cursor: pointer;
+    }
+    #btn-world:hover { border-color: var(--accent); }
 
     /* ── Status bar ─────────────────────────────────────────────── */
     #status-bar {
@@ -242,6 +248,7 @@
       </div>
       <div class="ctrl-row">
         <button id="btn-refresh">Refresh now</button>
+        <button type="button" id="btn-world">World view (all regions)</button>
       </div>
     </div>
 
@@ -344,9 +351,20 @@ async function loadHazards() {
   btn.disabled = true;
 
   try {
-    const b   = map.getBounds();
-    const bbox = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
-    const url  = `${apiBase()}/v1/hazards?bbox=${bbox}&min_severity=${minSev()}`;
+    const zoom = map.getZoom();
+    let url;
+    if (zoom <= 3) {
+      // World / continental zoom — fetch all hazards (bbox polygon query fails globally).
+      url = `${apiBase()}/v1/hazards?all=1&min_severity=${minSev()}`;
+    } else {
+      const b = map.getBounds();
+      const west  = Math.max(-180, b.getWest());
+      const south = Math.max(-85,  b.getSouth());
+      const east  = Math.min(180,  b.getEast());
+      const north = Math.min(85,   b.getNorth());
+      const bbox  = `${west},${south},${east},${north}`;
+      url = `${apiBase()}/v1/hazards?bbox=${bbox}&min_severity=${minSev()}`;
+    }
 
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -354,8 +372,10 @@ async function loadHazards() {
 
     // Inject colour into each feature for paint expression
     (geo.features || []).forEach(f => {
-      f.properties._color  = severityColor(f.properties.severity_score);
-      f.properties._radius = Math.max(8, Math.min(22, 8 + (f.properties.observation_count - 1) * 2));
+      const score = typeof f.properties.severity_score === 'number'
+        ? f.properties.severity_score
+        : parseFloat(f.properties.severity_score);
+      f.properties._color = severityColor(score);
     });
 
     if (map.getSource(SOURCE_ID)) {
@@ -388,12 +408,19 @@ map.on('load', () => {
     type: 'circle',
     source: SOURCE_ID,
     paint: {
-      'circle-radius': ['get', '_radius'],
+      // Scale with zoom so pins stay visible at world view and don't dominate at street level.
+      'circle-radius': [
+        'interpolate', ['linear'], ['zoom'],
+        1,  6,
+        4,  10,
+        8,  14,
+        12, 18,
+      ],
       'circle-color':  ['get', '_color'],
-      'circle-opacity': 0.9,
+      'circle-opacity': 0.92,
       'circle-stroke-width': 2,
       'circle-stroke-color': '#ffffff',
-      'circle-stroke-opacity': 0.8,
+      'circle-stroke-opacity': 0.9,
     },
   });
 
@@ -401,16 +428,16 @@ map.on('load', () => {
     id: LABEL_ID,
     type: 'symbol',
     source: SOURCE_ID,
+    minzoom: 8,
     layout: {
       'text-field': ['to-string', ['get', 'observation_count']],
-      'text-size': 10,
-      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+      'text-size': 11,
       'text-allow-overlap': true,
     },
     paint: {
       'text-color': '#fff',
-      'text-halo-color': 'rgba(0,0,0,0.3)',
-      'text-halo-width': 1,
+      'text-halo-color': 'rgba(0,0,0,0.5)',
+      'text-halo-width': 1.5,
     },
   });
 
@@ -532,6 +559,10 @@ function setupRefresh() {
 
 // ── Event wiring ──────────────────────────────────────────────────────────
 document.getElementById('btn-refresh').addEventListener('click', loadHazards);
+document.getElementById('btn-world').addEventListener('click', () => {
+  map.flyTo({ center: [20, 15], zoom: 1.8, duration: 1200 });
+  map.once('moveend', loadHazards);
+});
 document.getElementById('minSeverity').addEventListener('input', e => {
   document.getElementById('sev-val').textContent = parseFloat(e.target.value).toFixed(2);
   loadHazards();

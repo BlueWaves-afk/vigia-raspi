@@ -3,7 +3,7 @@
 **Document version:** 1.1  
 **Date:** 2026-06-18  
 **Project:** VIGIA ADAS Edge Node (vigia-raspi)  
-**Status:** Approved for implementation  
+**Status:** Implemented — see `docs/m7-event-logging-implementation.md`  
 **Prerequisite:** Milestone M6 multimodal sensor fusion (complete)
 
 ---
@@ -21,10 +21,10 @@ M7 turns fused pothole detections into a **durable, queryable hazard platform** 
 | Area | Status |
 |------|--------|
 | Multimodal fusion (RRI + ISS + GPS) | Done — `src/fusion.cpp`, `src/coordinator.cpp` |
-| Structured hazard output in production | Missing — `publishResult()` is debug stdout only |
-| Event persistence / database | Not started |
-| Hazard map API / UI | Not started |
-| Secure cloud ingest | Designed in docs; not implemented |
+| Structured hazard output in production | Done — `EventPromoter` + `EventStore` in `vigia_app` |
+| Event persistence / database | Done — PostGIS + FastAPI ingest |
+| Hazard map API / UI | Done — `/v1/hazards`, `/map` |
+| Secure cloud ingest | Done — HMAC + anti-replay (mTLS deferred) |
 
 **Related design references in repo:**
 
