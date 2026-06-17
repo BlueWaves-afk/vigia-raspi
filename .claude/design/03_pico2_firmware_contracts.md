@@ -2,8 +2,24 @@
 ## Raspberry Pi Pico 2 Firmware Contracts
 **Document:** `03_pico2_firmware_contracts.md`  
 **Depends on:** `01_system_architecture_and_roadmap.md` (APPROVED), `02_ros2_node_contracts.md` (APPROVED)  
-**Status:** AWAITING APPROVAL — No implementation until sign-off  
+**Status:** PARTIALLY IMPLEMENTED — Bringup firmware written; ECDSA/COBS Phase 2  
 **Scope:** Phase 2 — Raspberry Pi Pico 2 (RP2350) bare-metal firmware
+
+## Implementation Status (2026-06-17)
+
+| Component | File | Status | Notes |
+|---|---|---|---|
+| BNO085 SPI0 driver | `firmware/src/bno085_driver.c/.h` | ✅ Built & flashed | SPI0 @ 3 MHz; SHTP; 100 Hz quaternion + linear accel; USB CDC text output |
+| NEO-M8N UART1 driver | `firmware/src/neo_m8n_driver.c/.h` | ✅ Built & flashed | UART1 GP8/GP9; UBX+NMEA parser; 1 Hz GPS fix |
+| USB CDC text protocol | `firmware/src/main.c` | ✅ Built & flashed | `VIGIA_IMU` @ 100 Hz, `VIGIA_GPS` @ 1 Hz, `VIGIA_PING` @ 1 Hz over `/dev/ttyACM0` |
+| ATECC608A I2C signing | `firmware/src/atecc608a_driver.*` | ❌ Not yet built | Phase 2 — hardware not wired on bringup board |
+| COBS binary framing | `firmware/src/cobs_tx_driver.*` | ❌ Not yet built | Phase 2 — depends on ATECC608A |
+| E_t hash + ECDSA | (main loop) | ❌ Not yet built | Phase 2 — depends on ATECC608A |
+| `no_heap.cpp` | `firmware/src/no_heap.cpp` | ❌ Not yet built | Phase 2 |
+| Pi-side COBS parser | `sensor_bridge_node.cpp` | ⚠️ Text only | Updated to text protocol matching bringup; COBS decode removed pending Phase 2 |
+
+**Current wire protocol:** Plain text lines (`printf`) over USB CDC — matches `sensor_bridge_node.cpp`.  
+**Phase 2 wire protocol:** COBS-framed `SignedEtPacket` (173 bytes) with ECDSA secp256r1 signature — spec below.
 
 ---
 
@@ -64,8 +80,8 @@ All pins are for the Raspberry Pi Pico 2 default header layout.
 | `UART1_TX` | GP8 | Out | UART1 | None | Reserved for GPS config |
 | `UART1_RX` | GP9 | In | UART1 | Pull-Up | GPS UBX input |
 | **I2C1 — ATECC608A** |
-| `I2C1_SDA` | GP6 | In/Out | I2C1 | External 4.7 kΩ | Address 0x60 |
-| `I2C1_SCL` | GP7 | Out | I2C1 | External 4.7 kΩ | 400 kHz |
+| `I2C1_SDA` | GP2 | In/Out | I2C1 | External 4.7 kΩ | Address 0x60 |
+| `I2C1_SCL` | GP3 | Out | I2C1 | External 4.7 kΩ | 400 kHz |
 | **USB — Pi 5 host** |
 | USB D+/D− | — | — | TinyUSB CDC | — | Native USB device |
 | **Diagnostics** |
@@ -238,9 +254,54 @@ private:
 };
 ```
 
-#### 6.1.3 ISR → DMA → Super-Loop Flow
+#### 6.1.3 Fixed-Point → Float Conversion (Q-point)
 
-On GP20 falling edge: assert CS, start `spi_write_read_blocking` or DMA equivalent for 512 bytes, de-assert CS in DMA completion callback, set `g_bno085_frame_ready`. **No parsing in ISR.**
+BNO085 reports quaternion in Q14 fixed-point and linear accel in Q8. Conversion:
+
+```cpp
+static constexpr float kQuatScale  = 1.0f / 16384.0f;  // Q14
+static constexpr float kAccelScale = 1.0f / 256.0f;    // Q8, units: m/s²
+
+void Bno085Driver::parse_rotation_vector(const uint8_t* payload) {
+    // payload[0] = Report ID (0x05)
+    // payload[1] = Sequence number
+    // payload[2] = Status / calibration accuracy (low 2 bits)
+    // payload[3] = Delay (ignored)
+    // payload[4..5] = i (Q14 int16)
+    // payload[6..7] = j (Q14 int16)
+    // payload[8..9] = k (Q14 int16)
+    // payload[10..11] = real (Q14 int16)
+    // BNO085 reports (i, j, k, real) — reorder to (w, x, y, z)
+    auto read_i16 = [](const uint8_t* p) -> int16_t {
+        return static_cast<int16_t>(static_cast<uint16_t>(p[0]) |
+                                    (static_cast<uint16_t>(p[1]) << 8));
+    };
+    latest_report_.q_x = read_i16(payload + 4)  * kQuatScale;  // i→x
+    latest_report_.q_y = read_i16(payload + 6)  * kQuatScale;  // j→y
+    latest_report_.q_z = read_i16(payload + 8)  * kQuatScale;  // k→z
+    latest_report_.q_w = read_i16(payload + 10) * kQuatScale;  // real→w
+    latest_report_.calibration_status = payload[2] & 0x03;
+    latest_report_.valid = true;
+    report_updated_.store(true, std::memory_order_release);
+}
+
+void Bno085Driver::parse_linear_accel(const uint8_t* payload) {
+    // payload[4..5] = x (Q8 int16, m/s²)
+    // payload[6..7] = y (Q8 int16, m/s²)
+    // payload[8..9] = z (Q8 int16, m/s²)
+    auto read_i16 = [](const uint8_t* p) -> int16_t {
+        return static_cast<int16_t>(static_cast<uint16_t>(p[0]) |
+                                    (static_cast<uint16_t>(p[1]) << 8));
+    };
+    latest_report_.lin_accel_x = read_i16(payload + 4) * kAccelScale;
+    latest_report_.lin_accel_y = read_i16(payload + 6) * kAccelScale;
+    latest_report_.lin_accel_z = read_i16(payload + 8) * kAccelScale;
+}
+```
+
+#### 6.1.4 ISR → DMA → Super-Loop Flow
+
+On GP20 falling edge: assert CS (GP17 LOW), start SPI0 DMA for 512 bytes, de-assert CS in DMA completion callback, set `g_bno085_frame_ready`. **No parsing in ISR.**
 
 ---
 
@@ -248,7 +309,68 @@ On GP20 falling edge: assert CS, start `spi_write_read_blocking` or DMA equivale
 
 **File:** `firmware/src/neo_m8n_driver.hpp` + `neo_m8n_driver.cpp`
 
-UBX `NAV-PVT` (Class 0x01, ID 0x07) parsing — **unchanged** from prior spec.
+UBX `NAV-PVT` (Class 0x01, ID 0x07) parsing.
+
+#### 6.2.1 UBX Frame Structure
+
+```
+[0xB5][0x62]  — sync chars
+[0x01][0x07]  — Class NAV, ID PVT
+[Length LSB][Length MSB]  — 92 for NAV-PVT payload
+[92 bytes payload]
+[CK_A][CK_B]  — Fletcher-8 over CLASS..Payload
+Total: 100 bytes
+```
+
+#### 6.2.2 Ring Buffer Drain Algorithm
+
+```
+UART1 IRQ fires on RX timeout (GPS IDLE) → sets g_gps_frame_ready, g_gps_ring_write_pos
+Super-loop calls process():
+1. Read g_gps_ring_write_pos → new_write_pos
+2. bytes_available = (new_write_pos - last_read_pos_) % kRingBufSize
+3. Copy bytes_available from ring into ubx_frame_buf_ (handle wrap-around)
+4. Update last_read_pos_
+5. Scan for sync pattern [0xB5 0x62 0x01 0x07]
+6. Verify length field == 92
+7. Validate Fletcher-8 checksum (CK_A, CK_B over CLASS..Payload)
+8. If valid → parse_nav_pvt()
+9. If invalid → discard, reset scan position
+```
+
+#### 6.2.3 NAV-PVT Payload Field Extraction
+
+```cpp
+void NeoM8nDriver::parse_nav_pvt(const uint8_t* payload) {
+    // NAV-PVT field offsets (UBX Protocol Spec §32.17.14.1):
+    // [20]    fixType
+    // [21]    flags (bit 0 = gnssFixOK)
+    // [23]    numSV (satellites used)
+    // [24..27] lon (deg × 1e-7, int32_t LE)
+    // [28..31] lat (deg × 1e-7, int32_t LE)
+    // [32..35] height (mm above ellipsoid, int32_t LE) — not used
+    // [60..63] gSpeed (mm/s ground speed, int32_t LE)
+    // [64..67] headMot (deg × 1e-5, int32_t LE)
+    // [76..77] pDOP (× 0.01, uint16_t LE)
+
+    auto ri32 = [](const uint8_t* p) -> int32_t {
+        return static_cast<int32_t>(p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24));
+    };
+    auto ru16 = [](const uint8_t* p) -> uint16_t {
+        return static_cast<uint16_t>(p[0] | (p[1]<<8));
+    };
+
+    latest_report_.longitude  = ri32(payload + 24) * 1e-7;
+    latest_report_.latitude   = ri32(payload + 28) * 1e-7;
+    latest_report_.speed_ms   = ri32(payload + 60) * 0.001f;   // mm/s → m/s
+    latest_report_.course_deg = ri32(payload + 64) * 1e-5f;
+    latest_report_.hdop       = ru16(payload + 76) * 0.01f;
+    latest_report_.fix_type   = payload[20];
+    latest_report_.satellites = payload[23];
+    latest_report_.valid      = (payload[21] & 0x01) != 0;     // gnssFixOK bit
+    report_updated_.store(true, std::memory_order_release);
+}
+```
 
 ```cpp
 class NeoM8nDriver {
@@ -380,7 +502,37 @@ bool CobsTxDriver::transmit(const SignedEtPacket& pkt) {
 }
 ```
 
-COBS encoder implementation — **identical** to prior spec (produces `[0x00][COBS data][0x00]`).
+#### 6.4.3 COBS Encoder (explicit — no longer "see prior spec")
+
+```cpp
+// Produces: [0x00][COBS encoded data][0x00]
+// out_buf_size must be >= in_len + ceil(in_len/254) + 2
+size_t CobsTxDriver::encode(const uint8_t* input, size_t in_len,
+                             uint8_t* out_buf, size_t out_buf_size) {
+    out_buf[0] = 0x00;          // start-of-frame delimiter
+    size_t out_pos  = 2;
+    size_t code_pos = 1;
+    uint8_t code    = 1;
+
+    for (size_t i = 0; i < in_len; ++i) {
+        if (input[i] == 0x00) {
+            out_buf[code_pos] = code;
+            code_pos = out_pos++;
+            code = 1;
+        } else {
+            out_buf[out_pos++] = input[i];
+            if (++code == 0xFF) {
+                out_buf[code_pos] = code;
+                code_pos = out_pos++;
+                code = 1;
+            }
+        }
+    }
+    out_buf[code_pos] = code;
+    out_buf[out_pos++] = 0x00;  // end-of-frame delimiter
+    return out_pos;
+}
+```
 
 ---
 
@@ -417,11 +569,28 @@ extern "C" void vigia_main_loop() {
             if (!bno085.get_report(imu) || !gps.get_report(gps_report)) continue;
 
             EtHashInput et{};
-            // ... populate et from imu + gps (same field mapping as prior spec)
-            et.timestamp_us = tim_get_microseconds();
-            et.sequence = ++packet_sequence;
-            std::memset(&et._pad0, 0, sizeof(et._pad0));
-            std::memset(&et._pad1, 0, sizeof(et._pad1));
+            // Explicit field mapping — both sides must agree on this layout.
+            std::memcpy(et.device_id, atecc.device_id(), 16); // UUID from ATECC608A UserExtra zone
+            et.timestamp_us   = tim_get_microseconds();        // Pico 2 hardware timer
+            et.sequence       = ++packet_sequence;
+            et.q_w            = imu.q_w;
+            et.q_x            = imu.q_x;
+            et.q_y            = imu.q_y;
+            et.q_z            = imu.q_z;
+            et.lin_accel_x    = imu.lin_accel_x;
+            et.lin_accel_y    = imu.lin_accel_y;
+            et.lin_accel_z    = imu.lin_accel_z;
+            et.imu_cal_status = imu.calibration_status;
+            std::memset(&et._pad0, 0, sizeof(et._pad0));       // MUST be zeroed — in hash
+            et.latitude       = gps_report.latitude;
+            et.longitude      = gps_report.longitude;
+            et.altitude_m     = gps_report.altitude_m;
+            et.speed_ms       = gps_report.speed_ms;
+            et.course_deg     = gps_report.course_deg;
+            et.fix_type       = gps_report.fix_type;
+            et.satellites     = gps_report.satellites;
+            std::memset(&et._pad1, 0, sizeof(et._pad1));       // MUST be zeroed — in hash
+            et.hdop           = gps_report.hdop;
 
             uint8_t hash[32]{}, sig[64]{};
             if (!atecc.sign(et, hash, sig)) {
@@ -431,7 +600,27 @@ extern "C" void vigia_main_loop() {
             gpio_put(LED_ERROR, 0);
 
             SignedEtPacket pkt{};
-            // ... assemble pkt (same mapping as prior spec)
+            pkt.version        = 0x01;
+            pkt.type           = 0x03;  // SIGNED_ET
+            pkt.sequence       = et.sequence;
+            pkt.timestamp_us   = et.timestamp_us;
+            pkt.q_w = et.q_w; pkt.q_x = et.q_x;
+            pkt.q_y = et.q_y; pkt.q_z = et.q_z;
+            pkt.lin_accel_x    = et.lin_accel_x;
+            pkt.lin_accel_y    = et.lin_accel_y;
+            pkt.lin_accel_z    = et.lin_accel_z;
+            pkt.imu_cal_status = et.imu_cal_status;
+            pkt.latitude       = et.latitude;
+            pkt.longitude      = et.longitude;
+            pkt.altitude_m     = et.altitude_m;
+            pkt.speed_ms       = et.speed_ms;
+            pkt.course_deg     = et.course_deg;
+            pkt.fix_type       = et.fix_type;
+            pkt.satellites     = et.satellites;
+            std::memset(&pkt._gps_pad, 0, sizeof(pkt._gps_pad));
+            pkt.hdop           = et.hdop;
+            std::memcpy(pkt.et_hash,   hash, 32);
+            std::memcpy(pkt.ecdsa_sig, sig,  64);
             cobs_tx.transmit(pkt);
 
             if (packet_sequence % 10 == 0) gpio_xor_mask(1u << LED_STATUS);

@@ -1,0 +1,13 @@
+std_msgs/Header             header
+string                      device_id
+float32                     rri_score
+float32                     iss_score
+float32                     yolo_confidence
+float32                     geometry_confidence
+float32                     temporal_confidence
+vigia_msgs/DetectionArray   detections
+vigia_msgs/DepthMap         depth_map
+vigia_msgs/ImuSample        imu_sample
+vigia_msgs/GpsPvt           gps_pvt
+vigia_msgs/SignedEt         signed_et
+float32[]                   spatial_latent

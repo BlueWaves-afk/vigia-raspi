@@ -1,0 +1,56 @@
+camera_node:
+  ros__parameters:
+    camera_index: 0
+    target_fps: 30.0
+    frame_width: 1280
+    frame_height: 720
+    shm_ring_size: 300
+
+vision_node:
+  ros__parameters:
+    model_path: "models/yolov26/yolov26_nano_int8.onnx"
+    latent_layer_name: ""      # Set after Netron inspection of the ONNX graph
+    conf_threshold: 0.25
+    nms_iou_threshold: 0.45
+    input_width: 320
+    input_height: 320
+
+depth_node:
+  ros__parameters:
+    model_path: "models/midasv21/midas_v21_small_256.onnx"
+    midas_stride: 3
+    temp_warn_threshold_c: 75.0
+    temp_critical_threshold_c: 85.0
+
+fusion_node:
+  ros__parameters:
+    device_id: "vigia-001"
+    rri_threshold: 0.75
+    w_yolo: 0.35
+    w_geometry: 0.25
+    w_temporal: 0.15
+    w_iss: 0.25
+    v_min_ms: 2.0
+    kalman_process_noise: 0.01
+    kalman_meas_noise: 0.5
+    gps_fallback_hdop_max: 2.5
+
+sensor_bridge_node:
+  ros__parameters:
+    serial_port: "/dev/ttyACM0"
+    baud_rate: 921600
+    ecdsa_verify_enabled: true
+    device_cert_path: "/etc/vigia/device_cert.pem"
+
+anti_death_node:
+  ros__parameters:
+    ups_gpio_chip: "/dev/gpiochip4"
+    ups_gpio_line: 17
+    ups_gpio_active_low: true
+    power_window_seconds: 15.0
+    # AWS Telemetry API Gateway — VIGIA Telemetry API (sq2ri2n51g), prod stage
+    # Full URL: https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/telemetry
+    aws_telemetry_url: "https://sq2ri2n51g.execute-api.us-east-1.amazonaws.com/prod/telemetry"
+    # Ed25519 device key — 32-byte seed, generated once per device
+    # Provision: see docs/device_provisioning.md
+    device_key_path: "/etc/vigia/device_ed25519.key"

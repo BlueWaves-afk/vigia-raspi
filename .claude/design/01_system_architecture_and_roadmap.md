@@ -1,9 +1,59 @@
 # VIGIA ADAS DePIN Edge Node
 ## Master System Architecture & Engineering Roadmap
 **Document:** `01_system_architecture_and_roadmap.md`  
-**Status:** APPROVED FOR PHASE 1 SPRINT  
+**Status:** PHASE 1 IN PROGRESS — Node source written, ROS2 building from source on Pi  
 **Competition Target:** Samsung Solve for Tomorrow 2026  
 **Classification:** Spec-Driven Development — No implementation before node contracts are signed off
+
+## Implementation Status Log
+
+| Date | Action | Notes |
+|---|---|---|
+| 2026-06-17 | Pi SSH access confirmed via Tailscale (100.114.1.98) | vigiasense@raspberrypi, Debian Trixie, kernel 6.12.75+rpt |
+| 2026-06-17 | PREEMPT_RT kernel installed (`linux-image-6.12.73+deb13-rt-arm64`) | **NOT YET BOOTED** — Pi firmware requires manual config; deferred to physical access |
+| 2026-06-17 | ROS2 Jazzy binary install failed | Ubuntu Noble `libpython3.12t64` not available on Debian Trixie (Python 3.13 only) |
+| 2026-06-17 | ROS2 Jazzy from-source build in progress | `~/ros2_jazzy/` on Pi — `rclcpp`, `sensor_msgs`, `std_msgs` deps targeted |
+| 2026-06-17 | All 6 ROS2 nodes written & on Pi | `vigia_ws/src/vigia_edge_node/src/` — branch `claude/great-jepsen-4d776c` pulled to Pi |
+| 2026-06-17 | `vigia_msgs` package written | 8 custom message definitions in `vigia_ws/src/vigia_msgs/msg/` |
+| 2026-06-17 | ONNX Runtime C++ 1.20.1 installed | `/opt/onnxruntime/` — **NO KleidiAI** (stock CPU EP only) |
+| 2026-06-17 | ONNX Runtime Python 1.27.0 installed | pip, `--break-system-packages` — **NO KleidiAI** |
+| 2026-06-17 | Eigen3 3.4.0 installed | `sudo apt install libeigen3-dev` |
+
+## Build Completion Matrix (updated 2026-06-17)
+
+| Component | Location | Status | Blocker |
+|---|---|---|---|
+| `vigia_msgs` (messages) | `vigia_ws/src/vigia_msgs/` | ⏳ Awaiting colcon | ROS2 Jazzy build completing |
+| `vigia_edge_node` (6 nodes) | `vigia_ws/src/vigia_edge_node/` | ⏳ Awaiting colcon | ROS2 Jazzy build completing |
+| ROS2 Jazzy (`rclcpp`, `sensor_msgs`) | `~/ros2_jazzy/` on Pi | 🔄 Building (build 7 running) | `tracetools` needed `-DTRACETOOLS_DISABLED=ON` |
+| ONNX Runtime + **KleidiAI** | — | ❌ NOT BUILT | Needs ORT from source + ARM Compute Library (`-DONNXRUNTIME_USE_KLEIDIAI=ON`) |
+| ARM Compute Library (ACL) | — | ❌ NOT BUILT | Prerequisite for KleidiAI EP |
+| PREEMPT_RT kernel (active) | `/boot/firmware/` | ❌ NOT ACTIVE | Installed but not booted — requires physical access to Pi |
+| STM32 firmware (Phase 2) | `firmware/` | ❌ NOT STARTED | Phase 2 |
+| Anti-death HTTPS POST (Phase 5) | `anti_death_node.cpp` | ✅ Written | libcurl HTTPS REST + Ed25519 signing; AWS API Gateway wired |
+| DePIN ECDSA + Cosmos 3 (Phase 6) | — | ❌ NOT STARTED | Phase 6 |
+
+## KleidiAI Build Plan (Phase 3 prerequisite)
+
+KleidiAI gives **~4× INT8 GEMM throughput** on Cortex-A76 via `asimddp` (UDOT) instructions.
+The Pi 5 has `asimddp` confirmed in `/proc/cpuinfo`. Build order:
+
+```bash
+# Step 1 — ARM Compute Library (~20 min)
+git clone --depth 1 https://github.com/ARM-software/ComputeLibrary.git /opt/acl
+cd /opt/acl && scons Werror=0 debug=0 asserts=0 neon=1 opencl=0 os=linux arch=arm64-v8.2-a \
+  build=native -j4
+
+# Step 2 — ONNX Runtime with KleidiAI (~45 min)
+git clone --depth 1 --branch v1.20.1 https://github.com/microsoft/onnxruntime /tmp/ort_src
+cd /tmp/ort_src && ./build.sh --config Release --arm --use_acl --acl_home /opt/acl \
+  --acl_libs /opt/acl/build --parallel --cmake_extra_defines \
+  DONNXRUNTIME_USE_KLEIDIAI=ON
+
+# Step 3 — install to /opt/onnxruntime-kleidi/
+```
+
+Expected result: YOLO INT8 latency drops from ~28 ms → ~7 ms per frame (4× on GEMM layers).
 
 ---
 
@@ -89,7 +139,7 @@ The migration is structured as **six engineering phases**, each with discrete ha
 | Vision Models | YOLOv26 Nano (ONNX, INT8, 320×320) + MiDaS v2.1 small (ONNX, INT8 eval) |
 | Sensor Protocol | COBS-encoded binary packets over USB-CDC (`/dev/ttyACM0`) |
 | Storage | `/dev/shm` volatile RAM disk — **no NVMe, no SD writes** |
-| Telemetry Uplink | MQTT over SIM7600 LTE module |
+| Telemetry Uplink | HTTPS REST (libcurl) → AWS API Gateway (Phase 1); SIM7600 LTE cellular for remote deployments (Phase 5) |
 | Security | ATECC608A (Pico 2) ECDSA secp256r1 — signs `E_t` kinematic context |
 | DePIN Target | NVIDIA Cosmos 3 world model (server-side attestation) |
 
@@ -327,9 +377,8 @@ This gives the anti-death handler a **wait-free snapshot path** — it never blo
   - Publish via MQTT to `vigia/events/{device_id}/hazard`
 - [ ] **SIM7600 LTE MQTT integration:**
   - Driver: AT command interface over `/dev/ttyUSB2` (or equivalent SIM7600 CDC ACM port)
-  - MQTT library: Eclipse Paho C++ async client
-  - TLS 1.2 (TLS 1.3 if SIM7600 firmware supports it — check AT+CSSLCFG)
-  - QoS 1 (at-least-once) for hazard events
+  - **Phase 1 transport (implemented):** libcurl HTTPS POST to AWS API Gateway `/telemetry` with Ed25519 signing
+  - **Phase 5 transport (planned):** SIM7600 LTE — AT command interface over `/dev/ttyUSB2`, Eclipse Paho MQTT, TLS 1.2, QoS 1
 - [ ] **State machine** for 15-second window:
   ```
   RUNNING → [UPS_GPIO_ASSERT] → CAPTURING_SNAPSHOT (≤2s)

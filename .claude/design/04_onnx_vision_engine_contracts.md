@@ -2,8 +2,30 @@
 ## ONNX Runtime Vision Engine Contracts
 **Document:** `04_onnx_vision_engine_contracts.md`  
 **Depends on:** `01_system_architecture_and_roadmap.md` (APPROVED), `02_ros2_node_contracts.md` (APPROVED)  
-**Status:** AWAITING APPROVAL — No implementation until sign-off  
+**Status:** PARTIALLY IMPLEMENTED — VisionNode + DepthNode C++ written (see doc 02 status); KleidiAI NOT YET ACTIVE  
 **Scope:** Phase 3 — `VisionNode` (YOLOv26 INT8 + KleidiAI + S_t) and `DepthNode` (MiDaS FP32)
+
+## Implementation Status (2026-06-17)
+
+| Item | Status | Notes |
+|---|---|---|
+| `VisionNode` C++ source | ✅ Written | `vigia_ws/src/vigia_edge_node/src/vision_node.cpp` |
+| `DepthNode` C++ source | ✅ Written | `vigia_ws/src/vigia_edge_node/src/depth_node.cpp` |
+| ONNX Runtime C++ headers | ✅ Installed | `/opt/onnxruntime/` v1.20.1 — stock CPU EP only |
+| ONNX Runtime Python | ✅ Installed | pip v1.27.0 — stock CPU EP only |
+| **KleidiAI / ACL EP** | ❌ NOT BUILT | `ACLExecutionProvider` absent from both installs |
+| ARM Compute Library | ❌ NOT BUILT | Required prerequisite for KleidiAI |
+| YOLO INT8 model (`.onnx`) | ❌ NOT PRESENT | `models/yolov26/yolov26_nano_int8.onnx` — needs export from YOLOv26 repo |
+| MiDaS FP32 model (`.onnx`) | ❌ NOT PRESENT | `models/midasv21/midas_v21_small_256.onnx` — needs download |
+
+**KleidiAI impact:** `asimddp` (UDOT) confirmed in `/proc/cpuinfo` on Pi 5. Without KleidiAI, YOLO runs
+at ~28 ms/frame on `CPUExecutionProvider`. With KleidiAI, expected ~7 ms/frame (~4× on INT8 GEMM).
+Build plan for ACL + KleidiAI ORT is documented in `01_system_architecture_and_roadmap.md §KleidiAI Build Plan`.
+
+**ACL EP call-site** in `vision_node.cpp` is currently commented out pending KleidiAI build:
+```cpp
+// OrtSessionOptionsAppendExecutionProvider_ACL(session_opts, 1);  // uncomment after ACL build
+```
 
 ---
 

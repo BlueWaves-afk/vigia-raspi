@@ -15,12 +15,19 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "bno085_driver.h"
 #include "hardware/gpio.h"
 #include "neo_m8n_driver.h"
 #include "pico/stdlib.h"
 #include "vigia_pins.h"
+
+/* Phase 2 — COBS signing pipeline (VIGIA_PHASE2=1 to enable) */
+#if defined(VIGIA_PHASE2) && (VIGIA_PHASE2 == 1)
+#  include "atecc608a_driver.h"
+#  include "cobs_tx_driver.h"
+#endif
 
 static const uint LED_PIN = PICO_DEFAULT_LED_PIN;
 
@@ -123,6 +130,23 @@ int main(void) {
     neo_m8n_init(VIGIA_GPS_UART);
     bno085_init(VIGIA_BNO085_SPI);
 
+#if defined(VIGIA_PHASE2) && (VIGIA_PHASE2 == 1)
+    vigia_atca_init();
+
+    /* Static buffers — no heap allowed */
+    static EtHashInput     s_et_input;
+    static SignedEtPacket  s_et_pkt;
+    static uint8_t         s_cobs_frame[COBS_FRAME_MAX];
+    static uint32_t        s_et_seq = 0;
+
+    /* Phase 2: device_id provisioned in ATECC608A data zone.
+     * Hardcoded placeholder until provisioning script runs. */
+    static const uint8_t k_device_id[16] = {
+        0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B
+    };
+#endif
+
     const uint32_t boot_ms = to_ms_since_boot(get_absolute_time());
     uint32_t gps_seq = 0;
 #if VIGIA_IMU_DEBUG_USB
@@ -157,8 +181,67 @@ int main(void) {
                 } else {
                     gpio_xor_mask(1u << LED_PIN);
                 }
+
+#if defined(VIGIA_PHASE2) && (VIGIA_PHASE2 == 1)
+                /* ── Phase 2: assemble, hash, sign, COBS-encode ───────── */
+                bno085_report_t last_imu;
+                const bool have_imu = bno085_get_report(&last_imu);
+
+                memcpy(s_et_input.device_id, k_device_id, 16);
+                s_et_input.timestamp_us = time_us_64();
+                s_et_input.sequence     = s_et_seq;
+                if (have_imu) {
+                    s_et_input.qw = last_imu.qw; s_et_input.qx = last_imu.qx;
+                    s_et_input.qy = last_imu.qy; s_et_input.qz = last_imu.qz;
+                    s_et_input.ax = last_imu.ax; s_et_input.ay = last_imu.ay;
+                    s_et_input.az = last_imu.az;
+                    s_et_input.cal_status = last_imu.cal_status;
+                }
+                s_et_input.latitude   = report.latitude;
+                s_et_input.longitude  = report.longitude;
+                s_et_input.speed_ms   = report.speed_ms;
+                s_et_input.fix_type   = report.fix_type;
+                s_et_input.satellites = report.satellites;
+                memset(s_et_input._pad0, 0, sizeof(s_et_input._pad0));
+                memset(s_et_input._pad1, 0, sizeof(s_et_input._pad1));
+
+                /* Hash (~40 ms) then sign (~57 ms) — runs in GPS branch (1 Hz budget) */
+                vigia_atca_sha((const uint8_t *)&s_et_input, ET_HASH_INPUT_SIZE,
+                               s_et_pkt.et_hash);
+                vigia_atca_sign(s_et_pkt.et_hash, s_et_pkt.ecdsa_sig);
+
+                /* Populate packet header + IMU + GPS */
+                s_et_pkt.magic      = 0xE7;
+                s_et_pkt.version    = 0x02;
+                s_et_pkt.timestamp_us = s_et_input.timestamp_us;
+                s_et_pkt.sequence     = s_et_seq++;
+                s_et_pkt.qw = s_et_input.qw; s_et_pkt.qx = s_et_input.qx;
+                s_et_pkt.qy = s_et_input.qy; s_et_pkt.qz = s_et_input.qz;
+                s_et_pkt.ax = s_et_input.ax; s_et_pkt.ay = s_et_input.ay;
+                s_et_pkt.az = s_et_input.az;
+                s_et_pkt.cal_status = s_et_input.cal_status;
+                memset(s_et_pkt._imu_pad, 0, sizeof(s_et_pkt._imu_pad));
+                s_et_pkt.latitude   = report.latitude;
+                s_et_pkt.longitude  = report.longitude;
+                s_et_pkt.speed_ms   = report.speed_ms;
+                s_et_pkt.fix_type   = report.fix_type;
+                s_et_pkt.satellites = report.satellites;
+                memset(s_et_pkt._gps_pad, 0, sizeof(s_et_pkt._gps_pad));
+
+                /* COBS encode and transmit */
+                size_t frame_len = cobs_encode(
+                    (const uint8_t *)&s_et_pkt, SIGNED_ET_PACKET_SIZE,
+                    s_cobs_frame, sizeof(s_cobs_frame));
+                if (frame_len > 0) {
+                    fwrite(s_cobs_frame, 1, frame_len, stdout);
+                    fflush(stdout);
+                }
+#else
+                /* Phase 1: plain text output */
                 print_gps_line(gps_seq++, &report);
-            } else if (!gps_seen) {
+#endif /* VIGIA_PHASE2 */
+            } /* end neo_m8n_get_report */
+            else if (!gps_seen) {
                 gpio_xor_mask(1u << LED_PIN);
                 const uint64_t uptime_ms = to_ms_since_boot(get_absolute_time());
                 print_ping_line(gps_seq++, uptime_ms, boot_ms);
