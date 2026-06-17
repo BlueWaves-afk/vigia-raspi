@@ -26,13 +26,16 @@ except ImportError:
 
 GPS_RE = re.compile(
     r"VIGIA_GPS seq=(?P<seq>\d+) "
+    r"(?:timestamp_us=(?P<ts>\d+) )?"
     r"lat=(?P<lat>[-\d.]+) lon=(?P<lon>[-\d.]+) "
     r"speed_ms=(?P<speed>[-\d.]+) fix_type=(?P<fix>\d+) "
     r"satellites=(?P<sats>\d+) hdop=(?P<hdop>[-\d.]+) valid=(?P<valid>[01])"
+    r"(?: src=\w+)?"
 )
 
 PING_RE = re.compile(
     r"VIGIA_PING seq=(?P<seq>\d+) uptime_ms=(?P<uptime>\d+) boot_ms=(?P<boot>\d+)"
+    r"(?: fw=[^\s]+)? uart_rx=(?P<uart_rx>\d+) baud=(?P<baud>\d+)"
 )
 
 
@@ -60,6 +63,8 @@ def main() -> int:
     gps_count = 0
     valid_count = 0
     ping_count = 0
+    last_uart_rx = 0
+    last_baud = 0
     start = time.monotonic()
 
     try:
@@ -104,9 +109,18 @@ def main() -> int:
                         )
                     continue
 
-                if PING_RE.match(line):
+                m_ping = PING_RE.match(line)
+                if m_ping:
                     ping_count += 1
-                    print(f"[ping] {line}  (GPS UART quiet — wire M8N to GP8/GP9?)")
+                    last_uart_rx = int(m_ping.group("uart_rx"))
+                    last_baud = int(m_ping.group("baud"))
+                    if last_uart_rx > 0:
+                        print(
+                            f"[ping] uart_rx={last_uart_rx} baud={last_baud} "
+                            f"(bytes flowing — waiting for VIGIA_GPS parse)"
+                        )
+                    else:
+                        print(f"[ping] uart_rx=0 — wire M8N TX→GP9, RX←GP8, 3.3V, GND")
                     continue
 
                 print(f"[raw] {line}")
@@ -128,7 +142,14 @@ def main() -> int:
         print("[WARN] GPS UART active but no valid fix yet (move antenna outdoors?).")
         return 0
     if ping_count > 0 and gps_count == 0:
-        print("[WARN] Pi ↔ Pico OK; no GPS frames — check M8N wiring on GP8/GP9.")
+        if last_uart_rx > 1000:
+            print(
+                "[WARN] Row 2: UART bytes flowing but no VIGIA_GPS parsed — "
+                "likely baud mismatch. Reflash latest firmware (parse-based autobaud) "
+                "or power-cycle Pico with GPS wired before USB plug-in."
+            )
+        else:
+            print("[WARN] Pi ↔ Pico OK; no GPS UART bytes — check M8N wiring on GP8/GP9.")
         return 1
     if gps_count == 0 and ping_count == 0:
         print("[FAIL] No output. Reflash vigia_pico_hello.uf2?")

@@ -52,6 +52,9 @@ static char nmea_line_[NMEA_LINE_MAX];
 static uint16_t nmea_len_;
 static bool nmea_active_;
 
+static uint32_t bytes_at_last_parse_;
+static uint32_t last_baud_recovery_ms_;
+
 static void neo_m8n_poll_uart(void);
 
 static void ubx_checksum_byte(uint8_t byte) {
@@ -360,44 +363,67 @@ static void feed_byte(uint8_t byte) {
     ubx_feed_byte(byte);
 }
 
-static bool uart_saw_traffic(uint32_t min_bytes) {
-    const uint32_t saved = uart_rx_bytes_;
-    uart_rx_bytes_ = 0;
+static bool baud_yields_parse(uart_inst_t *uart, uint32_t baud) {
+    const bool had_report = report_updated_;
+
     reset_rx_state();
     nmea_active_ = false;
     nmea_len_ = 0;
+    report_updated_ = false;
+    uart_init(uart, baud);
+    sleep_ms(20);
 
-    absolute_time_t deadline = make_timeout_time_ms(400);
+    absolute_time_t deadline = make_timeout_time_ms(600);
     while (absolute_time_diff_us(get_absolute_time(), deadline) > 0) {
         neo_m8n_poll_uart();
-        if (uart_rx_bytes_ >= min_bytes) {
-            uart_rx_bytes_ = saved;
+        if (report_updated_) {
             return true;
         }
         sleep_ms(5);
     }
 
-    const bool ok = uart_rx_bytes_ >= min_bytes;
-    uart_rx_bytes_ = saved;
-    return ok;
+    report_updated_ = had_report;
+    return false;
 }
+
+static void configure_gps(uart_inst_t *uart);
 
 static uint32_t autodetect_baud(uart_inst_t *uart) {
     static const uint32_t candidates[] = {9600u, 38400u, 115200u};
 
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-        uart_rx_bytes_ = 0;
-        reset_rx_state();
-        nmea_active_ = false;
-        nmea_len_ = 0;
-        uart_init(uart, candidates[i]);
-        sleep_ms(50);
-        if (uart_saw_traffic(8u)) {
+        if (baud_yields_parse(uart, candidates[i])) {
             return candidates[i];
         }
     }
 
+    /* Fallback: keep default and hope runtime recovery catches late connect. */
+    uart_init(uart, VIGIA_GPS_UART_BAUD);
     return VIGIA_GPS_UART_BAUD;
+}
+
+static void maybe_recover_baud(void) {
+    if (gps_uart_ == NULL || report_updated_) {
+        bytes_at_last_parse_ = uart_rx_bytes_;
+        return;
+    }
+
+    if ((uart_rx_bytes_ - bytes_at_last_parse_) < 2048u) {
+        return;
+    }
+
+    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if ((now_ms - last_baud_recovery_ms_) < 5000u) {
+        return;
+    }
+    last_baud_recovery_ms_ = now_ms;
+
+    const uint32_t prev_baud = active_baud_;
+    active_baud_ = autodetect_baud(gps_uart_);
+    if (report_updated_ || active_baud_ != prev_baud) {
+        configure_gps(gps_uart_);
+    }
+    bytes_at_last_parse_ = uart_rx_bytes_;
 }
 
 static void configure_gps(uart_inst_t *uart) {
@@ -422,6 +448,8 @@ void neo_m8n_init(uart_inst_t *uart) {
     report_source_ = NEO_M8N_SRC_NONE;
     uart_rx_bytes_ = 0;
     active_baud_ = VIGIA_GPS_UART_BAUD;
+    bytes_at_last_parse_ = 0;
+    last_baud_recovery_ms_ = 0;
     reset_rx_state();
     nmea_active_ = false;
     nmea_len_ = 0;
@@ -432,6 +460,7 @@ void neo_m8n_init(uart_inst_t *uart) {
 
     active_baud_ = autodetect_baud(uart);
     configure_gps(uart);
+    bytes_at_last_parse_ = uart_rx_bytes_;
 }
 
 static void neo_m8n_poll_uart(void) {
@@ -447,6 +476,7 @@ static void neo_m8n_poll_uart(void) {
 
 void neo_m8n_poll(void) {
     neo_m8n_poll_uart();
+    maybe_recover_baud();
 }
 
 uint32_t neo_m8n_uart_rx_bytes(void) {
