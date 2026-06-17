@@ -1,0 +1,2 @@
+/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool-build/enc_bootloader/CMakeFiles/edit_cache.dir
+/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool-build/enc_bootloader/CMakeFiles/rebuild_cache.dir

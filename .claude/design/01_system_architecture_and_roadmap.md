@@ -40,7 +40,7 @@ The migration is structured as **six engineering phases**, each with discrete ha
 | Telemetry | `src/coordinator.cpp:311–326` | `stdout` debug prints (suppressed in release) | ROS 2 topics → MQTT → SIM7600 LTE |
 | Hardware sensors | (none) | Vision-only | IMU + GPS + Secure Element + LTE |
 | Storage | (none) | No persistent storage | `/dev/shm` volatile RAM disk (rolling 10s buffer) |
-| Security | (none) | No signing or authentication | ATECC608A ECDSA (STM32 side) signs kinematic context `E_t` |
+| Security | (none) | No signing or authentication | ATECC608A ECDSA (Pico 2 side) signs kinematic context `E_t` |
 
 ### 2.2 Known Performance Baseline (Pi 5, INT8 YOLO, PREEMPT_RT pending)
 
@@ -70,23 +70,23 @@ The migration is structured as **six engineering phases**, each with discrete ha
 │            [Anti-Death Handler]    SCHED_FIFO priority 99       │
 │                                                                  │
 │  /dev/shm ── Rolling 10s frame buffer (seqlock-protected)       │
-│  /dev/ttyACM0 ── USB-CDC from STM32 (COBS binary protocol)     │
+│  /dev/ttyACM0 ── USB-CDC from Pico 2 (COBS binary protocol)    │
 └────────────────────────┬────────────────────────────────────────┘
                          │ USB-CDC (COBS binary packets, 921600 baud)
 ┌────────────────────────▼────────────────────────────────────────┐
-│                  STM32F411 Black Pill (RPU)                      │
-│  OS: Bare-metal (HAL + FreeRTOS optional)                        │
+│              Raspberry Pi Pico 2 / RP2350 (RPU)                  │
+│  OS: Bare-metal (Pico SDK — no RTOS)                             │
 │                                                                  │
-│  SPI ──► BNO085 IMU (4D quaternion + linear accel, 100 Hz)      │
-│  UART ──► NEO-M8N GPS (UBX binary, 10 Hz)                       │
-│  I2C ──► ATECC608A Secure Element (ECDSA secp256r1 signing)      │
+│  SPI0 ──► BNO085 IMU (4D quaternion + linear accel, 100 Hz)     │
+│  UART1 ──► NEO-M8N GPS (UBX binary, 10 Hz)                      │
+│  I2C1 ──► ATECC608A Secure Element (ECDSA secp256r1 signing)     │
 │                                                                  │
 │  Responsibility: Hash + sign kinematic context E_t               │
 │                  before forwarding to Pi via USB-CDC             │
 └─────────────────────────────────────────────────────────────────┘
          │                              │
     BNO085 IMU                    NEO-M8N GPS
-    (SPI @ 4 MHz)                 (UART @ 9600 baud)
+    (SPI @ 3 MHz)                 (UART @ 9600 baud)
 ```
 
 ### 3.2 Software Stack
@@ -101,7 +101,7 @@ The migration is structured as **six engineering phases**, each with discrete ha
 | Sensor Protocol | COBS-encoded binary packets over USB-CDC (`/dev/ttyACM0`) |
 | Storage | `/dev/shm` volatile RAM disk — **no NVMe, no SD writes** |
 | Telemetry Uplink | MQTT over SIM7600 LTE module |
-| Security | ATECC608A (STM32) ECDSA secp256r1 — signs `E_t` kinematic context |
+| Security | ATECC608A (Pico 2) ECDSA secp256r1 — signs `E_t` kinematic context |
 | DePIN Target | NVIDIA Cosmos 3 world model (server-side attestation) |
 
 ---
@@ -114,7 +114,7 @@ The migration is structured as **six engineering phases**, each with discrete ha
 |---|---|
 | **No NVMe HAT/SSD** | All video buffer storage MUST use `/dev/shm` (volatile RAM disk). No `fwrite()`, no SQLite, no file-based ring buffers that touch the SD card. |
 | **No 12V DC-DC buck** | Emergency shutdown trigger MUST come exclusively from the 18650 UPS GPIO status pin. No ignition-sense line. No automotive CAN. |
-| **ATECC608A on STM32 only** | The Pi 5 has no direct access to the secure element. The STM32 is the sole signing authority for `E_t`. The Pi's spatial latent vector `S_t` is **unsigned in Phase 1**. |
+| **ATECC608A on Pico 2 only** | The Pi 5 has no direct access to the secure element. The Pico 2 is the sole signing authority for `E_t`. The Pi's spatial latent vector `S_t` is **unsigned in Phase 1**. |
 | **5V bench power via 18650 UPS** | Power budget: ~5A sustained at 5V = 25W max. Thermal constraint: stay below 80°C sustained (Pi 5 throttle threshold). |
 
 ---
@@ -233,19 +233,19 @@ This gives the anti-death handler a **wait-free snapshot path** — it never blo
 - No `frame.clone()` calls remain in CameraNode or VisionNode hot paths
 - `valgrind --tool=massif` shows flat heap profile during 60s run (no allocation growth)
 
-**Hardware Constraints Active:** No STM32, no sensors. Pi 5 + camera only.
+**Hardware Constraints Active:** No Pico 2, no sensors. Pi 5 + camera only.
 
 ---
 
-### Phase 2 — STM32 DMA Bridge
-**Goal:** Bring the STM32 Black Pill online as a bare-metal sensor aggregation and signing RPU.
+### Phase 2 — Pico 2 Sensor Bridge
+**Goal:** Bring the Raspberry Pi Pico 2 online as a bare-metal sensor aggregation and signing RPU.
 
 **Deliverables:**
-- [ ] STM32 firmware (separate repo or `firmware/` subdirectory):
-  - BNO085 driver over SPI (4 MHz, DMA-driven) — NDOF fusion mode, 100 Hz quaternion + linear accel output
-  - NEO-M8N driver over UART (9600 baud) — UBX binary parser, `NAV-PVT` message at 10 Hz (lat, lon, alt, speed, course, fix quality, HDOP)
-  - ATECC608A driver over I2C (400 kHz) — Microchip `cryptoauthlib` (HAL layer for STM32 HAL)
-  - COBS encoder — frames `E_t` payload as COBS packet before USB-CDC transmit
+- [ ] Pico 2 firmware (separate repo or `firmware/` subdirectory):
+  - BNO085 driver over SPI0 (3 MHz, DMA-driven) — NDOF fusion mode, 100 Hz quaternion + linear accel output
+  - NEO-M8N driver over UART1 (9600 baud) — UBX binary parser, `NAV-PVT` message at 10 Hz (lat, lon, alt, speed, course, fix quality, HDOP)
+  - ATECC608A driver over I2C1 (400 kHz) — Microchip `cryptoauthlib` (RP2040/RP2350 HAL)
+  - COBS encoder — frames `E_t` payload as COBS packet before USB-CDC transmit (TinyUSB)
 - [ ] COBS Packet Format (on wire):
 
 ```
@@ -333,7 +333,7 @@ This gives the anti-death handler a **wait-free snapshot path** — it never blo
 - [ ] **UPS GPIO handler** (`AntiDeathNode`, SCHED_FIFO 99):
   - Monitors GPIO pin (sysfs or libgpiod) for UPS `POWER_FAIL` assertion
   - On assertion: seqlock snapshot → serialize 300-frame buffer to in-memory `msgpack` blob
-  - Attach `vigia_msgs/msg/SignedEt` from latest STM32 packet (E_t already ECDSA-signed)
+  - Attach `vigia_msgs/msg/SignedEt` from latest Pico 2 packet (E_t already ECDSA-signed)
   - Attach `S_t` spatial latent from latest VisionNode output (unsigned in Phase 1)
   - Publish via MQTT to `vigia/events/{device_id}/hazard`
 - [ ] **SIM7600 LTE MQTT integration:**
@@ -362,9 +362,9 @@ This gives the anti-death handler a **wait-free snapshot path** — it never blo
 **Goal:** Complete the cryptographic attestation pipeline and integrate with the NVIDIA Cosmos 3 world model endpoint.
 
 **Deliverables:**
-- [ ] **STM32 signing pipeline** (completes Phase 2 stub):
+- [ ] **Pico 2 signing pipeline** (completes Phase 2 stub):
   - ATECC608A provisioned with device private key (secp256r1) and X.509 certificate via Microchip Trust Platform
-  - STM32 computes `E_t` = `SHA-256(IMU_quaternion ∥ GPS_PVT ∥ timestamp_us ∥ device_id)`
+  - Pico 2 computes `E_t` = `SHA-256(IMU_quaternion ∥ GPS_PVT ∥ timestamp_us ∥ device_id)`
   - ATECC608A performs ECDSA sign of `E_t` hash → 64-byte signature
   - Included in `SIGNED_ET` COBS packet to Pi
 - [ ] **Pi-side attestation payload assembly:**
@@ -397,7 +397,7 @@ This gives the anti-death handler a **wait-free snapshot path** — it never blo
 | **No SD card writes in hot path** | All runtime data to `/dev/shm` or ROS 2 intra-process. Logs to `journald` only (ramoops). |
 | **No NVMe** | Zero persistent storage architecture. Buffer is volatile by design — loss on unclean shutdown is acceptable (UPS provides clean-shutdown path). |
 | **No 12V / automotive power** | UPS GPIO is the only shutdown trigger. No `SIGPWR`, no CAN bus, no ignition-sense. |
-| **ATECC608A on STM32 only** | Pi never calls cryptoauthlib. Pi receives pre-signed `E_t` packets and forwards them. `S_t` is unsigned in Phase 1. |
+| **ATECC608A on Pico 2 only** | Pi never calls cryptoauthlib. Pi receives pre-signed `E_t` packets and forwards them. `S_t` is unsigned in Phase 1. |
 | **PREEMPT_RT kernel mandatory from Phase 1** | CFS scheduler is insufficient for deterministic SCHED_FIFO priority enforcement. |
 | **StaticSingleThreadedExecutor mandatory** | Default ROS 2 executors cause priority inversion under PREEMPT_RT — never use them for RT nodes. |
 
@@ -408,7 +408,7 @@ This gives the anti-death handler a **wait-free snapshot path** — it never blo
 ```
 Phase 1 (OS + ROS2 Middleware)
     │
-    ├──► Phase 2 (STM32 Bridge) ──────────────────────────────────┐
+    ├──► Phase 2 (Pico 2 Bridge) ───────────────────────────────────┐
     │                                                              │
     └──► Phase 3 (ONNX Runtime + S_t) ──► Phase 4 (ISS Fusion) ──┤
                                                                    │
@@ -418,7 +418,7 @@ Phase 1 (OS + ROS2 Middleware)
 ```
 
 **Critical path:** Phase 1 → Phase 3 → Phase 4 → Phase 5 → Phase 6  
-Phase 2 (STM32) can be developed in parallel with Phase 3 and integrated at Phase 4.
+Phase 2 (Pico 2) can be developed in parallel with Phase 3 and integrated at Phase 4.
 
 ---
 
@@ -432,7 +432,7 @@ Phase 2 (STM32) can be developed in parallel with Phase 3 and integrated at Phas
 
 4. **`S_t` layer selection in YOLOv26:** The penultimate feature map of YOLOv26 Nano needs to be identified in the ONNX graph (Netron). Its dimensionality determines the `SpatialLatent` message size. Confirm the layer name and output shape before Phase 3 node contract is written.
 
-5. **BNO085 SPI vs I2C on STM32 Black Pill:** Black Pill has SPI1/SPI2 — confirm BNO085 breakout board is wired to SPI1 (PA5/PA6/PA7/PA4). If I2C is used instead, update DMA channel allocation in Phase 2 firmware spec.
+5. **BNO085 SPI wiring on Pico 2:** Confirm BNO085 breakout is wired to SPI0 (GP18/GP19/GP16/GP17). SPI is mandatory for 100 Hz — I2C is not supported in Phase 2 firmware spec.
 
 ---
 

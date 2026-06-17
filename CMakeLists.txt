@@ -46,6 +46,9 @@ set(VIGIA_LIB_SOURCES
     src/coordinator.cpp
     src/fusion.cpp
     src/temporal.cpp
+    src/sensor_packet.cpp
+    src/sensor_state.cpp
+    src/sensor_bridge.cpp
 )
 
 add_library(vigia_lib STATIC ${VIGIA_LIB_SOURCES})
