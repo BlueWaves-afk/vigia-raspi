@@ -1,4 +1,6 @@
 #include "coordinator.hpp"
+#include "event_store.hpp"
+#include "hazard_event.hpp"
 #include "sensor_bridge.hpp"
 
 #include <algorithm>
@@ -81,6 +83,11 @@ void Coordinator::setSensorBridge(SensorBridge& bridge)
     sensorBridge_ = &bridge;
 }
 
+void Coordinator::setEventStore(EventStore& store)
+{
+    eventStore_ = &store;
+}
+
 Coordinator::SensorSnapshot Coordinator::querySensors() const
 {
     SensorSnapshot snap{};
@@ -94,6 +101,12 @@ Coordinator::SensorSnapshot Coordinator::querySensors() const
     snap.gpsLat   = proc.gpsLat;
     snap.gpsLon   = proc.gpsLon;
     snap.gpsValid = proc.gpsValid;
+
+    const auto gps = sensorBridge_->state().getLatestGps();
+    if (gps && snap.gpsValid) {
+        snap.gpsHdop    = gps->hdop;
+        snap.gpsFixType = gps->fix_type;
+    }
     return snap;
 }
 
@@ -191,6 +204,28 @@ void Coordinator::midasLoop() {
 
                 auto fout = fusion_.fuse(fin);
                 publishResult(det, fout);
+
+                if (eventStore_) {
+                    HazardObservation obs{};
+                    obs.frame_index    = work.frameIdx;
+                    obs.hazard_class   = static_cast<uint8_t>(HazardClass::Pothole);
+                    obs.rri            = fout.finalConfidence;
+                    obs.iss            = work.sensors.imuIss;
+                    obs.yolo_conf      = det.confidence;
+                    obs.geometry_conf  = fout.geometryConfidence;
+                    obs.temporal_conf  = fout.temporalConfidence;
+                    obs.bbox_x         = det.boundingBox.x;
+                    obs.bbox_y         = det.boundingBox.y;
+                    obs.bbox_w         = det.boundingBox.width;
+                    obs.bbox_h         = det.boundingBox.height;
+                    obs.lat            = fout.latitude;
+                    obs.lon            = fout.longitude;
+                    obs.speed_ms       = fout.speedMs;
+                    obs.hdop           = work.sensors.gpsHdop;
+                    obs.gps_fix_type   = work.sensors.gpsFixType;
+                    obs.gps_valid      = fout.gpsValid;
+                    eventStore_->promoter().submit(obs);
+                }
             }
         }
     } catch (const std::exception& e) {

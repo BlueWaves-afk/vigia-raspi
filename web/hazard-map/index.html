@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VIGIA Hazard Map</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; }
+    #map { width: 100vw; height: 100vh; }
+    #panel {
+      position: absolute; top: 12px; left: 12px; z-index: 2;
+      background: rgba(20, 20, 24, 0.92); color: #eee;
+      padding: 14px 16px; border-radius: 8px; max-width: 320px;
+      font-size: 13px; line-height: 1.5;
+    }
+    #panel h1 { font-size: 15px; margin-bottom: 8px; }
+    #panel label { display: block; margin-top: 8px; color: #aaa; }
+    #panel input, #panel select {
+      width: 100%; margin-top: 4px; padding: 6px 8px;
+      border: 1px solid #444; border-radius: 4px; background: #111; color: #eee;
+    }
+    #status { margin-top: 10px; color: #8cf; }
+    #detail {
+      position: absolute; bottom: 12px; left: 12px; right: 12px; z-index: 2;
+      background: rgba(20, 20, 24, 0.92); color: #eee;
+      padding: 12px 16px; border-radius: 8px; display: none;
+      max-height: 30vh; overflow: auto; font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <h1>VIGIA Hazard Map</h1>
+    <label>API base URL
+      <input id="apiBase" value="http://127.0.0.1:8080" />
+    </label>
+    <label>Min severity (RRI)
+      <input id="minSeverity" type="number" min="0" max="1" step="0.05" value="0.75" />
+    </label>
+    <label>Auto-refresh (seconds, 0 = off)
+      <input id="refreshSec" type="number" min="0" value="5" />
+    </label>
+    <div id="status">Loading…</div>
+  </div>
+  <div id="detail"></div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script>
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: 'https://demotiles.maplibre.org/style.json',
+      center: [77.5946, 12.9716],
+      zoom: 14,
+    });
+    map.addControl(new maplibregl.NavigationControl());
+
+    let markers = [];
+    let refreshTimer = null;
+
+    function clearMarkers() {
+      markers.forEach(m => m.remove());
+      markers = [];
+    }
+
+    function severityColor(score) {
+      if (score >= 0.85) return '#e53935';
+      if (score >= 0.75) return '#fb8c00';
+      return '#fdd835';
+    }
+
+    async function fetchHazards() {
+      const base = document.getElementById('apiBase').value.replace(/\/$/, '');
+      const minSev = document.getElementById('minSeverity').value;
+      const b = map.getBounds();
+      const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
+      const url = `${base}/v1/hazards?bbox=${bbox}&min_severity=${minSev}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    }
+
+    async function showDetail(hazardId) {
+      const base = document.getElementById('apiBase').value.replace(/\/$/, '');
+      const res = await fetch(`${base}/v1/hazards/${hazardId}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const el = document.getElementById('detail');
+      el.style.display = 'block';
+      const obs = (data.observations || []).map(o =>
+        `<li>RRI ${o.rri?.toFixed?.(2) ?? o.rri} @ ${o.observed_at} (${o.trust_level})</li>`
+      ).join('');
+      el.innerHTML = `
+        <strong>Hazard ${data.hazard_id?.slice(0, 8)}…</strong>
+        severity=${data.severity_score?.toFixed?.(2)} observations=${data.observation_count}
+        <ul>${obs || '<li>No observations</li>'}</ul>`;
+    }
+
+    async function refresh() {
+      const status = document.getElementById('status');
+      try {
+        const geo = await fetchHazards();
+        clearMarkers();
+        (geo.features || []).forEach(f => {
+          const [lon, lat] = f.geometry.coordinates;
+          const score = f.properties.severity_score;
+          const el = document.createElement('div');
+          el.style.width = '14px';
+          el.style.height = '14px';
+          el.style.borderRadius = '50%';
+          el.style.background = severityColor(score);
+          el.style.border = '2px solid #fff';
+          el.style.cursor = 'pointer';
+          const m = new maplibregl.Marker({ element: el })
+            .setLngLat([lon, lat])
+            .addTo(map);
+          el.addEventListener('click', () => showDetail(f.properties.hazard_id));
+          markers.push(m);
+        });
+        status.textContent = `${geo.features?.length ?? 0} hazards in view`;
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+      }
+    }
+
+    function setupRefresh() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      const sec = parseInt(document.getElementById('refreshSec').value, 10);
+      if (sec > 0) refreshTimer = setInterval(refresh, sec * 1000);
+    }
+
+    map.on('load', () => { refresh(); setupRefresh(); });
+    map.on('moveend', refresh);
+    document.getElementById('minSeverity').addEventListener('change', refresh);
+    document.getElementById('refreshSec').addEventListener('change', setupRefresh);
+  </script>
+</body>
+</html>

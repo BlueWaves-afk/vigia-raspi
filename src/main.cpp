@@ -2,12 +2,14 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <thread>
 
 #include <openvino/openvino.hpp>
 
 #include "coordinator.hpp"
+#include "event_store.hpp"
 #include "perception.hpp"
 #include "analytical.hpp"
 #include "temporal.hpp"
@@ -68,6 +70,54 @@ void logDeviceCapabilities(ov::Core& core, const std::string& device)
 #endif
 }
 
+const char* envOrDefault(const char* key, const char* fallback)
+{
+    const char* val = std::getenv(key);
+    return (val && val[0] != '\0') ? val : fallback;
+}
+
+bool envBool(const char* key, bool defaultVal)
+{
+    const char* val = std::getenv(key);
+    if (!val || val[0] == '\0')
+        return defaultVal;
+    return std::strcmp(val, "0") != 0 &&
+           std::strcmp(val, "false") != 0 &&
+           std::strcmp(val, "FALSE") != 0;
+}
+
+vigia::EventStore::Config loadEventStoreConfig()
+{
+    vigia::EventStore::Config cfg{};
+
+    std::strncpy(cfg.promoter.device_id,
+                 envOrDefault("VIGIA_DEVICE_ID", "vigia-dev-001"),
+                 sizeof(cfg.promoter.device_id) - 1);
+    cfg.promoter.device_id[sizeof(cfg.promoter.device_id) - 1] = '\0';
+
+    cfg.promoter.rri_threshold   = 0.75f;
+    cfg.promoter.dedup_radius_m  = 5.0f;
+    cfg.promoter.dedup_window_s  = 30.0f;
+    cfg.promoter.require_gps     = envBool("VIGIA_GPS_REQUIRE_VALID", true);
+    cfg.promoter.max_hdop        = 2.5f;
+    cfg.promoter.ring_capacity   = 512;
+
+    cfg.signer.hmac_key_file = envOrDefault("VIGIA_HMAC_KEY_FILE", "");
+    cfg.sync.endpoint = envOrDefault(
+        "VIGIA_SYNC_ENDPOINT", "http://127.0.0.1:8080/v1/events");
+#if defined(VIGIA_HAVE_CURL)
+    cfg.sync.use_curl = true;
+#else
+    cfg.sync.use_curl = false;
+#endif
+
+    cfg.batch_size          = 50;
+    cfg.sync_interval_s     = 5.0f;
+    cfg.dev_stdout_fallback = true;
+
+    return cfg;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -104,15 +154,20 @@ int main(int argc, char** argv)
         vigia::SensorBridge bridge(vigia::SensorBridge::Config{sensorPort, 115200});
         bridge.start();
 
+        vigia::EventStore eventStore(loadEventStoreConfig());
+        eventStore.start();
+
         vigia::Coordinator coordinator(
             perception, analytical, temporal, fusion, targetFps
         );
         coordinator.setSensorBridge(bridge);
+        coordinator.setEventStore(eventStore);
 
         coordinator.start();
 
         std::cout << "[vigia] Pipeline running (FPS target: "
                   << targetFps << ", sensor port: " << sensorPort
+                  << ", device: " << eventStore.promoter().config().device_id
                   << "). Press Ctrl+C to stop.\n";
 
         while (g_running.load())
@@ -120,6 +175,7 @@ int main(int argc, char** argv)
 
         std::cout << "\n[vigia] Shutting down...\n";
         coordinator.stop();
+        eventStore.stop();
         bridge.stop();
 
     } catch (const std::exception& ex) {

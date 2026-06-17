@@ -1,9 +1,9 @@
 # VIGIA M7: Event Logging + Database + Hazard Map
 
-**Document version:** 1.0  
-**Date:** 2026-06-17  
+**Document version:** 1.1  
+**Date:** 2026-06-18  
 **Project:** VIGIA ADAS Edge Node (vigia-raspi)  
-**Status:** Engineering plan — pending implementation  
+**Status:** Approved for implementation  
 **Prerequisite:** Milestone M6 multimodal sensor fusion (complete)
 
 ---
@@ -12,7 +12,7 @@
 
 M7 turns fused pothole detections into a **durable, queryable hazard platform** — not a flat log of every frame. Each promoted detection becomes a versioned **observation**, syncs to a **PostGIS server**, clusters into **hazard entities**, and feeds a **hazard map UI**.
 
-**Hardware baseline (current BOM):** No NVMe SSD. Pi buffers events in RAM (`/dev/shm`); the **server database is the source of truth**. SD card is boot media only — not for event logging.
+**Hardware baseline (current BOM):** No NVMe SSD. Pi buffers events in RAM; the **server database is the source of truth**. SD card is boot media only — not for event logging.
 
 ---
 
@@ -43,7 +43,7 @@ Industry road-hazard systems separate three layers:
 |-------|---------|------------|
 | **Observation** | Per-detection signal | 30 Hz YOLO → thousands of duplicate rows |
 | **Hazard entity** | Deduplicated geo defect | Map becomes unusable noise |
-| **Projection** | Map, heatmaps, dashboards | Database rows never become user value |
+| **Projection** | Map, heatmaps, dashboards | DB rows never become user value |
 
 **Pipeline:** observation → promotion → persistence → projection
 
@@ -53,20 +53,23 @@ Industry road-hazard systems separate three layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Raspberry Pi 5 (edge)                                      │
-│  FusionEngine → EventPromoter → RAM ring (/dev/shm)         │
+│  Raspberry Pi 5 (edge) — vigia_app                          │
+│  midasLoop (full fusion) → EventPromoter → in-process ring  │
 │                      │                                      │
-│                      └── Sync agent (HTTPS, signed batches) │
+│                      └── Sync thread (HTTPS signed batches) │
 └──────────────────────────────┬──────────────────────────────┘
                                │
                                v
 ┌─────────────────────────────────────────────────────────────┐
 │  Server (canonical store)                                   │
-│  Ingest API → observations → hazard_entities (PostGIS)      │
+│  Ingest API → observations (append-only)                    │
+│            → hazard_entities (aggregated, PostGIS)          │
 │                      │                                      │
 │                      └── Hazard map API + MapLibre UI       │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Critical wiring rule:** EventPromoter runs **only** from `Coordinator::midasLoop` after full geometry + temporal fusion — **never** from the YOLO-only sync path in `processFrame()`.
 
 ---
 
@@ -76,40 +79,40 @@ Industry road-hazard systems separate three layers:
 
 | Component | What it is | Survives power loss? | Cost |
 |-----------|------------|----------------------|------|
-| `/dev/shm` | Software RAM disk (tmpfs) | **No** | $0 |
+| In-process event ring | Pre-allocated SPSC queue in `vigia_app` | **No** | $0 |
+| `/dev/shm` | Optional tmpfs for cross-process sync (not M7.0 default) | **No** | $0 |
 | SD card | Pi boot media | Yes | Already in BOM |
 | NVMe HAT + M.2 SSD | PCIe flash storage | Yes | ~$25–40 (not in BOM) |
 | PostGIS server | Cloud VPS or bench PC | Yes | $0–20/mo |
 | 18650 UPS | Battery + POWER_FAIL GPIO | N/A (runtime, not storage) | ~$15–40 |
 
-**Important:** `/dev/shm` is **not** crash-safe RAM. It is fast volatile buffer. Original VIGIA design uses **UPS + emergency uplink** (Phase 5 Anti-Death) for power-loss egress, not local durable storage.
+**Important:** RAM buffers are **not** crash-safe. Phase 5 Anti-Death (UPS + emergency uplink) handles controlled power loss.
 
 ### 4.2 Approved approach (M7.0 — no extra hardware)
 
-1. **Hot buffer:** Pre-allocated event ring in `/dev/shm/vigia-events/` (~250 KB–2 MB)
-2. **Continuous sync:** Async thread POSTs batches to server every ~5 s or N events
+1. **Hot buffer:** Pre-allocated in-process SPSC ring (~500 slots × ~512 B ≈ 250 KB)
+2. **Continuous sync:** Dedicated C++ sync thread inside `vigia_app` POSTs batches every ~5 s or N events
 3. **Canonical store:** Postgres + PostGIS on server
 4. **Graceful shutdown:** `systemd` stop hook drains queue before reboot
 5. **Power loss (Phase 5):** UPS flush of unsynced queue in ~10–15 s window
 
-**Do not log hazard events to the SD card** — wear, corruption risk, and explicit architecture ban.
+**Do not log hazard events to the SD card.**
 
-### 4.3 When to add local SSD (optional M7.1)
+**M7.0 does not use a separate Python sync sidecar** — one binary, one sync thread. Defer `vigia_sync_agent.py` unless sync is split into a separate process later.
 
-Add **USB SSD** (~$20–35) or **NVMe HAT** (~$25–40) only if field testing shows:
+### 4.3 Edge dedup vs server dedup
 
-- Long offline driving without network
-- Cold LTE connect too slow for UPS flush
-- Need crash-safe local WAL before sync
+| Layer | Scope | Behavior |
+|-------|-------|----------|
+| **Edge EventPromoter** | Same drive session, ~5 m / ~30 s | Suppress repeat pass-by observations |
+| **Server `observations`** | Fleet-wide | **Append-only** — every accepted ingest is a row |
+| **Server `hazard_entities`** | Fleet-wide, persistent | Merge nearby observations; update severity/count |
 
-### 4.4 UPS vs NVMe
+Reinforcement = new observation row + updated hazard entity aggregate — never UPDATE-in-place on observations.
 
-| Scenario | Server sync | UPS helps? | NVMe helps? |
-|----------|-------------|------------|-------------|
-| Normal driving (Wi-Fi/LTE up) | Continuous upload | N/A | Optional |
-| Controlled power cut | Flush in UPS window | Yes | Backup if network slow |
-| Kernel panic | Only already-synced data | No | Yes (if WAL fsync'd) |
-| Hours offline then power cut | Lost unless synced earlier | Last seconds only | Full backlog |
+### 4.4 When to add local SSD (optional M7.1)
+
+Add **USB SSD** (~$20–35) only if field testing shows long offline routes or crash-safe local WAL is required before sync.
 
 ---
 
@@ -117,38 +120,49 @@ Add **USB SSD** (~$20–35) or **NVMe HAT** (~$25–40) only if field testing sh
 
 ### 5.1 EventPromoter
 
-Runs after full async fusion (YOLO + MiDaS + temporal + sensors):
+Runs **only** after full async fusion in `midasLoop` (YOLO + MiDaS geometry + temporal + sensors):
 
-1. **RRI gate:** `finalConfidence >= 0.75`
-2. **GPS gate:** valid fix (`fix_type >= 2`, `hdop <= 2.5`) or bench override
-3. **Spatial-temporal dedup:** ~5 m + ~30 s window — reinforce, don't duplicate
-4. **Async handoff:** SPSC ring → sync thread (never block fusion hot path)
+1. **Path gate:** `geometry_confidence > 0` (proves MiDaS path ran) — blocks YOLO-only false promotions
+2. **RRI gate:** `finalConfidence >= 0.75`
+3. **GPS gate:** valid fix (`fix_type >= 2`, `hdop <= 2.5`) or `gps.require_valid: false` for bench
+4. **Spatial-temporal dedup:** ~5 m + ~30 s — reinforce locally, don't spam queue
+5. **Async handoff:** SPSC ring → sync thread (zero heap alloc in `midasLoop`)
 
-### 5.2 HazardObservation struct (proposed)
+**Map pin placement:** Use GPS lat/lon only. Bounding box is evidence metadata — do not geoproject pixel boxes without camera calibration.
+
+### 5.2 HazardObservation struct (v1)
+
+Hot-path safe — no `std::string`, no heap:
 
 ```cpp
 struct HazardObservation {
-    uuid event_id;           // UUIDv7
+    uint8_t  event_id[16];      // UUIDv7 raw bytes
+    uint64_t device_seq;        // monotonic anti-replay counter
     uint64_t frame_index;
-    uint64_t timestamp_us;
-    std::string device_id;
-    float rri, iss, yolo_conf, geometry_conf, temporal_conf;
-    cv::Rect bbox;
-    double lat, lon;
-    float speed_ms, hdop;
-    uint32_t gps_fix_type;
+    uint64_t timestamp_us;      // monotonic boot time (Pi)
+    char     device_id[32];     // loaded once from config at init
+    uint8_t  hazard_class;      // 0 = pothole (reserve for future classes)
+    float    rri, iss, yolo_conf, geometry_conf, temporal_conf;
+    int32_t  bbox_x, bbox_y, bbox_w, bbox_h;
+    double   lat, lon;
+    float    speed_ms, hdop;
+    uint8_t  gps_fix_type;
+    bool     gps_valid;
 };
 ```
+
+JSON serialization and signing happen **only in the sync thread**.
 
 ### 5.3 New modules
 
 | File | Role |
 |------|------|
-| `include/hazard_event.hpp` | Struct + JSON serializer |
-| `include/event_promoter.hpp` | Threshold, dedup, queue |
-| `include/event_store.hpp` | RAM ring + sync |
-| `include/event_signer.hpp` | Canonical JSON sign before upload |
-| `src/coordinator.cpp` | Wire promoter after fusion |
+| `include/hazard_event.hpp` | Struct + JSON serializer (sync thread only) |
+| `include/event_promoter.hpp` | Threshold, dedup, SPSC enqueue |
+| `include/event_store.hpp` | Ring buffer + sync thread |
+| `include/event_signer.hpp` | Canonical JSON hash + HMAC sign |
+| `src/coordinator.cpp` | Call promoter from `midasLoop` only |
+| `config/device.yaml.example` | Device ID, thresholds, sync endpoint |
 
 ---
 
@@ -158,69 +172,98 @@ struct HazardObservation {
 
 **observations** — append-only ingest (idempotent on `event_id`)
 
-**hazard_entities** — deduplicated map features (spatial merge across fleet)
+```sql
+observations (
+  event_id UUID PRIMARY KEY,
+  device_id TEXT NOT NULL,
+  device_seq BIGINT NOT NULL,
+  hazard_id UUID REFERENCES hazard_entities(hazard_id),  -- set after merge
+  hazard_class SMALLINT NOT NULL DEFAULT 0,
+  observed_at TIMESTAMPTZ NOT NULL,
+  location GEOGRAPHY(POINT, 4326),
+  rri, iss, yolo_conf, geometry_conf, temporal_conf REAL,
+  bbox JSONB,
+  speed_mps, hdop REAL,
+  trust_level TEXT NOT NULL,          -- assigned by server on ingest
+  raw_payload JSONB,
+  ingested_at TIMESTAMPTZ DEFAULT now()
+);
+```
 
-**device_registry** — fleet identity, last sequence (anti-replay)
+**hazard_entities** — deduplicated map features
+
+**device_registry** — fleet identity, last `device_seq` (anti-replay)
 
 ### 6.2 API endpoints
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /v1/events` | Signed ingest |
-| `GET /v1/hazards?bbox=...` | Map viewport |
-| `GET /v1/hazards/{id}` | Detail + history |
+| `POST /v1/events` | Signed ingest (single or batch) |
+| `GET /v1/hazards?bbox=...&min_severity=...` | Map viewport |
+| `GET /v1/hazards/{id}` | Detail + linked observations |
 | `GET /v1/hazards/heatmap?bbox=...` | Density buckets |
 | `GET /v1/devices/{id}/events` | Fleet view |
 
 ### 6.3 Hazard map UI
 
-Minimal **MapLibre GL JS** app in `web/hazard-map/` — pins by severity, cluster at low zoom, filter by `trust_level`.
+Minimal **MapLibre GL JS** in `web/hazard-map/` — filter by `trust_level`; public view excludes unverified pins.
 
 ---
 
 ## 7. Security (build in M7 — do not defer)
 
-Crowdsourced hazard maps fail when ingest is open. **Authenticate from the first event.**
-
 ### 7.1 M7 requirements (software trust)
 
 | Control | Implementation |
 |---------|----------------|
-| Transport | TLS 1.3 only |
-| Device auth | mTLS client certificate (dev: signed requests) |
-| Anti-replay | Monotonic `device_seq` + timestamp window |
+| Transport | TLS 1.3 (HTTPS only in production) |
+| Device auth | mTLS client cert; dev: HMAC + device key on localhost |
+| Anti-replay | Monotonic `device_seq` per device (DB transaction) |
 | Integrity | HMAC/Ed25519 over canonical JSON |
-| Trust labeling | `trust_level`: unverified → software_signed → hardware_attested |
 | Rate limits | Per device (e.g. 60 events/min) |
+
+**Client must not set `trust_level`.** Server assigns on ingest:
+
+| After verify | trust_level |
+|--------------|-------------|
+| mTLS + signature + replay OK | `software_signed` |
+| + `signed_et` ECDSA OK (M6) | `hardware_attested` |
+| Multiple devices corroborate | `corroborated` |
 
 ### 7.2 Deferred to M3/M4/M6 (hardware trust)
 
 - ATECC608A ECDSA over 96-byte `EtHashInput`
 - Pico→Pi AEAD binary packets
 - Full server ECDSA verify pipeline
-- Multi-device corroboration for public map promotion
 
-### 7.3 Map trust policy
+### 7.3 Dev vs production security ramp
 
-| trust_level | Public map |
+| Environment | Acceptable |
 |-------------|------------|
-| unverified | Fleet/dev view only |
-| software_signed | Provisioned fleet devices |
-| hardware_attested | Full promotion (M6+) |
-| corroborated | Multiple devices agree |
+| Local Docker | HMAC + device key, HTTP localhost |
+| Field demo | mTLS self-signed fleet CA |
+| Internet-facing | mTLS + proper PKI, no anonymous ingest |
 
-### 7.4 Example event envelope
+### 7.4 Example event envelope (client payload)
 
 ```json
 {
-  "event_id": "uuid-v7",
+  "event_id": "0192a1b2-...",
   "device_id": "vigia-dev-001",
   "device_seq": 99102,
   "observed_at": "2026-06-17T14:32:01.042Z",
+  "hazard_class": 0,
+  "location": { "lat": 12.9716, "lon": 77.5946 },
+  "hazard": {
+    "rri": 0.82, "iss": 0.45,
+    "yolo_conf": 0.91, "geometry_conf": 0.78, "temporal_conf": 0.85,
+    "bbox": [120, 200, 80, 60],
+    "frame_index": 104892
+  },
+  "motion": { "speed_mps": 8.3, "hdop": 1.2, "fix_type": 3 },
   "payload_hash": "sha256-hex",
   "signature": "base64-hmac",
-  "signed_et": null,
-  "trust_level": "unverified"
+  "signed_et": null
 }
 ```
 
@@ -236,11 +279,12 @@ dedup:
   window_s: 30.0
 storage:
   mode: ram_sync
-  event_ring_dir: "/dev/shm/vigia-events"
-  sync_state: "/dev/shm/vigia-sync.state"
+  ring_capacity: 512
 sync:
-  endpoint: "https://api.example.com/v1/events"
+  endpoint: "http://127.0.0.1:8080/v1/events"
   batch_size: 50
+  interval_s: 5
+  hmac_key_file: "/etc/vigia/device.key"   # gitignored; dev provisioning
 gps:
   require_valid: true
   max_hdop: 2.5
@@ -248,27 +292,21 @@ gps:
 
 ---
 
-## 9. Delivery phases
+## 9. Delivery phases (parallel-friendly)
 
-### M7a — Edge event productization
-- HazardObservation struct + JSON schema v1
-- EventPromoter + Coordinator wiring
-- RAM ring + async sync
+| Track | Scope | Directory | Can run in parallel? |
+|-------|-------|-----------|---------------------|
+| **M7a** | Edge promoter + ring + sync thread | `include/`, `src/`, `config/` | Yes |
+| **M7b** | PostGIS + FastAPI ingest + auth | `server/`, `docker-compose.yml` | Yes |
+| **M7c** | MapLibre UI | `web/hazard-map/` | After M7b API stable |
+| **M7d** | UPS flush, USB WAL, ATECC | firmware + edge | Later |
 
-### M7b — Secure server + ingest
-- PostGIS schema + Docker dev stack
-- mTLS + anti-replay + signature verify
-- device_registry + provisioning script
+**Recommended build order:**
 
-### M7c — Hazard map
-- REST geo API + MapLibre UI
-- Sync agent with signed payloads
-- trust_level map filters
-
-### M7d — Hardening (later)
-- UPS emergency flush (Phase 5)
-- Optional USB SSD local WAL (M7.1)
-- ATECC hardware attestation (M3/M4/M6)
+1. M7b server skeleton + Docker (mock ingest → map stub)
+2. M7a edge wired to real fusion → POST to server
+3. M7c hazard map UI
+4. M7d hardening
 
 ---
 
@@ -276,46 +314,60 @@ gps:
 
 | Test | Validates |
 |------|-----------|
-| event_promoter_test | Dedup, RRI 0.75 gate, GPS gate |
-| event_store_test | Ring overflow, sync cursor |
-| ingest_api_test | Idempotency, replay/tamper rejection |
-| security_ingest_test | mTLS + signature + seq window |
-| hazard_merge_test | Cross-device spatial merge |
-| Field run | Pothole appears on map after sync |
+| `event_promoter_test` | Dedup, RRI gate, GPS gate, rejects YOLO-only path |
+| `event_store_test` | Ring overflow, sync cursor, idempotent re-upload |
+| `ingest_api_test` | Idempotency, replay/tamper rejection |
+| `security_ingest_test` | HMAC/mTLS + seq window |
+| `hazard_merge_test` | Two devices same coords → one entity, two observations |
+| Field run | Pothole pin on map after sync |
 
 ---
 
-## 11. Success criteria
+## 11. Pre-build checklist
 
-- RRI >= 0.75 + valid GPS → one deduplicated hazard per 5 m / 30 s window
-- Synced events durable on server; hazard map shows geo pins
+- [x] EventPromoter only on MiDaS-complete fusion path
+- [x] `device_seq` + `event_id` on edge struct
+- [x] Fixed-size types in hot path (no heap in promoter)
+- [x] Server assigns `trust_level`
+- [x] Append-only observations + aggregated hazard_entities
+- [x] Single C++ sync thread (no Python sidecar for M7.0)
+- [x] `observations.hazard_id` FK for map detail
+- [x] Bench mode via `gps.require_valid: false`
+
+---
+
+## 12. Success criteria
+
+- RRI >= 0.75 + valid GPS + full fusion → one deduplicated observation per 5 m / 30 s pass
+- Synced events durable on server; hazard map shows geo pins at GPS coordinates
 - Ingest rejects unauthenticated, replayed, tampered requests
-- Public map respects trust_level policy
-- Fusion hot path: zero new heap allocations
+- Public map respects `trust_level` policy
+- Fusion hot path: zero new heap allocations in promoter enqueue path
 
 ---
 
-## 12. Non-goals for M7
+## 13. Non-goals for M7
 
-- ROS 2 migration (design for it; implement plain C++ first)
+- ROS 2 migration (design for it; plain C++ first)
 - NVIDIA Cosmos 3 integration
 - Public anonymous reporting
 - Full ATECC on every event (schema ready; hardware is M3/M4)
+- Python sync sidecar (M7.0)
 - Custom vector tile server
 
 ---
 
-## 13. Research pointers for teammates
+## 14. Research pointers for teammates
 
 | Topic | Starting points |
 |-------|-----------------|
 | PostGIS spatial queries | `ST_DWithin`, geography types, bbox fetch |
 | Event dedup / clustering | H3 geohash, DBSCAN on geo points |
 | mTLS device provisioning | Smallstep, OpenSSL, AWS IoT cert patterns |
-| Hardware attestation | Microchip ATECC608A, `EtHashInput` in `03_pico2_firmware_contracts.md` |
-| Fleet telematics trust | Waze sybil problems; HERE/map provider corroboration models |
+| Hardware attestation | ATECC608A, `EtHashInput` in `03_pico2_firmware_contracts.md` |
+| Fleet telematics trust | Waze sybil problems; corroboration models |
 | Edge buffer patterns | WAL, idempotent ingest, at-least-once delivery |
 
 ---
 
-*Generated from VIGIA M7 engineering plan. Repository: vigia-raspi*
+*Repository: vigia-raspi — Plan v1.1 approved for implementation.*

@@ -1,0 +1,21 @@
+device_id: "vigia-dev-001"
+
+rri_threshold: 0.75
+
+dedup:
+  radius_m: 5.0
+  window_s: 30.0
+
+storage:
+  mode: ram_sync
+  ring_capacity: 512
+
+sync:
+  endpoint: "http://127.0.0.1:8080/v1/events"
+  batch_size: 50
+  interval_s: 5
+  hmac_key_file: "/etc/vigia/device.key"   # gitignored; dev provisioning
+
+gps:
+  require_valid: true
+  max_hdop: 2.5

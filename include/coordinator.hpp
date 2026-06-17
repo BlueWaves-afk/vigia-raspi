@@ -19,6 +19,7 @@
 namespace vigia {
 
 class SensorBridge;  // forward-declared; include sensor_bridge.hpp only in .cpp
+class EventStore;    // forward-declared; include event_store.hpp only in .cpp
 
 class Coordinator {
 public:
@@ -38,6 +39,9 @@ public:
     // The bridge must outlive the Coordinator.
     // If never called the pipeline runs vision-only (ISS = 0, no geo-tag).
     void setSensorBridge(SensorBridge& bridge);
+
+    // M7: wire event logging — call before start(). Must outlive Coordinator.
+    void setEventStore(EventStore& store);
 
 private:
     void captureLoop();
@@ -60,6 +64,8 @@ private:
         float speedMs{0.0f};
         double gpsLat{0.0};
         double gpsLon{0.0};
+        float gpsHdop{99.0f};
+        uint8_t gpsFixType{0};
         bool gpsValid{false};
     };
     SensorSnapshot querySensors() const;
@@ -70,6 +76,7 @@ private:
     TemporalAnalyzer& temporal_;
     FusionEngine& fusion_;
     SensorBridge* sensorBridge_{nullptr};
+    EventStore* eventStore_{nullptr};
     mutable SensorProcessor sensorProcessor_;
 
     long targetFrameTimeMs_;

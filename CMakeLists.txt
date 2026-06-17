@@ -35,10 +35,26 @@ find_package(OpenCV REQUIRED)
 find_package(OpenVINO REQUIRED)
 find_package(Threads REQUIRED)
 
-# Optional: Add the 3rdparty TBB if needed for parallel processing
+# Optional HTTP sync (libcurl) and HMAC signing (OpenSSL)
+find_package(CURL QUIET)
+find_package(OpenSSL QUIET)
+
+if(CURL_FOUND)
+    message(STATUS "libcurl found — HTTPS event sync enabled")
+else()
+    message(STATUS "libcurl not found — event sync falls back to stdout")
+endif()
+
+if(OpenSSL_FOUND)
+    message(STATUS "OpenSSL found — HMAC event signing enabled")
+else()
+    message(STATUS "OpenSSL not found — event signing uses dev stubs")
+endif()
+
+# ── Core Library (vigia_lib) ─────────────────────────────────────────────────
 set(TBB_DIR "/opt/intel/openvino_2025/runtime/3rdparty/tbb/lib/cmake/TBB")
 find_package(TBB QUIET)
-# ── Core Library (vigia_lib) ─────────────────────────────────────────────────
+
 # Every agent / engine source file in src/, excluding main.cpp.
 set(VIGIA_LIB_SOURCES
     src/perception.cpp
@@ -52,6 +68,10 @@ set(VIGIA_LIB_SOURCES
     src/iss_filter.cpp
     src/iss_compute.cpp
     src/sensor_processor.cpp
+    src/hazard_event.cpp
+    src/event_promoter.cpp
+    src/event_signer.cpp
+    src/event_store.cpp
 )
 
 add_library(vigia_lib STATIC ${VIGIA_LIB_SOURCES})
@@ -69,6 +89,16 @@ target_link_libraries(vigia_lib
         Threads::Threads                   # -pthread (POSIX threads)
         ${CMAKE_DL_LIBS}                   # -ldl     (dlopen / plugin loading)
 )
+
+if(CURL_FOUND)
+    target_compile_definitions(vigia_lib PUBLIC VIGIA_HAVE_CURL)
+    target_link_libraries(vigia_lib PUBLIC CURL::libcurl)
+endif()
+
+if(OpenSSL_FOUND)
+    target_compile_definitions(vigia_lib PUBLIC VIGIA_HAVE_OPENSSL)
+    target_link_libraries(vigia_lib PUBLIC OpenSSL::Crypto)
+endif()
 
 # ── Main Executable (vigia_app) ──────────────────────────────────────────────
 add_executable(vigia_app src/main.cpp)
