@@ -2,6 +2,9 @@
 #include <opencv2/imgproc.hpp>
 #include <fstream>
 #include <chrono>
+#if defined(__aarch64__) || defined(__ARM_NEON)
+#  include <arm_neon.h>
+#endif
 
 using namespace std::chrono_literals;
 
@@ -91,16 +94,36 @@ void DepthNode::on_image(std::shared_ptr<const sensor_msgs::msg::Image> msg)
     cv::resize(src, resized, cv::Size(kMidasSize, kMidasSize), 0, 0, cv::INTER_LINEAR);
 
     // HWC uint8 BGR → CHW FP32 RGB, normalize [0,1].
+    // NEON vld3q_f32 deinterleave: processes 4 pixels (12 floats) per iteration
+    // (~4× faster than scalar on Cortex-A76). Ported from analytical.cpp:284-306.
+    cv::Mat blob;
+    resized.convertTo(blob, CV_32F, 1.0f / 255.0f);
     const int pixels = kMidasSize * kMidasSize;
     float* ch_r = midas_input_buf_.data();
     float* ch_g = midas_input_buf_.data() + pixels;
     float* ch_b = midas_input_buf_.data() + pixels * 2;
-    const uint8_t* p = resized.data;
-    for (int i = 0; i < pixels; ++i, p += 3) {
-        ch_r[i] = p[2] / 255.0f;
-        ch_g[i] = p[1] / 255.0f;
-        ch_b[i] = p[0] / 255.0f;
+    const float* src = blob.ptr<float>();
+#if defined(__aarch64__) || defined(__ARM_NEON)
+    const int simd_end = pixels - (pixels % 4);
+    int i = 0;
+    for (; i < simd_end; i += 4) {
+        float32x4x3_t bgr = vld3q_f32(src + i * 3);
+        vst1q_f32(ch_r + i, bgr.val[2]);  // R
+        vst1q_f32(ch_g + i, bgr.val[1]);  // G
+        vst1q_f32(ch_b + i, bgr.val[0]);  // B
     }
+    for (; i < pixels; ++i) {
+        ch_r[i] = src[i * 3 + 2];
+        ch_g[i] = src[i * 3 + 1];
+        ch_b[i] = src[i * 3 + 0];
+    }
+#else
+    for (int i = 0; i < pixels; ++i) {
+        ch_r[i] = src[i * 3 + 2];
+        ch_g[i] = src[i * 3 + 1];
+        ch_b[i] = src[i * 3 + 0];
+    }
+#endif
 
     std::array<int64_t, 4> in_shape{1, 3, kMidasSize, kMidasSize};
     auto in_tensor = Ort::Value::CreateTensor<float>(

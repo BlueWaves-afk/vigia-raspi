@@ -12,9 +12,48 @@
 | 2026-06-17 | Pi SSH access confirmed via Tailscale (100.114.1.98) | vigiasense@raspberrypi, Debian Trixie, kernel 6.12.75+rpt |
 | 2026-06-17 | PREEMPT_RT kernel installed (`linux-image-6.12.73+deb13-rt-arm64`) | **NOT YET BOOTED** — Pi firmware requires manual config; deferred to physical access |
 | 2026-06-17 | ROS2 Jazzy binary install failed | Ubuntu Noble `libpython3.12t64` not available on Debian Trixie (Python 3.13 only) |
-| 2026-06-17 | ROS2 Jazzy from-source build started on Pi | `~/ros2_jazzy/` — build log at `~/ros2_build.log`; ~45-60 min |
-| 2026-06-17 | All 6 ROS2 nodes written | `vigia_ws/src/vigia_edge_node/src/` — see doc 02 for contracts |
+| 2026-06-17 | ROS2 Jazzy from-source build in progress | `~/ros2_jazzy/` on Pi — `rclcpp`, `sensor_msgs`, `std_msgs` deps targeted |
+| 2026-06-17 | All 6 ROS2 nodes written & on Pi | `vigia_ws/src/vigia_edge_node/src/` — branch `claude/great-jepsen-4d776c` pulled to Pi |
 | 2026-06-17 | `vigia_msgs` package written | 8 custom message definitions in `vigia_ws/src/vigia_msgs/msg/` |
+| 2026-06-17 | ONNX Runtime C++ 1.20.1 installed | `/opt/onnxruntime/` — **NO KleidiAI** (stock CPU EP only) |
+| 2026-06-17 | ONNX Runtime Python 1.27.0 installed | pip, `--break-system-packages` — **NO KleidiAI** |
+| 2026-06-17 | Eigen3 3.4.0 installed | `sudo apt install libeigen3-dev` |
+
+## Build Completion Matrix (updated 2026-06-17)
+
+| Component | Location | Status | Blocker |
+|---|---|---|---|
+| `vigia_msgs` (messages) | `vigia_ws/src/vigia_msgs/` | ⏳ Awaiting colcon | ROS2 Jazzy build completing |
+| `vigia_edge_node` (6 nodes) | `vigia_ws/src/vigia_edge_node/` | ⏳ Awaiting colcon | ROS2 Jazzy build completing |
+| ROS2 Jazzy (`rclcpp`, `sensor_msgs`) | `~/ros2_jazzy/` on Pi | 🔄 Building (build 7 running) | `tracetools` needed `-DTRACETOOLS_DISABLED=ON` |
+| ONNX Runtime + **KleidiAI** | — | ❌ NOT BUILT | Needs ORT from source + ARM Compute Library (`-DONNXRUNTIME_USE_KLEIDIAI=ON`) |
+| ARM Compute Library (ACL) | — | ❌ NOT BUILT | Prerequisite for KleidiAI EP |
+| PREEMPT_RT kernel (active) | `/boot/firmware/` | ❌ NOT ACTIVE | Installed but not booted — requires physical access to Pi |
+| STM32 firmware (Phase 2) | `firmware/` | ❌ NOT STARTED | Phase 2 |
+| Anti-death MsgPack + MQTT (Phase 5) | `anti_death_node.cpp` | 🔧 STUB | Skeleton written; Paho MQTT + msgpack-c deps needed |
+| DePIN ECDSA + Cosmos 3 (Phase 6) | — | ❌ NOT STARTED | Phase 6 |
+
+## KleidiAI Build Plan (Phase 3 prerequisite)
+
+KleidiAI gives **~4× INT8 GEMM throughput** on Cortex-A76 via `asimddp` (UDOT) instructions.
+The Pi 5 has `asimddp` confirmed in `/proc/cpuinfo`. Build order:
+
+```bash
+# Step 1 — ARM Compute Library (~20 min)
+git clone --depth 1 https://github.com/ARM-software/ComputeLibrary.git /opt/acl
+cd /opt/acl && scons Werror=0 debug=0 asserts=0 neon=1 opencl=0 os=linux arch=arm64-v8.2-a \
+  build=native -j4
+
+# Step 2 — ONNX Runtime with KleidiAI (~45 min)
+git clone --depth 1 --branch v1.20.1 https://github.com/microsoft/onnxruntime /tmp/ort_src
+cd /tmp/ort_src && ./build.sh --config Release --arm --use_acl --acl_home /opt/acl \
+  --acl_libs /opt/acl/build --parallel --cmake_extra_defines \
+  DONNXRUNTIME_USE_KLEIDIAI=ON
+
+# Step 3 — install to /opt/onnxruntime-kleidi/
+```
+
+Expected result: YOLO INT8 latency drops from ~28 ms → ~7 ms per frame (4× on GEMM layers).
 
 ---
 

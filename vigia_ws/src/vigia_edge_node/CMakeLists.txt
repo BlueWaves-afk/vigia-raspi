@@ -16,11 +16,39 @@ find_package(vigia_msgs         REQUIRED)
 find_package(OpenCV             REQUIRED COMPONENTS core imgproc videoio)
 find_package(Eigen3             REQUIRED)
 
-# ONNX Runtime — installed to /usr/local or /opt/onnxruntime
+# libsodium — Ed25519 signing for AWS telemetry (AntiDeathNode)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED libsodium)
+
+# libcurl — HTTPS POST to API Gateway (AntiDeathNode)
+find_package(CURL REQUIRED)
+
+# libgpiod — GPIO edge-wait for UPS POWER_FAIL (AntiDeathNode)
+pkg_check_modules(GPIOD libgpiod)
+if(GPIOD_FOUND)
+    message(STATUS "libgpiod found — real GPIO edge-wait enabled")
+else()
+    message(STATUS "libgpiod not found — GPIO poll fallback will be used")
+endif()
+
+# mbedTLS — for Phase 2 ECDSA signature verification (sig_valid flag)
+# Optional: if not found, SensorBridgeNode compiles but sig_valid stays false
+find_package(MbedTLS QUIET)
+if(MbedTLS_FOUND)
+    set(HAVE_MBEDTLS TRUE)
+    message(STATUS "mbedTLS found — Phase 2 ECDSA verify enabled")
+else()
+    set(HAVE_MBEDTLS FALSE)
+    message(STATUS "mbedTLS not found — Phase 2 sig_valid will always be false")
+endif()
+
+# ONNX Runtime — headers from KleidiAI build, lib from prebuilt 1.20.1
+# KleidiAI dir has include/onnxruntime/ structure matching our #include paths.
+# Prebuilt aarch64 1.20.1 supplies libonnxruntime.so (KleidiAI build lost the lib).
 find_path(ORT_INCLUDE_DIR onnxruntime/onnxruntime_cxx_api.h
-    PATHS /usr/local/include /opt/onnxruntime/include)
+    PATHS /opt/onnxruntime-kleidiai/include /usr/local/include)
 find_library(ORT_LIB onnxruntime
-    PATHS /usr/local/lib /opt/onnxruntime/lib)
+    PATHS /opt/onnxruntime-linux-aarch64-1.20.1/lib /usr/local/lib)
 
 if(NOT ORT_INCLUDE_DIR OR NOT ORT_LIB)
     message(WARNING "ONNX Runtime not found — VisionNode and DepthNode will not build")
@@ -50,7 +78,15 @@ target_include_directories(vigia_edge_node
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${EIGEN3_INCLUDE_DIRS}
+        ${SODIUM_INCLUDE_DIRS}
+        ${CURL_INCLUDE_DIRS}
         $<$<BOOL:${HAVE_ORT}>:${ORT_INCLUDE_DIR}>
+        $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_INCLUDE_DIRS}>
+)
+
+target_compile_definitions(vigia_edge_node PRIVATE
+    $<$<BOOL:${HAVE_MBEDTLS}>:VIGIA_HAVE_MBEDTLS>
+    $<$<BOOL:${GPIOD_FOUND}>:VIGIA_HAVE_LIBGPIOD>
 )
 
 ament_target_dependencies(vigia_edge_node
@@ -61,7 +97,11 @@ target_link_libraries(vigia_edge_node
     Eigen3::Eigen
     pthread
     rt
+    ${SODIUM_LIBRARIES}
+    ${CURL_LIBRARIES}
     $<$<BOOL:${HAVE_ORT}>:${ORT_LIB}>
+    $<$<BOOL:${HAVE_MBEDTLS}>:MbedTLS::mbedcrypto>
+    $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_LIBRARIES}>
 )
 
 install(TARGETS vigia_edge_node

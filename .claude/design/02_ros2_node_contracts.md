@@ -13,8 +13,8 @@ All source files written to `vigia_ws/src/vigia_edge_node/src/`:
 |---|---|---|---|
 | `CameraNode` | `camera_node.cpp` | ✅ Written | Seqlock shm write + IPC publish; pre-alloc buffers |
 | `VisionNode` | `vision_node.cpp` | ✅ Written | NEON `vld3q_u8` transpose; ONNX INT8; ACL EP commented out pending build verify |
-| `DepthNode` | `depth_node.cpp` | ✅ Written | FP32 only; thermal adaptive stride; zero-copy tensor read |
-| `FusionNode` | `fusion_node.cpp` | ✅ Written | Gravity comp (Eigen quaternion); Kalman 2D; ISS; RRI |
+| `DepthNode` | `depth_node.cpp` | ✅ Written | FP32 only; thermal adaptive stride; NEON `vld3q_f32` CHW transpose (ported from `analytical.cpp:284`); zero-copy tensor read |
+| `FusionNode` | `fusion_node.cpp` | ✅ Written | Gravity comp (Eigen quaternion); Kalman 2D; ISS; RRI; full plane-fitting `computeDepthResiduals()` (ported from `analytical.cpp:382`); `TemporalAnalyzer` circular buffer (ported from `temporal.cpp`); geometry confidence `dep*exp(-roughness*10)` (ported from `fusion.cpp:25`) |
 | `SensorBridgeNode` | `sensor_bridge_node.cpp` | ✅ Written | COBS state machine; anti-replay seq check; ECDSA stub |
 | `AntiDeathNode` | `anti_death_node.cpp` | ✅ Written | State machine skeleton; GPIO stub (libgpiod Phase 5) |
 
@@ -23,8 +23,10 @@ All source files written to `vigia_ws/src/vigia_edge_node/src/`:
 **Known TODOs before Phase 1 complete:**
 - Enable KleidiAI ACL EP in VisionNode once ONNX Runtime confirmed built with ACL support
 - Replace GPIO sysfs stub in AntiDeathNode with `libgpiod` `event_wait()` (Phase 5)
-- YOLO NMS postprocessing in VisionNode (port from `src/perception.cpp`)
 - ECDSA mbedTLS verify in SensorBridgeNode (Phase 2)
+- ~~YOLO NMS postprocessing in VisionNode~~ ✅ DONE (2026-06-17) — Full NMS + multi-layout parser + letterbox inverse scaling ported from `src/perception.cpp` into `vision_node.cpp`
+- ~~Scalar CHW transpose in DepthNode~~ ✅ DONE (2026-06-17) — NEON `vld3q_f32` ported from `analytical.cpp:284`
+- ~~Wrong geometry/temporal confidence in FusionNode~~ ✅ DONE (2026-06-17) — Plane-fitting + TemporalAnalyzer ported from `analytical.cpp`, `temporal.cpp`, `fusion.cpp`
 
 ---
 
