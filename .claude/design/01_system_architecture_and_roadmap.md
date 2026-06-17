@@ -30,7 +30,7 @@
 | ARM Compute Library (ACL) | — | ❌ NOT BUILT | Prerequisite for KleidiAI EP |
 | PREEMPT_RT kernel (active) | `/boot/firmware/` | ❌ NOT ACTIVE | Installed but not booted — requires physical access to Pi |
 | STM32 firmware (Phase 2) | `firmware/` | ❌ NOT STARTED | Phase 2 |
-| Anti-death MsgPack + MQTT (Phase 5) | `anti_death_node.cpp` | 🔧 STUB | Skeleton written; Paho MQTT + msgpack-c deps needed |
+| Anti-death HTTPS POST (Phase 5) | `anti_death_node.cpp` | ✅ Written | libcurl HTTPS REST + Ed25519 signing; AWS API Gateway wired |
 | DePIN ECDSA + Cosmos 3 (Phase 6) | — | ❌ NOT STARTED | Phase 6 |
 
 ## KleidiAI Build Plan (Phase 3 prerequisite)
@@ -139,7 +139,7 @@ The migration is structured as **six engineering phases**, each with discrete ha
 | Vision Models | YOLOv26 Nano (ONNX, INT8, 320×320) + MiDaS v2.1 small (ONNX, INT8 eval) |
 | Sensor Protocol | COBS-encoded binary packets over USB-CDC (`/dev/ttyACM0`) |
 | Storage | `/dev/shm` volatile RAM disk — **no NVMe, no SD writes** |
-| Telemetry Uplink | MQTT over SIM7600 LTE module |
+| Telemetry Uplink | HTTPS REST (libcurl) → AWS API Gateway (Phase 1); SIM7600 LTE cellular for remote deployments (Phase 5) |
 | Security | ATECC608A (Pico 2) ECDSA secp256r1 — signs `E_t` kinematic context |
 | DePIN Target | NVIDIA Cosmos 3 world model (server-side attestation) |
 
@@ -377,9 +377,8 @@ This gives the anti-death handler a **wait-free snapshot path** — it never blo
   - Publish via MQTT to `vigia/events/{device_id}/hazard`
 - [ ] **SIM7600 LTE MQTT integration:**
   - Driver: AT command interface over `/dev/ttyUSB2` (or equivalent SIM7600 CDC ACM port)
-  - MQTT library: Eclipse Paho C++ async client
-  - TLS 1.2 (TLS 1.3 if SIM7600 firmware supports it — check AT+CSSLCFG)
-  - QoS 1 (at-least-once) for hazard events
+  - **Phase 1 transport (implemented):** libcurl HTTPS POST to AWS API Gateway `/telemetry` with Ed25519 signing
+  - **Phase 5 transport (planned):** SIM7600 LTE — AT command interface over `/dev/ttyUSB2`, Eclipse Paho MQTT, TLS 1.2, QoS 1
 - [ ] **State machine** for 15-second window:
   ```
   RUNNING → [UPS_GPIO_ASSERT] → CAPTURING_SNAPSHOT (≤2s)

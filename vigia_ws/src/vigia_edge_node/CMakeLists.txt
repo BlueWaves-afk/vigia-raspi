@@ -57,6 +57,20 @@ else()
     set(HAVE_ORT TRUE)
 endif()
 
+# KleidiAI ACL Execution Provider — only present when ORT is rebuilt from source
+# with --use_acl + ARM Compute Library. The prebuilt 1.20.1 is CPU-EP only.
+# KleidiAI INT8 UDOT MLAS kernels are baked into the ORT lib at build time (not an
+# explicit EP call) — so this only guards the ACL provider .so linkage.
+find_library(ACL_EP_LIB onnxruntime_providers_acl
+    PATHS /opt/onnxruntime-kleidiai/lib /opt/onnxruntime-linux-aarch64-1.20.1/lib /usr/local/lib)
+if(ACL_EP_LIB)
+    message(STATUS "KleidiAI ACL EP found: ${ACL_EP_LIB} — ACL provider enabled")
+    set(HAVE_ACL_EP TRUE)
+else()
+    message(STATUS "KleidiAI ACL EP not found — CPU EP only (rebuild ORT with --use_acl to enable)")
+    set(HAVE_ACL_EP FALSE)
+endif()
+
 # ── vigia_edge_node executable ─────────────────────────────────────────────
 
 set(NODE_SRCS
@@ -87,6 +101,7 @@ target_include_directories(vigia_edge_node
 target_compile_definitions(vigia_edge_node PRIVATE
     $<$<BOOL:${HAVE_MBEDTLS}>:VIGIA_HAVE_MBEDTLS>
     $<$<BOOL:${GPIOD_FOUND}>:VIGIA_HAVE_LIBGPIOD>
+    $<$<BOOL:${HAVE_ACL_EP}>:VIGIA_HAVE_ACL_EP>
 )
 
 ament_target_dependencies(vigia_edge_node
@@ -102,6 +117,7 @@ target_link_libraries(vigia_edge_node
     $<$<BOOL:${HAVE_ORT}>:${ORT_LIB}>
     $<$<BOOL:${HAVE_MBEDTLS}>:MbedTLS::mbedcrypto>
     $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_LIBRARIES}>
+    $<$<BOOL:${HAVE_ACL_EP}>:${ACL_EP_LIB}>
 )
 
 install(TARGETS vigia_edge_node
@@ -109,5 +125,8 @@ install(TARGETS vigia_edge_node
 
 install(DIRECTORY config/
     DESTINATION share/${PROJECT_NAME}/config)
+
+install(FILES systemd/vigia-edge.service
+    DESTINATION share/${PROJECT_NAME}/systemd)
 
 ament_package()

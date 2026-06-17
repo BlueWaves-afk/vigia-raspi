@@ -2,6 +2,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <onnxruntime/onnxruntime_cxx_api.h>
+#if defined(VIGIA_HAVE_ACL_EP)
+#  include <onnxruntime/acl_provider_factory.h>
+#endif
 #include <opencv2/core.hpp>
 #include <arm_neon.h>
 #include <memory>

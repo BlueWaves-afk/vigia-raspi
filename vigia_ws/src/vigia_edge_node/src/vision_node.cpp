@@ -73,8 +73,13 @@ VisionNode::VisionNode(const rclcpp::NodeOptions & options)
     session_opts.SetIntraOpNumThreads(1);
     session_opts.SetInterOpNumThreads(1);
     session_opts.DisableMemPattern();
-    // ACL EP for KleidiAI INT8 UDOT — uncomment after ARM Compute Library build:
-    // OrtSessionOptionsAppendExecutionProvider_ACL(session_opts, 1);
+    // KleidiAI ACL Execution Provider — auto-enabled when ORT is rebuilt from source
+    // with --use_acl + libACL. CMake sets VIGIA_HAVE_ACL_EP when the provider .so is found.
+    // NOTE: KleidiAI MLAS INT8 UDOT kernels are separate — baked into ORT at compile time,
+    // not activated via this EP call. This only enables the explicit ACL operator dispatch.
+#if defined(VIGIA_HAVE_ACL_EP)
+    OrtSessionOptionsAppendExecutionProvider_ACL(session_opts, /*enable_fast_math=*/1);
+#endif
 
     session_ = std::make_unique<Ort::Session>(env_, model_path_.c_str(), session_opts);
 

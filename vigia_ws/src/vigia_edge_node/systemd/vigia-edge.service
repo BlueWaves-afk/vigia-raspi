@@ -1,0 +1,39 @@
+[Unit]
+Description=VIGIA ADAS DePIN Edge Node
+Documentation=https://github.com/VigiaLabs/vigia-raspi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vigiasense
+Group=vigiasense
+
+# Allow SCHED_FIFO for RT threads (AntiDeathNode runs at priority 99)
+AmbientCapabilities=CAP_SYS_NICE
+CapabilityBoundingSet=CAP_SYS_NICE
+
+# Source ROS2 and workspace, then launch
+ExecStart=/bin/bash -c '\
+  source /home/vigiasense/ros2_jazzy/install/setup.bash && \
+  source /home/vigiasense/vigia-raspi/vigia_ws/install/setup.bash && \
+  exec /home/vigiasense/vigia-raspi/vigia_ws/install/vigia_edge_node/lib/vigia_edge_node/vigia_edge_node \
+    --ros-args --params-file /home/vigiasense/vigia-raspi/vigia_ws/install/vigia_edge_node/share/vigia_edge_node/config/params.yaml'
+
+# Restart on crash — not on clean exit (e.g. AntiDeathNode initiated shutdown)
+Restart=on-failure
+RestartSec=3s
+
+# Give the process up to 20s to shut down cleanly (15s power window + margin)
+TimeoutStopSec=20s
+
+# Prevent OOM killer from hitting the edge node (it holds /dev/shm frame buffer)
+OOMScoreAdjust=-900
+
+# Log to journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vigia-edge
+
+[Install]
+WantedBy=multi-user.target

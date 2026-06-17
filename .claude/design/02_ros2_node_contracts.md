@@ -15,8 +15,8 @@ All source files written to `vigia_ws/src/vigia_edge_node/src/`:
 | `VisionNode` | `vision_node.cpp` | ✅ Written | NEON `vld3q_u8` transpose; ONNX INT8; ACL EP commented out pending build verify |
 | `DepthNode` | `depth_node.cpp` | ✅ Written | FP32 only; thermal adaptive stride; NEON `vld3q_f32` CHW transpose (ported from `analytical.cpp:284`); zero-copy tensor read |
 | `FusionNode` | `fusion_node.cpp` | ✅ Written | Gravity comp (Eigen quaternion); Kalman 2D; ISS; RRI; full plane-fitting `computeDepthResiduals()` (ported from `analytical.cpp:382`); `TemporalAnalyzer` circular buffer (ported from `temporal.cpp`); geometry confidence `dep*exp(-roughness*10)` (ported from `fusion.cpp:25`) |
-| `SensorBridgeNode` | `sensor_bridge_node.cpp` | ✅ Written | COBS state machine; anti-replay seq check; ECDSA stub |
-| `AntiDeathNode` | `anti_death_node.cpp` | ✅ Written | State machine skeleton; GPIO stub (libgpiod Phase 5) |
+| `SensorBridgeNode` | `sensor_bridge_node.cpp` | ✅ Updated Phase 2 (2026-06-17) | Dual-protocol auto-detect (text `'V'` vs COBS `0x00`); `select()` + 256-byte chunk reads; 200-sample IMU history ring buffer + `imu_at_or_before()`; `SensorHealth` publisher at 1 Hz; COBS decoder; `SignedEt` publish with `sig_valid=false` stub |
+| `AntiDeathNode` | `anti_death_node.cpp` | ✅ Wired to AWS (2026-06-17) | libgpiod FALLING_EDGE + poll fallback; Ed25519 signing (libsodium); HTTPS POST to API Gateway `/telemetry` via libcurl; full 15s state machine; `aws_telemetry_url` + `device_key_path` params |
 
 **Shared headers:** `rt_thread.hpp`, `vigia_qos.hpp`, `shm_ring_buffer.hpp`  
 **Entry point:** `main.cpp` with `mlockall(MCL_CURRENT|MCL_FUTURE)` + RT thread launch order  
@@ -247,14 +247,36 @@ bool             valid_fix           # fix_type >= 2 AND hdop <= 2.5
 
 ### 4.7 `vigia_msgs/msg/SignedEt.msg`
 ```
-# Kinematic context E_t signed by Pico 2 ATECC608A (secp256r1 ECDSA)
-# The Pi forwards this payload verbatim — it does NOT re-sign or modify.
-std_msgs/Header  header
-uint32           sequence            # Monotonic counter from sensor hub (anti-replay)
-uint64           mcu_timestamp_us    # Pico 2 hardware timer at signing time
-uint8[32]        et_hash             # SHA-256( IMU_quaternion ∥ GPS_PVT ∥ timestamp ∥ device_id )
-uint8[64]        ecdsa_signature     # secp256r1 DER-encoded signature from ATECC608A
-uint8[]          device_cert_der     # X.509 DER certificate chain (device + intermediate)
+# DePIN signed event telemetry packet (Phase 2 wire protocol)
+# Carries all IMU + GPS fields from the COBS SignedEtPacket plus signing artifacts.
+# sig_valid stays false until Ben wires ATECC608A and mbedTLS verify is enabled.
+std_msgs/Header header
+uint64 timestamp_us
+uint32 sequence
+
+# IMU (from BNO085 via Pico 2)
+float32 q_w
+float32 q_x
+float32 q_y
+float32 q_z
+float32 lin_accel_x
+float32 lin_accel_y
+float32 lin_accel_z
+uint8   calibration_status
+
+# GPS (from NEO-M8N via Pico 2)
+float64 lat
+float64 lon
+float32 speed_ms
+uint8   fix_type
+uint8   satellites_used
+float32 hdop
+bool    valid_fix
+
+# Signing (ATECC608A secp256r1 — zero-filled until SE is wired)
+uint8[32] et_hash       # SHA-256 of EtHashInput struct (96 bytes)
+uint8[64] ecdsa_sig     # secp256r1 ECDSA-SHA256 from atcab_sign()
+bool      sig_valid     # set true by SensorBridgeNode after mbedTLS verify passes
 ```
 
 ### 4.8 `vigia_msgs/msg/HazardEvent.msg`
@@ -608,9 +630,11 @@ Step 3 — ISS computation:
 
 #### Message Synchronization Policy
 
-- Use `message_filters::ApproximateTimeSynchronizer` on `detections` + `depth` (sync tolerance: 100 ms — MiDaS runs at stride, so exact sync is impossible).
-- IMU and GPS are consumed asynchronously via separate callbacks — always store latest sample in `latest_imu_` and `latest_gps_` class members.
-- When `detections` arrive: immediately compute RRI using latest cached IMU/GPS/depth state. Do not wait for all streams to align beyond the detection+depth sync pair.
+All five subscriptions use **independent callbacks with cached latest state** — no `message_filters` dependency. This is correct for an RT system where each stream runs at a different rate (IMU 100 Hz, GPS 10 Hz, YOLO ~28 Hz, MiDaS ~9 Hz at stride 3):
+
+- Each callback stores its message in `latest_imu_`, `latest_gps_`, `latest_depth_`, etc.
+- When `on_detections()` fires: immediately compute RRI using all currently cached state. Do not wait for stream alignment — stale depth/IMU is still better than blocking.
+- On skipped MiDaS frames (stride gating): `latest_depth_` retains the previous result. FusionNode uses it as-is; geometry confidence naturally degrades if the depth is stale by many frames (timestamps are checked).
 
 ---
 
@@ -668,7 +692,7 @@ Step 3 — ISS computation:
 **File:** `vigia_edge_node/src/anti_death_node.cpp` + `anti_death_node.hpp`
 
 #### Published Topics
-*None.* Emergency output goes directly to MQTT (SIM7600 LTE), bypassing the ROS 2 graph.
+*None.* Emergency output goes directly to AWS API Gateway via HTTPS POST (libcurl), bypassing the ROS 2 graph. Transport is REST, not MQTT — SIM7600 LTE MQTT was dropped in favour of cellular internet + HTTPS which requires no broker and works with the existing AWS API Gateway backend.
 
 #### Subscribed Topics
 
@@ -688,9 +712,8 @@ All subscriber callbacks do nothing except update `latest_*_` cached members und
 | `ups_gpio_line` | `int` | `17` | GPIO line number for UPS POWER_FAIL signal |
 | `ups_gpio_active_low` | `bool` | `true` | UPS POWER_FAIL asserted low (active-low signal) |
 | `power_window_seconds` | `double` | `15.0` | Total available time from GPIO assert to power loss |
-| `mqtt_broker_host` | `string` | — | MQTT broker hostname (required) |
-| `mqtt_broker_port` | `int` | `8883` | MQTT broker TLS port |
-| `mqtt_topic_prefix` | `string` | `vigia/events` | Topic: `{prefix}/{device_id}/hazard` |
+| `aws_telemetry_url` | `string` | `https://sq2ri2n51g.execute-api.us-east-1.amazonaws.com/prod/telemetry` | API Gateway telemetry endpoint |
+| `device_key_path` | `string` | `/etc/vigia/device_ed25519.key` | 32-byte Ed25519 seed for signing (provisioned once per device) |
 
 #### Executor & Thread Configuration
 
@@ -736,15 +759,13 @@ State: CAPTURING_SNAPSHOT  (budget: ≤2.0s)
   │  capture latest_signed_et_, latest_spatial_latent_, latest_hazard_event_
   ▼
 State: SERIALIZING          (budget: ≤3.0s)
-  │  msgpack::pack(payload)   → std::vector<uint8_t> blob
-  │  Attach: E_t (pre-signed by Pico 2), S_t (unsigned Phase 1)
+  │  Build TelemetryPayload from latest_hazard_ / latest_et_
+  │  sign_payload() → Ed25519 detached sig (libsodium)
+  │  build_json()   → inline JSON blob (no external lib)
   ▼
-State: MQTT_CONNECTING      (budget: ≤5.0s, with 3 retries × 1.5s backoff)
-  │  mqtt::async_client connect to broker:8883 (TLS 1.2 mutual auth)
-  ▼
-State: MQTT_TRANSMITTING    (budget: ≤4.0s)
-  │  mqtt::async_client::publish(topic, blob, QoS=1)
-  │  wait for PUBACK
+State: HTTPS_TRANSMIT       (budget: ≤8.0s, CURLOPT_CONNECTTIMEOUT=8, CURLOPT_TIMEOUT=12)
+  │  libcurl POST to aws_telemetry_url (SSL_VERIFYPEER=1)
+  │  expects HTTP 202 ACCEPTED
   ▼
 State: SAFE_SHUTDOWN        (remaining time)
      rclcpp::shutdown()
@@ -758,7 +779,7 @@ State: SAFE_SHUTDOWN        (remaining time)
 
 - `execute_emergency_sequence()` MUST run entirely on the `vigia_antideath` thread (SCHED_FIFO 99). It MUST NOT `co_await`, call `rclcpp::spin_some()`, or yield back to the executor.
 - The seqlock snapshot (§7) MUST be the first operation — before any serialization or network I/O — to maximize the captured frame count.
-- Eclipse Paho C++ async MQTT client MUST be initialized at node startup (not during emergency sequence). TLS context, certificates, and connection parameters loaded at startup. Only `publish()` is called during the emergency.
+- libcurl handle MUST be initialized at node startup (not during emergency sequence). SSL context and connection parameters loaded at startup. Only `curl_easy_perform()` is called during the emergency.
 - `sync()` call before shutdown ensures `journald` ring buffer is flushed to the ramoops kernel crash log (available after reboot for post-mortem).
 
 ---
