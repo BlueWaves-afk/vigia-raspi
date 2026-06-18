@@ -52,7 +52,7 @@ struct SignedEtPacketPi {
     uint8_t  _wire_pad[8];
 };
 #pragma pack(pop)
-static_assert(sizeof(SignedEtPacketPi) == 165, "SignedEtPacket size mismatch with firmware");
+static_assert(sizeof(SignedEtPacketPi) == 173, "SignedEtPacket size mismatch with firmware");
 
 // ── Text-line parsers (Phase 1 protocol) ──────────────────────────────────
 
