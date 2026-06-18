@@ -59,7 +59,8 @@ def main() -> None:
             except Exception:
                 pass
 
-    print(f"\nAll intermediate tensors{f' matching \\'{args.filter}\\'' if args.filter else ''}:")
+    filter_note = f" matching '{args.filter}'" if args.filter else ""
+    print(f"\nAll intermediate tensors{filter_note}:")
     print("-" * 72)
     count = 0
     for node in model.graph.node:
