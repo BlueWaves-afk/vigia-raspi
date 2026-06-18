@@ -78,7 +78,12 @@ public:
         uint32_t seq1 = slot->seq.load(std::memory_order_acquire);
         if (seq1 & 1u) return false;  // writer in progress
 
-        out_meta = *slot;  // struct copy (no pixel data yet)
+        // Copy fields individually — std::atomic<> has deleted copy-assignment.
+        out_meta.timestamp_us = slot->timestamp_us;
+        out_meta.frame_id     = slot->frame_id;
+        out_meta.width        = slot->width;
+        out_meta.height       = slot->height;
+        out_meta.channels     = slot->channels;
         std::memcpy(out_pixels, pixel_data_of(slot),
                     std::min(pixels_cap, static_cast<size_t>(frame_w_ * frame_h_ * 3)));
 

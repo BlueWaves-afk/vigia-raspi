@@ -1,4 +1,5 @@
 #include "fusion_node.hpp"
+#include "vigia_edge_node/vigia_rri.hpp"
 #include <opencv2/imgproc.hpp>
 #include <cmath>
 #include <algorithm>
@@ -247,23 +248,32 @@ float FusionNode::compute_temporal_confidence() const
 
 void FusionNode::fuse_and_maybe_publish()
 {
-    if (!latest_det_ || !latest_imu_) return;
+    // Detections are the minimum input. IMU/GPS/depth are all OPTIONAL — when
+    // the Pico is in stub mode the node degrades gracefully instead of going
+    // dead (design spec §6.4, was the G5 bug: `if (!latest_imu_) return;`).
+    if (!latest_det_) return;
 
-    // ISS — gravity-compensated.
-    float a_z  = gravity_compensate_z(*latest_imu_);
-    float v_ms = (latest_gps_ && latest_gps_->valid_fix)
-               ? latest_gps_->speed_ms
-               : kf_x_.norm();
-    float iss      = compute_iss(a_z, v_ms);
-    float iss_norm = std::min(iss / 10.0f, 1.0f);
+    // ISS — gravity-compensated. Only valid when an IMU sample is present.
+    const bool have_imu = static_cast<bool>(latest_imu_);
+    float iss = 0.0f, iss_norm = 0.0f;
+    if (have_imu) {
+        float a_z  = gravity_compensate_z(*latest_imu_);
+        float v_ms = (latest_gps_ && latest_gps_->valid_fix)
+                   ? latest_gps_->speed_ms
+                   : kf_x_.norm();
+        iss      = compute_iss(a_z, v_ms);
+        iss_norm = std::min(iss / 10.0f, 1.0f);
+    }
 
     // Best YOLO detection confidence.
     float yolo_conf = 0.0f;
     for (const auto & d : latest_det_->detections)
         yolo_conf = std::max(yolo_conf, d.confidence);
+    const bool have_yolo = !latest_det_->detections.empty();
 
     // Geometry confidence from plane-fitting depth residuals on best bbox.
     float geo_conf = 0.0f;
+    bool  have_geo = false;
     if (latest_depth_ && !latest_det_->detections.empty()) {
         const auto& best_det = *std::max_element(
             latest_det_->detections.begin(), latest_det_->detections.end(),
@@ -285,17 +295,31 @@ void FusionNode::fuse_and_maybe_publish()
             const float roughness  = stats.stdResidual;
             geo_conf = compute_geometry_confidence(depression, roughness);
             temporal_update(depression, roughness);
+            have_geo = true;
         }
     }
 
-    // Temporal confidence from circular history.
+    // Temporal confidence from circular history (only meaningful with depth).
     float temp_conf = compute_temporal_confidence();
+    const bool have_temporal = have_geo && temporal_count_ >= 2;
 
-    float rri = static_cast<float>(
-        w_yolo_    * yolo_conf  +
-        w_geometry_* geo_conf   +
-        w_temporal_* temp_conf  +
-        w_iss_     * iss_norm);
+    // Shared, degraded-mode-aware RRI (design spec §6.3). Absent terms drop out
+    // and the remaining weights renormalize, so a vision-only system still
+    // produces a meaningful score instead of returning early.
+    vigia::RriWeights weights;
+    weights.w_yolo     = static_cast<float>(w_yolo_);
+    weights.w_geometry = static_cast<float>(w_geometry_);
+    weights.w_temporal = static_cast<float>(w_temporal_);
+    weights.w_iss      = static_cast<float>(w_iss_);
+
+    vigia::RriInputs rin;
+    rin.have_yolo     = have_yolo;     rin.yolo_conf = yolo_conf;
+    rin.have_geometry = have_geo;      rin.geo_conf  = geo_conf;
+    rin.have_temporal = have_temporal; rin.temp_conf = temp_conf;
+    rin.have_iss      = have_imu;      rin.iss_norm  = iss_norm;
+
+    const float rri = vigia::compute_rri(weights, rin);
+    const vigia::RriTier tier = vigia::classify_tier(rin);
 
     if (rri < static_cast<float>(rri_threshold_)) return;
 
@@ -307,6 +331,8 @@ void FusionNode::fuse_and_maybe_publish()
     event->yolo_confidence     = yolo_conf;
     event->geometry_confidence = geo_conf;
     event->temporal_confidence = temp_conf;
+    event->degraded            = (tier != vigia::RriTier::kFull);
+    event->rri_tier            = static_cast<uint8_t>(tier);
     event->detections          = *latest_det_;
     if (latest_depth_)  event->depth_map  = *latest_depth_;
     if (latest_imu_)    event->imu_sample = *latest_imu_;

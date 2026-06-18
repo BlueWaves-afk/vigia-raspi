@@ -84,9 +84,9 @@ VisionNode::VisionNode(const rclcpp::NodeOptions & options)
     session_ = std::make_unique<Ort::Session>(env_, model_path_.c_str(), session_opts);
 
     Ort::AllocatorWithDefaultOptions alloc;
-    input_name_str_  = session_->GetInputNameAllocated(0, alloc).get();
-    input_names_str_.push_back(input_name_str_);
-    input_names_.push_back(input_names_str_[0].c_str());
+    input_names_storage_.push_back(session_->GetInputNameAllocated(0, alloc).get());
+
+    input_names_.push_back(input_names_storage_.back().c_str());
 
     // Primary detection head — always output[0].
     output_names_storage_.push_back(session_->GetOutputNameAllocated(0, alloc).get());
@@ -102,9 +102,6 @@ VisionNode::VisionNode(const rclcpp::NodeOptions & options)
     letterbox_buf_.resize(static_cast<size_t>(input_width_ * input_height_ * 3));
     chw_input_buf_.resize(static_cast<size_t>(input_width_ * input_height_ * 3));
     // Pre-allocate NMS scratch — cleared per frame, capacity kept.
-    nms_boxes_.reserve(256);
-    nms_scores_.reserve(256);
-    nms_class_ids_.reserve(256);
 
     pub_det_ = create_publisher<vigia_msgs::msg::DetectionArray>(
         "/vigia/detections", vigia::qos::inference_results());
@@ -166,10 +163,12 @@ static Letterbox letterbox_resize(const cv::Mat& src, cv::Mat& dst_buf,
 }
 
 // ── Full YOLO postprocess (ported from perception.cpp postprocess()) ──────
-std::vector<vigia_msgs::msg::Detection> VisionNode::postprocess(
+static std::vector<vigia_msgs::msg::Detection> postprocess(
     const Ort::Value&  output_tensor,
     const Letterbox&   lb,
-    const cv::Size&    orig_size)
+    const cv::Size&    orig_size,
+    float conf_threshold_, float nms_iou_threshold_,
+    int input_width_, int input_height_)
 {
     const float* data = output_tensor.GetTensorData<float>();
     auto shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
@@ -204,6 +203,9 @@ std::vector<vigia_msgs::msg::Detection> VisionNode::postprocess(
         }
     };
 
+    std::vector<cv::Rect> nms_boxes_;
+    std::vector<float>    nms_scores_;
+    std::vector<int>      nms_class_ids_;
     nms_boxes_.clear(); nms_scores_.clear(); nms_class_ids_.clear();
 
     for (size_t i = 0; i < num_det; ++i) {
@@ -298,10 +300,14 @@ void VisionNode::on_image(std::shared_ptr<const sensor_msgs::msg::Image> msg)
     det_msg->header             = msg->header;
     det_msg->frame_id           = static_cast<uint32_t>(std::stoul(msg->header.frame_id));
     det_msg->inference_latency_ms = ms;
-    det_msg->detections = postprocess(outputs[0], lb, cv::Size(msg->width, msg->height));
+    det_msg->detections = postprocess(outputs[0], lb, cv::Size(msg->width, msg->height),
+                                           conf_threshold_, nms_iou_threshold_, input_width_, input_height_);
     pub_det_->publish(std::move(det_msg));
 
     // ── Publish SpatialLatent S_t ─────────────────────────────────────────
+    // The latent output is [1, 256, 20, 20] (C2PSA neck, model.22/cv2/act).
+    // Global average pool over the 20×20 spatial dims → 256-D vector.
+    // This matches the 256-D default BLE stream target with no projection needed.
     auto lat_msg = std::make_unique<vigia_msgs::msg::SpatialLatent>();
     lat_msg->header            = msg->header;
     lat_msg->frame_id          = static_cast<uint32_t>(std::stoul(msg->header.frame_id));
@@ -309,9 +315,23 @@ void VisionNode::on_image(std::shared_ptr<const sensor_msgs::msg::Image> msg)
     if (outputs.size() > 1) {
         const float* ld  = outputs[1].GetTensorData<float>();
         auto ls          = outputs[1].GetTensorTypeAndShapeInfo().GetShape();
-        size_t elems     = 1;
-        for (auto d : ls) elems *= static_cast<size_t>(d);
-        lat_msg->latent_vector.assign(ld, ld + elems);
+        // If shape is [1, C, H, W], global-avg-pool → [C] = 256-D latent.
+        if (ls.size() == 4 && ls[0] == 1) {
+            const size_t C = static_cast<size_t>(ls[1]);
+            const size_t HW = static_cast<size_t>(ls[2] * ls[3]);
+            lat_msg->latent_vector.resize(C, 0.0f);
+            for (size_t c = 0; c < C; ++c) {
+                float sum = 0.0f;
+                for (size_t i = 0; i < HW; ++i)
+                    sum += ld[c * HW + i];
+                lat_msg->latent_vector[c] = sum / static_cast<float>(HW);
+            }
+        } else {
+            // Flat layout — assign directly (e.g. after explicit avg-pool in model).
+            size_t elems = 1;
+            for (auto d : ls) elems *= static_cast<size_t>(d);
+            lat_msg->latent_vector.assign(ld, ld + elems);
+        }
     }
     pub_lat_->publish(std::move(lat_msg));
 }

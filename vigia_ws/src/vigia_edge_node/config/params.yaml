@@ -8,8 +8,10 @@ camera_node:
 
 vision_node:
   ros__parameters:
-    model_path: "models/yolov26/yolov26_nano_int8.onnx"
-    latent_layer_name: ""      # Set after Netron inspection of the ONNX graph
+    model_path: "models/yolo26/vigia_v26n_int8_convonly_with_latent.onnx"
+    # C2PSA neck output (model.22/cv2/act), shape [1,256,20,20].
+    # VisionNode global-avg-pools this to 256-D → SpatialLatent topic.
+    latent_layer_name: "/model.22/cv2/act/Mul_output_0"
     conf_threshold: 0.25
     nms_iou_threshold: 0.45
     input_width: 320

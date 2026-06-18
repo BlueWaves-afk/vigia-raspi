@@ -102,26 +102,26 @@ void DepthNode::on_image(std::shared_ptr<const sensor_msgs::msg::Image> msg)
     float* ch_r = midas_input_buf_.data();
     float* ch_g = midas_input_buf_.data() + pixels;
     float* ch_b = midas_input_buf_.data() + pixels * 2;
-    const float* src = blob.ptr<float>();
+    const float* blob_ptr = blob.ptr<float>();
 #if defined(__aarch64__) || defined(__ARM_NEON)
     const int simd_end = pixels - (pixels % 4);
     int i = 0;
     for (; i < simd_end; i += 4) {
-        float32x4x3_t bgr = vld3q_f32(src + i * 3);
+        float32x4x3_t bgr = vld3q_f32(blob_ptr + i * 3);
         vst1q_f32(ch_r + i, bgr.val[2]);  // R
         vst1q_f32(ch_g + i, bgr.val[1]);  // G
         vst1q_f32(ch_b + i, bgr.val[0]);  // B
     }
     for (; i < pixels; ++i) {
-        ch_r[i] = src[i * 3 + 2];
-        ch_g[i] = src[i * 3 + 1];
-        ch_b[i] = src[i * 3 + 0];
+        ch_r[i] = blob_ptr[i * 3 + 2];
+        ch_g[i] = blob_ptr[i * 3 + 1];
+        ch_b[i] = blob_ptr[i * 3 + 0];
     }
 #else
     for (int i = 0; i < pixels; ++i) {
-        ch_r[i] = src[i * 3 + 2];
-        ch_g[i] = src[i * 3 + 1];
-        ch_b[i] = src[i * 3 + 0];
+        ch_r[i] = blob_ptr[i * 3 + 2];
+        ch_g[i] = blob_ptr[i * 3 + 1];
+        ch_b[i] = blob_ptr[i * 3 + 0];
     }
 #endif
 

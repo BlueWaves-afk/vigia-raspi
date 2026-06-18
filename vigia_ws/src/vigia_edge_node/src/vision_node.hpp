@@ -50,5 +50,7 @@ private:
     // ONNX node names (ASCII, kept alive for session Run call)
     std::vector<const char*> input_names_;
     std::vector<const char*> output_names_;
+    std::vector<std::string> input_names_storage_;
     std::vector<std::string> output_names_storage_;
+    cv::Mat preproc_resized_;
 };

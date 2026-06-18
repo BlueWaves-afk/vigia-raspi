@@ -11,11 +11,11 @@
 //                 signature: base58(sig), publicKey: base58(pubkey),
 //                 frame_base64: "<optional JPEG>" }
 //
-// Key provisioning (one-time on Pi):
-//   python3 -c "import nacl.signing; k=nacl.signing.SigningKey.generate(); \
-//     open('/etc/vigia/device_ed25519.key','wb').write(bytes(k)); \
-//     open('/etc/vigia/device_pubkey.b58','w').write(k.verify_key.encode(encoder=nacl.encoding.Base58Encoder).decode())"
-//   # Then POST to /register-device with the base58 public key
+// Key provisioning (one-time on Pi): see docs/device_provisioning.md.
+//   The 32-byte Ed25519 seed is written to /etc/vigia/device_ed25519.key and
+//   the base58 public key is registered via POST /register-device.
+//   (pynacl has no nacl.encoding.Base58Encoder — base58 is done inline; this
+//    is also why base58_encode() below is implemented from scratch.)
 //
 // GPIO: libgpiod event_wait() on UPS POWER_FAIL line (active-low).
 //       Requires libgpiod-dev; falls back to poll stub if not available.
@@ -253,7 +253,10 @@ std::string AntiDeathNode::build_json(const TelemetryPayload & p,
     j << "\"lon\":"         << std::setprecision(7) << p.lon << ",";
     j << "\"timestamp\":\"" << esc(p.timestamp_iso) << "\",";
     j << "\"confidence\":"  << std::setprecision(4) << p.confidence << ",";
-    j << "\"geohash\":\""   << esc(p.geohash) << "\",";
+    // geohash intentionally omitted (design spec §8.2, decision D5): the
+    // backend recomputes it from lat/lon. It is NOT part of the signed payload
+    // (VIGIA:type:lat:lon:ts:confidence), so omitting it does not affect the
+    // Ed25519 signature.
     j << "\"signature\":\""  << esc(sig) << "\",";
     j << "\"publicKey\":\""  << esc(device_pubkey_b58_) << "\"";
     if (!p.frame_base64.empty()) {
@@ -437,8 +440,8 @@ void AntiDeathNode::run_emergency_sequence()
         if (hazard) {
             p.hazard_type  = "pothole";      // Phase 1: single hazard class from YOLO
             p.confidence   = hazard->rri_score;
-            p.lat          = hazard->gps_pvt.lat;
-            p.lon          = hazard->gps_pvt.lon;
+            p.lat          = hazard->gps_pvt.latitude;
+            p.lon          = hazard->gps_pvt.longitude;
         } else if (et) {
             // Fall back to GPS from signed_et packet
             p.hazard_type = "road_hazard";

@@ -51,7 +51,7 @@ struct SignedEtPacketPi {
     uint8_t  ecdsa_sig[64];
 };
 #pragma pack(pop)
-static_assert(sizeof(SignedEtPacketPi) == 173, "SignedEtPacket size mismatch with firmware");
+static_assert(sizeof(SignedEtPacketPi) == 165, "SignedEtPacket size mismatch with firmware");
 
 // ── Text-line parsers (Phase 1 protocol) ──────────────────────────────────
 
@@ -336,8 +336,8 @@ void SensorBridgeNode::process_text_line(const std::string & line)
         auto msg = std::make_unique<vigia_msgs::msg::GpsPvt>();
         msg->header.stamp    = now();
         msg->header.frame_id = "gps";
-        msg->lat             = gps->latitude;
-        msg->lon             = gps->longitude;
+        msg->latitude             = gps->latitude;
+        msg->longitude             = gps->longitude;
         msg->speed_ms        = gps->speed_ms;
         msg->fix_type        = gps->fix_type;
         msg->satellites_used = gps->satellites;
