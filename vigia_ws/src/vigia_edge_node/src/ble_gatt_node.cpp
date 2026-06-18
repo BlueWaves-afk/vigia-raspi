@@ -5,13 +5,17 @@
 #include <chrono>
 #include <cstring>
 #include <functional>
+#include <random>
+
+#ifdef VIGIA_HAVE_MBEDTLS
+#  include <mbedtls/ctr_drbg.h>
+#  include <mbedtls/entropy.h>
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BlueZ D-Bus object paths / interfaces used by this node.
-// See: https://git.kernel.org/pub/scm/bluetooth/bluez.git/tree/doc/gatt-api.txt
+// BlueZ D-Bus constants
 // ─────────────────────────────────────────────────────────────────────────────
 static constexpr const char* kBluezService     = "org.bluez";
-static constexpr const char* kAdapterIface     = "org.bluez.Adapter1";
 static constexpr const char* kGattMgrIface     = "org.bluez.GattManager1";
 static constexpr const char* kLeAdvMgrIface    = "org.bluez.LEAdvertisingManager1";
 static constexpr const char* kGattSvcIface     = "org.bluez.GattService1";
@@ -27,13 +31,76 @@ static constexpr const char* kAttestObjPath    = "/com/vigia/ble/service0/char3"
 static constexpr const char* kAdvObjPath       = "/com/vigia/ble/advertisement0";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Handshake wire protocol constants (design spec §4.2a)
+// ─────────────────────────────────────────────────────────────────────────────
+namespace proto = vigia::ble::proto;
+static constexpr uint8_t kHello     = proto::kHello;     // 0x01
+static constexpr uint8_t kChallenge = proto::kChallenge; // 0x02
+static constexpr uint8_t kResponse  = proto::kResponse;  // 0x03
+static constexpr uint8_t kConfirm   = proto::kBound;     // 0x04 — CONFIRM on wire
+static constexpr uint8_t kError     = proto::kErr;       // 0xFF
+
+static constexpr size_t kNonceBytes  = 32;
+static constexpr size_t kPubBytes    = 65;   // uncompressed P-256: 0x04 || X(32) || Y(32)
+static constexpr size_t kHmacBytes   = 32;
+// Minimum RESPONSE frame: [0x03][nonce_phone(32)][Phone_pub(65)][sig(at least 1 byte)]
+static constexpr size_t kResponseMinLen = 1 + kNonceBytes + kPubBytes + 1;
+
+// HKDF info string (design spec §4.2a)
+static const std::string kHkdfInfo = "vigia-ble-v1";
+// HMAC CONFIRM label
+static const std::string kConfirmLabel = "VIGIA-CONFIRM";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utility: generate cryptographically random bytes
+// ─────────────────────────────────────────────────────────────────────────────
+static std::vector<uint8_t> random_bytes(size_t n)
+{
+#ifdef VIGIA_HAVE_MBEDTLS
+    static mbedtls_entropy_context  entropy;
+    static mbedtls_ctr_drbg_context ctr_drbg;
+    static bool seeded = false;
+    if (!seeded) {
+        mbedtls_entropy_init(&entropy);
+        mbedtls_ctr_drbg_init(&ctr_drbg);
+        const char* pers = "vigia_rand";
+        mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                               reinterpret_cast<const uint8_t*>(pers), strlen(pers));
+        seeded = true;
+    }
+    std::vector<uint8_t> out(n);
+    mbedtls_ctr_drbg_random(&ctr_drbg, out.data(), n);
+    return out;
+#else
+    // Fallback: getrandom via /dev/urandom (no mbedTLS)
+    std::vector<uint8_t> out(n);
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (f) { fread(out.data(), 1, n, f); fclose(f); }
+    return out;
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 BleGattNode::BleGattNode(const rclcpp::NodeOptions& options)
     : Node("ble_gatt_node", options)
 {
-    ble_adapter_  = declare_parameter<std::string>("ble_adapter",  "hci0");
-    device_id_    = declare_parameter<std::string>("device_id",    "vigia-001");
-    stream_hz_    = static_cast<float>(declare_parameter<double>("stream_hz",     5.0));
-    default_dims_ = declare_parameter<int>("default_dims", 256);
+    ble_adapter_       = declare_parameter<std::string>("ble_adapter",       "hci0");
+    device_id_         = declare_parameter<std::string>("device_id",         "vigia-001");
+    stream_hz_         = static_cast<float>(declare_parameter<double>("stream_hz", 5.0));
+    default_dims_      = declare_parameter<int>("default_dims", 256);
+    identity_key_path_ = declare_parameter<std::string>("identity_key_path",
+                             vigia::VigiaIdentityKey::kDefaultPath);
+
+#ifdef VIGIA_HAVE_MBEDTLS
+    try {
+        identity_key_ = std::make_unique<vigia::VigiaIdentityKey>(identity_key_path_);
+        RCLCPP_INFO(get_logger(), "Pi identity key loaded from %s", identity_key_path_.c_str());
+    } catch (const std::exception& ex) {
+        RCLCPP_WARN(get_logger(),
+                    "Identity key not found (%s) — ECDH auth disabled; run vigia-pair-qr --provision",
+                    ex.what());
+    }
+#endif
 
     sub_latent_ = create_subscription<vigia_msgs::msg::SpatialLatent>(
         "/vigia/spatial_latent", vigia::qos::inference_results(),
@@ -58,20 +125,15 @@ BleGattNode::~BleGattNode()
 void BleGattNode::on_latent(vigia_msgs::msg::SpatialLatent::ConstSharedPtr msg)
 {
     std::lock_guard<std::mutex> lk(mailbox_mutex_);
-    latest_latent_  = msg->latent_vector;
-    mailbox_ready_  = !latest_latent_.empty();
+    latest_latent_ = msg->latent_vector;
+    mailbox_ready_ = !latest_latent_.empty();
 }
 
 void BleGattNode::on_detections(vigia_msgs::msg::DetectionArray::ConstSharedPtr msg)
 {
-    // Derive a lightweight continuous RRI proxy from detection confidence.
-    // Full RRI (with IMU/depth) is computed in FusionNode; this is the
-    // "stream RRI" described in §6.3 — max detection confidence, renormalized.
     float rri = 0.0f;
-    for (const auto& d : msg->detections)
-        rri = std::max(rri, d.confidence);
+    for (const auto& d : msg->detections) rri = std::max(rri, d.confidence);
     rri = std::min(rri, 1.0f);
-
     std::lock_guard<std::mutex> lk(mailbox_mutex_);
     latest_rri_ = rri;
 }
@@ -81,38 +143,20 @@ std::vector<uint8_t> BleGattNode::encode_current_frame()
 {
     std::lock_guard<std::mutex> lk(mailbox_mutex_);
     if (!mailbox_ready_) return {};
-
-    vigia::DimsCode dims = (default_dims_ == 512)
-                           ? vigia::DimsCode::k512
-                           : vigia::DimsCode::k256;
-
+    vigia::DimsCode dims = (default_dims_ == 512) ? vigia::DimsCode::k512 : vigia::DimsCode::k256;
     return vigia::encode_frame(latest_rri_, dims, latest_latent_);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// D-Bus / BlueZ main loop.
-//
-// Phase 1 (skeleton): registers the GATT application and advertisement with
-// BlueZ, then fires a notify timer at stream_hz. The TELEMETRY_CHAR value is
-// updated on the timer and BlueZ relays it to the subscribed central.
-//
-// Phase 2 (auth, §4): add HANDSHAKE_CHAR ReadValue/WriteValue handlers and
-// the ECDH session-key state machine.
+// D-Bus / BlueZ main loop with Phase 2 ECDH handshake.
 // ─────────────────────────────────────────────────────────────────────────────
 void BleGattNode::dbus_thread_main()
 {
     try {
         auto conn = sdbus::createSystemBusConnection();
-
-        // ── Discover adapter object path ─────────────────────────────────
         const std::string adapter_path = "/org/bluez/" + ble_adapter_;
 
-        // ── Register GATT Application ────────────────────────────────────
-        // BlueZ requires an ObjectManager on the app root. sdbus-c++ v2 uses
-        // the createObject API. We register stub GATT objects; BlueZ reads
-        // their properties via GetAll / GetManagedObjects.
-
-        // Service object
+        // ── Service object ────────────────────────────────────────────────────
         auto svc_obj = sdbus::createObject(*conn, kSvcObjPath);
         svc_obj->addVTable(
             sdbus::registerInterface(kGattSvcIface)
@@ -124,8 +168,8 @@ void BleGattNode::dbus_thread_main()
                 )
         ).forInterface(kGattSvcIface);
 
-        // TELEMETRY_CHAR — Notify only (no read/write from phone)
-        std::vector<uint8_t> telemetry_value;  // updated by timer below
+        // ── TELEMETRY_CHAR ────────────────────────────────────────────────────
+        std::vector<uint8_t> telemetry_value;
         auto tel_obj = sdbus::createObject(*conn, kTelemetryObjPath);
         tel_obj->addVTable(
             sdbus::registerInterface(kGattCharIface)
@@ -135,7 +179,8 @@ void BleGattNode::dbus_thread_main()
                     sdbus::defineProperty("Service").withGetter(
                         [](){ return sdbus::ObjectPath(kSvcObjPath); }),
                     sdbus::defineProperty("Flags").withGetter(
-                        [](){ return std::vector<std::string>{"notify", "encrypt-authenticated-read"}; }),
+                        [](){ return std::vector<std::string>{"notify",
+                                                              "encrypt-authenticated-read"}; }),
                     sdbus::defineProperty("Value").withGetter(
                         [&telemetry_value](){ return telemetry_value; })
                 )
@@ -145,7 +190,10 @@ void BleGattNode::dbus_thread_main()
                 )
         ).forInterface(kGattCharIface);
 
-        // HANDSHAKE_CHAR — stub (Phase 2: ECDH handshake handlers go here)
+        // ── HANDSHAKE_CHAR — full Phase 2 ECDH ───────────────────────────────
+        // State is local to this lambda scope (D-Bus thread only).
+        std::vector<uint8_t> hs_notify_buf;  // populated by write handlers, emitted in main loop
+
         auto hs_obj = sdbus::createObject(*conn, kHandshakeObjPath);
         hs_obj->addVTable(
             sdbus::registerInterface(kGattCharIface)
@@ -159,25 +207,181 @@ void BleGattNode::dbus_thread_main()
                                                               "encrypt-authenticated-read",
                                                               "encrypt-authenticated-write"}; }),
                     sdbus::defineProperty("Value").withGetter(
-                        [](){ return std::vector<uint8_t>{}; })
+                        [&hs_notify_buf](){ return hs_notify_buf; })
                 )
                 .withMethods(
+                    // ReadValue — phone may poll; return current notification buffer
                     sdbus::registerMethod("ReadValue")
                         .withInputParamNames("options")
                         .withOutputParamNames("value")
-                        .implementedAs([](std::map<std::string,sdbus::Variant>){
-                            // Phase 2: return CHALLENGE message
-                            return std::vector<uint8_t>{vigia::ble::proto::kHello};
+                        .implementedAs([&hs_notify_buf](std::map<std::string,sdbus::Variant>){
+                            return hs_notify_buf;
                         }),
+
+                    // WriteValue — receives HELLO or RESPONSE from phone
                     sdbus::registerMethod("WriteValue")
                         .withInputParamNames("value", "options")
-                        .implementedAs([](std::vector<uint8_t>, std::map<std::string,sdbus::Variant>){
-                            // Phase 2: process RESPONSE message
+                        .implementedAs([this, &hs_notify_buf](
+                            std::vector<uint8_t> val,
+                            std::map<std::string,sdbus::Variant>)
+                        {
+                            if (val.empty()) return;
+                            const uint8_t opcode = val[0];
+
+                            // ── HELLO (0x01) → emit CHALLENGE ─────────────────
+                            if (opcode == kHello) {
+                                hs_state_   = HandshakeState::HelloReceived;
+                                session_key_.clear();
+
+#ifndef VIGIA_HAVE_MBEDTLS
+                                // No crypto — send a stub CHALLENGE and move to Failed.
+                                hs_notify_buf = {kError, 0x00};
+                                hs_state_ = HandshakeState::Failed;
+                                RCLCPP_WARN(rclcpp::get_logger("ble_gatt_node"),
+                                            "HELLO received but mbedTLS not compiled in");
+                                return;
+#else
+                                if (!identity_key_) {
+                                    hs_notify_buf = {kError, 0x01};
+                                    hs_state_ = HandshakeState::Failed;
+                                    RCLCPP_WARN(rclcpp::get_logger("ble_gatt_node"),
+                                                "HELLO received but no identity key loaded");
+                                    return;
+                                }
+
+                                // Generate nonce_pi (32 random bytes)
+                                hs_nonce_pi_ = random_bytes(kNonceBytes);
+
+                                // Get Pi's uncompressed public key (65 bytes)
+                                auto pi_pub = identity_key_->public_key_uncompressed();
+
+                                // Sign(nonce_pi || Pi_pub) with ECDSA-SHA256
+                                std::vector<uint8_t> to_sign;
+                                to_sign.insert(to_sign.end(), hs_nonce_pi_.begin(), hs_nonce_pi_.end());
+                                to_sign.insert(to_sign.end(), pi_pub.begin(), pi_pub.end());
+                                auto sig = identity_key_->sign(to_sign.data(), to_sign.size());
+
+                                // Build CHALLENGE frame: [0x02][nonce_pi(32)][Pi_pub(65)][sig]
+                                hs_notify_buf.clear();
+                                hs_notify_buf.push_back(kChallenge);
+                                hs_notify_buf.insert(hs_notify_buf.end(),
+                                                     hs_nonce_pi_.begin(), hs_nonce_pi_.end());
+                                hs_notify_buf.insert(hs_notify_buf.end(),
+                                                     pi_pub.begin(), pi_pub.end());
+                                hs_notify_buf.insert(hs_notify_buf.end(), sig.begin(), sig.end());
+
+                                RCLCPP_INFO(rclcpp::get_logger("ble_gatt_node"),
+                                            "HELLO received — emitting CHALLENGE (%zu bytes)",
+                                            hs_notify_buf.size());
+#endif
+                            }
+
+                            // ── RESPONSE (0x03) → verify + derive session key ─
+                            else if (opcode == kResponse) {
+                                if (hs_state_ != HandshakeState::HelloReceived) {
+                                    RCLCPP_WARN(rclcpp::get_logger("ble_gatt_node"),
+                                                "RESPONSE received in wrong state — ignoring");
+                                    return;
+                                }
+
+#ifndef VIGIA_HAVE_MBEDTLS
+                                hs_notify_buf = {kError, 0x00};
+                                hs_state_ = HandshakeState::Failed;
+                                return;
+#else
+                                if (val.size() < kResponseMinLen) {
+                                    RCLCPP_WARN(rclcpp::get_logger("ble_gatt_node"),
+                                                "RESPONSE too short: %zu bytes", val.size());
+                                    hs_notify_buf = {kError, 0x02};
+                                    hs_state_ = HandshakeState::Failed;
+                                    return;
+                                }
+
+                                // Parse: [0x03][nonce_phone(32)][Phone_pub(65)][ECDSA_sig...]
+                                const uint8_t* nonce_phone = val.data() + 1;
+                                const uint8_t* phone_pub   = val.data() + 1 + kNonceBytes;
+                                const uint8_t* phone_sig   = val.data() + 1 + kNonceBytes + kPubBytes;
+                                const size_t   phone_sig_len = val.size() - (1 + kNonceBytes + kPubBytes);
+
+                                if (phone_pub[0] != 0x04) {
+                                    RCLCPP_WARN(rclcpp::get_logger("ble_gatt_node"),
+                                                "RESPONSE: phone public key not uncompressed point");
+                                    hs_notify_buf = {kError, 0x03};
+                                    hs_state_ = HandshakeState::Failed;
+                                    return;
+                                }
+
+                                // Verify phone's ECDSA signature over (nonce_phone || nonce_pi || Phone_pub)
+                                std::vector<uint8_t> signed_data;
+                                signed_data.insert(signed_data.end(),
+                                                   nonce_phone, nonce_phone + kNonceBytes);
+                                signed_data.insert(signed_data.end(),
+                                                   hs_nonce_pi_.begin(), hs_nonce_pi_.end());
+                                signed_data.insert(signed_data.end(),
+                                                   phone_pub, phone_pub + kPubBytes);
+
+                                if (!vigia::VigiaIdentityKey::verify_peer(
+                                        phone_pub,
+                                        signed_data.data(), signed_data.size(),
+                                        phone_sig, phone_sig_len))
+                                {
+                                    RCLCPP_WARN(rclcpp::get_logger("ble_gatt_node"),
+                                                "RESPONSE: phone ECDSA signature invalid — rejecting");
+                                    hs_notify_buf = {kError, 0x04};
+                                    hs_state_ = HandshakeState::Failed;
+                                    return;
+                                }
+
+                                // ECDH: compute raw shared secret
+                                std::vector<uint8_t> shared_secret;
+                                try {
+                                    shared_secret = identity_key_->ecdh_shared_secret(phone_pub);
+                                } catch (const std::exception& ex) {
+                                    RCLCPP_ERROR(rclcpp::get_logger("ble_gatt_node"),
+                                                 "ECDH failed: %s", ex.what());
+                                    hs_notify_buf = {kError, 0x05};
+                                    hs_state_ = HandshakeState::Failed;
+                                    return;
+                                }
+
+                                // HKDF-SHA256: salt = nonce_pi || nonce_phone, info = "vigia-ble-v1"
+                                std::vector<uint8_t> salt;
+                                salt.insert(salt.end(), hs_nonce_pi_.begin(), hs_nonce_pi_.end());
+                                salt.insert(salt.end(), nonce_phone, nonce_phone + kNonceBytes);
+
+                                session_key_ = vigia::hkdf_sha256(
+                                    shared_secret.data(), shared_secret.size(),
+                                    salt.data(), salt.size(),
+                                    reinterpret_cast<const uint8_t*>(kHkdfInfo.data()),
+                                    kHkdfInfo.size(),
+                                    32);
+
+                                // HMAC CONFIRM: HMAC-SHA256(session_key, "VIGIA-CONFIRM" || nonce_pi || nonce_phone)
+                                std::vector<uint8_t> hmac_data;
+                                hmac_data.insert(hmac_data.end(), kConfirmLabel.begin(), kConfirmLabel.end());
+                                hmac_data.insert(hmac_data.end(), hs_nonce_pi_.begin(), hs_nonce_pi_.end());
+                                hmac_data.insert(hmac_data.end(), nonce_phone, nonce_phone + kNonceBytes);
+
+                                auto confirm_mac = vigia::hmac_sha256(
+                                    session_key_.data(), session_key_.size(),
+                                    hmac_data.data(), hmac_data.size());
+
+                                // Build CONFIRM frame: [0x04][HMAC(32)]
+                                hs_notify_buf.clear();
+                                hs_notify_buf.push_back(kConfirm);
+                                hs_notify_buf.insert(hs_notify_buf.end(),
+                                                     confirm_mac.begin(), confirm_mac.end());
+
+                                hs_state_ = HandshakeState::Bound;
+                                RCLCPP_INFO(rclcpp::get_logger("ble_gatt_node"),
+                                            "ECDH handshake complete — session established");
+#endif
+                            }
                         })
                 )
         ).forInterface(kGattCharIface);
 
-        // CONTROL_CHAR — phone→Pi commands (dim selection, pause/resume)
+        // ── CONTROL_CHAR — dim selection ──────────────────────────────────────
         auto ctrl_obj = sdbus::createObject(*conn, kControlObjPath);
         ctrl_obj->addVTable(
             sdbus::registerInterface(kGattCharIface)
@@ -204,7 +408,7 @@ void BleGattNode::dbus_thread_main()
                 )
         ).forInterface(kGattCharIface);
 
-        // ATTEST_CHAR — Pi→phone anti-spoof beacon (Phase 2, §6.6 stub)
+        // ── ATTEST_CHAR — stub (§6.6, blocked on ATECC608A hardware wiring) ──
         auto att_obj = sdbus::createObject(*conn, kAttestObjPath);
         att_obj->addVTable(
             sdbus::registerInterface(kGattCharIface)
@@ -225,13 +429,9 @@ void BleGattNode::dbus_thread_main()
                 )
         ).forInterface(kGattCharIface);
 
-        // ObjectManager on app root (required by BlueZ RegisterApplication)
+        // ── App root ObjectManager (required by BlueZ RegisterApplication) ────
         auto app_obj = sdbus::createObject(*conn, kAppObjPath);
-        // BlueZ calls GetManagedObjects to enumerate our GATT hierarchy.
-        // sdbus-c++ v2 auto-implements ObjectManager when objects are created
-        // under the same connection with paths below the app root.
 
-        // Register GATT application with BlueZ
         auto gatt_mgr = sdbus::createProxy(*conn, kBluezService, adapter_path);
         gatt_mgr->callMethod("RegisterApplication")
             .onInterface(kGattMgrIface)
@@ -239,7 +439,7 @@ void BleGattNode::dbus_thread_main()
                            std::map<std::string,sdbus::Variant>{})
             .dontExpectReply();
 
-        // ── Register LE Advertisement ────────────────────────────────────
+        // ── LE Advertisement ──────────────────────────────────────────────────
         const std::string short_name = "VIGIA-" + device_id_.substr(
             device_id_.size() > 4 ? device_id_.size() - 4 : 0);
 
@@ -273,35 +473,57 @@ void BleGattNode::dbus_thread_main()
             .dontExpectReply();
 
         RCLCPP_INFO(rclcpp::get_logger("ble_gatt_node"),
-                    "BlueZ GATT app + advertisement registered — advertising as '%s'",
+                    "BlueZ GATT + advertisement registered — advertising as '%s'",
                     short_name.c_str());
 
-        // ── Notify timer — stream_hz ─────────────────────────────────────
+        // ── Event loop ────────────────────────────────────────────────────────
         const auto interval_ms = std::chrono::milliseconds(
             static_cast<int>(1000.0f / stream_hz_));
-        auto last_notify = std::chrono::steady_clock::now();
+        auto last_notify    = std::chrono::steady_clock::now();
+        std::vector<uint8_t> prev_hs_buf;  // track changes to avoid redundant emits
 
-        // Process D-Bus events + fire notify timer until shutdown.
         while (!shutdown_.load(std::memory_order_relaxed)) {
-            conn->processPendingRequest();  // non-blocking D-Bus dispatch
+            conn->processPendingRequest();
 
             auto now = std::chrono::steady_clock::now();
+
+            // Emit HANDSHAKE_CHAR notification when the buffer changes
+            if (hs_notify_buf != prev_hs_buf && !hs_notify_buf.empty()) {
+                prev_hs_buf = hs_notify_buf;
+                hs_obj->emitSignal("PropertiesChanged")
+                    .onInterface("org.freedesktop.DBus.Properties")
+                    .withArguments(
+                        std::string(kGattCharIface),
+                        std::map<std::string, sdbus::Variant>{
+                            {"Value", sdbus::Variant(hs_notify_buf)}},
+                        std::vector<std::string>{});
+            }
+
+            // Emit TELEMETRY_CHAR notification at stream_hz — only when Bound
             if (now - last_notify >= interval_ms) {
                 last_notify = now;
-                auto frame = encode_current_frame();
-                if (!frame.empty()) {
-                    telemetry_value = frame;
-                    // Signal BlueZ that the characteristic value changed → notify.
-                    tel_obj->emitSignal("PropertiesChanged")
-                        .onInterface("org.freedesktop.DBus.Properties")
-                        .withArguments(
-                            std::string(kGattCharIface),
-                            std::map<std::string, sdbus::Variant>{
-                                {"Value", sdbus::Variant(telemetry_value)}},
-                            std::vector<std::string>{}
-                        );
+                const bool bound = (hs_state_ == HandshakeState::Bound);
+#ifdef VIGIA_HAVE_MBEDTLS
+                // Only stream after handshake unless no key is provisioned (dev mode)
+                const bool auth_ok = bound || !identity_key_;
+#else
+                const bool auth_ok = true;
+#endif
+                if (auth_ok) {
+                    auto frame = encode_current_frame();
+                    if (!frame.empty()) {
+                        telemetry_value = frame;
+                        tel_obj->emitSignal("PropertiesChanged")
+                            .onInterface("org.freedesktop.DBus.Properties")
+                            .withArguments(
+                                std::string(kGattCharIface),
+                                std::map<std::string, sdbus::Variant>{
+                                    {"Value", sdbus::Variant(telemetry_value)}},
+                                std::vector<std::string>{});
+                    }
                 }
             }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
