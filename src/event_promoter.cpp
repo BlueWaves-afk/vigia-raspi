@@ -30,9 +30,13 @@ double haversineMeters(double lat1, double lon1, double lat2, double lon2)
 
 EventPromoter::EventPromoter(Config cfg)
     : cfg_(cfg),
-      ring_capacity_(std::min(cfg.ring_capacity, ring_.size())),
+      ring_capacity_(std::min(std::max(cfg.ring_capacity, std::size_t{2}),
+                              ring_.size())),
       start_time_(std::chrono::steady_clock::now())
 {
+    // ring_capacity_ must be at least 2 (head != next prevents a 1-slot ring
+    // from ever accepting any item). Enforce this regardless of caller input so
+    // enqueue() can never produce a modulo-zero fault.
     std::strncpy(cfg_.device_id, cfg.device_id, sizeof(cfg_.device_id) - 1);
     cfg_.device_id[sizeof(cfg_.device_id) - 1] = '\0';
 }

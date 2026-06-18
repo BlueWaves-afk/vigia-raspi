@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <thread>
 #include <iostream>
 #include <fstream>
@@ -107,6 +108,14 @@ Coordinator::SensorSnapshot Coordinator::querySensors() const
         snap.gpsHdop    = gps->hdop;
         snap.gpsFixType = gps->fix_type;
     }
+
+    const auto signedEt = sensorBridge_->state().getLatestSignedEt();
+    if (signedEt && signedEt->sig_valid) {
+        snap.signedEtValid = true;
+        snap.signedEtSequence = signedEt->sequence;
+        std::memcpy(snap.etHash, signedEt->et_hash.data(), 32);
+    }
+
     return snap;
 }
 
@@ -129,8 +138,12 @@ void Coordinator::captureLoop() {
         while (running_) {
             cv::Mat frame;
             if (!perception_.captureFrame(frame)) {
-                // Video ended or camera disconnected — signal shutdown
+                // Video ended or camera disconnected — signal all loops to stop.
+                // midasQueue_ must be explicitly shut down here so midasLoop's
+                // wait_and_pop() is unblocked; otherwise midasThread_ deadlocks
+                // waiting for items that will never arrive.
                 running_ = false;
+                midasQueue_.shutdown();
                 break;
             }
 
@@ -224,6 +237,10 @@ void Coordinator::midasLoop() {
                     obs.hdop           = work.sensors.gpsHdop;
                     obs.gps_fix_type   = work.sensors.gpsFixType;
                     obs.gps_valid      = fout.gpsValid;
+                    obs.signed_et_valid = work.sensors.signedEtValid;
+                    obs.signed_et_sequence = work.sensors.signedEtSequence;
+                    if (work.sensors.signedEtValid)
+                        std::memcpy(obs.et_hash, work.sensors.etHash, 32);
                     eventStore_->promoter().submit(obs);
                 }
             }

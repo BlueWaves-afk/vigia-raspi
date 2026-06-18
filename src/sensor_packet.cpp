@@ -1,5 +1,6 @@
 #include "sensor_packet.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -10,6 +11,10 @@ bool startsWith(std::string_view line, std::string_view prefix) {
     return line.size() >= prefix.size() &&
            line.compare(0, prefix.size(), prefix) == 0;
 }
+
+/** Returns true when v is finite (not NaN, not Inf). */
+static bool isFiniteVal(float v) { return std::isfinite(v); }
+static bool isFiniteVal(double v) { return std::isfinite(v); }
 
 } // namespace
 
@@ -52,6 +57,14 @@ std::optional<ImuSample> parseImuLine(std::string_view line) {
 
     if (matched < 12)
         sample.qnorm = 0.0f;
+
+    // Reject NaN / Inf in any float field — a faulty IMU or corrupted UART byte
+    // could produce these and silently poison the fusion score or HMAC payload.
+    if (!isFiniteVal(sample.qw) || !isFiniteVal(sample.qx) ||
+        !isFiniteVal(sample.qy) || !isFiniteVal(sample.qz) ||
+        !isFiniteVal(sample.ax) || !isFiniteVal(sample.ay) ||
+        !isFiniteVal(sample.az) || !isFiniteVal(sample.qnorm))
+        return std::nullopt;
 
     return sample;
 }
@@ -109,6 +122,15 @@ std::optional<GpsFix> parseGpsLine(std::string_view line) {
     fix.fix_type = static_cast<uint8_t>(fix_type);
     fix.satellites = static_cast<uint8_t>(satellites);
     fix.valid = valid != 0;
+
+    // Reject physically impossible or non-finite coordinates.
+    if (!isFiniteVal(fix.latitude)  || !isFiniteVal(fix.longitude) ||
+        !isFiniteVal(fix.speed_ms) || !isFiniteVal(fix.hdop) ||
+        fix.latitude  < -90.0  || fix.latitude  > 90.0 ||
+        fix.longitude < -180.0 || fix.longitude > 180.0 ||
+        fix.speed_ms  < 0.0f   ||
+        fix.hdop      < 0.0f)
+        return std::nullopt;
 
     return fix;
 }
