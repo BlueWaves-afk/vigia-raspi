@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <limits>
 
+#ifdef VIGIA_HAVE_MBEDTLS
+#  include <mbedtls/sha256.h>
+#endif
+
 FusionNode::FusionNode(const rclcpp::NodeOptions & options)
 : Node("fusion_node", options)
 {
@@ -48,6 +52,16 @@ FusionNode::FusionNode(const rclcpp::NodeOptions & options)
     sub_et_ = create_subscription<vigia_msgs::msg::SignedEt>(
         "/vigia/signed_et", vigia::qos::signed_et(),
         std::bind(&FusionNode::on_signed_et, this, std::placeholders::_1));
+
+    // Open FrameMetadataRing as creator (FusionNode owns the shm lifetime).
+    try {
+        meta_ring_shm_ = std::make_unique<ShmMetaRing>(/*creator=*/true);
+        meta_ring_ = meta_ring_shm_->ring();
+        RCLCPP_INFO(get_logger(), "FrameMetadataRing created (%zu KB).",
+                    sizeof(FrameMetadataRing) / 1024);
+    } catch (const std::exception & e) {
+        RCLCPP_WARN(get_logger(), "FrameMetadataRing create failed (%s).", e.what());
+    }
 
     RCLCPP_INFO(get_logger(), "FusionNode ready: rri_threshold=%.2f device_id=%s",
                 rri_threshold_, device_id_.c_str());
@@ -321,6 +335,19 @@ void FusionNode::fuse_and_maybe_publish()
     const float rri = vigia::compute_rri(weights, rin);
     const vigia::RriTier tier = vigia::classify_tier(rin);
 
+    // Write per-frame metadata sidecar regardless of RRI threshold —
+    // AntiDeathNode needs all frames for the emergency snapshot.
+    {
+        const uint32_t fid = latest_det_->header.stamp.nanosec;  // proxy frame id
+        const uint64_t ts_us =
+            static_cast<uint64_t>(latest_det_->header.stamp.sec) * 1'000'000ULL +
+            latest_det_->header.stamp.nanosec / 1000ULL;
+        const uint8_t det_count =
+            static_cast<uint8_t>(
+                std::min<size_t>(latest_det_->detections.size(), 255));
+        write_frame_metadata(rri, iss, det_count, yolo_conf, fid, ts_us);
+    }
+
     if (rri < static_cast<float>(rri_threshold_)) return;
 
     auto event = std::make_unique<vigia_msgs::msg::HazardEvent>();
@@ -340,4 +367,58 @@ void FusionNode::fuse_and_maybe_publish()
     if (latest_et_)     event->signed_et  = *latest_et_;
 
     pub_hazard_->publish(std::move(event));
+}
+
+// ── FrameMetadataRing sidecar writer ─────────────────────────────────────────
+
+void FusionNode::write_frame_metadata(
+    float rri, float iss,
+    uint8_t det_count, float best_conf,
+    uint32_t frame_id, uint64_t ts_us)
+{
+    if (!meta_ring_) return;
+
+    FrameMetadata m{};
+    m.frame_id      = frame_id;
+    m.timestamp_us  = ts_us;
+    m.rri_score     = rri;
+    m.iss_score     = iss;
+    m.detection_count = det_count;
+    m.best_yolo_conf  = best_conf;
+
+    if (latest_imu_) {
+        m.q_w           = latest_imu_->q_w;
+        m.q_x           = latest_imu_->q_x;
+        m.q_y           = latest_imu_->q_y;
+        m.q_z           = latest_imu_->q_z;
+        m.lin_accel_x   = latest_imu_->lin_accel_x;
+        m.lin_accel_y   = latest_imu_->lin_accel_y;
+        m.lin_accel_z   = latest_imu_->lin_accel_z;
+        m.imu_cal_status = latest_imu_->calibration_status;
+    }
+
+    if (latest_gps_) {
+        m.latitude   = latest_gps_->latitude;
+        m.longitude  = latest_gps_->longitude;
+        m.altitude_m = latest_gps_->altitude_m;
+        m.speed_ms   = latest_gps_->speed_ms;
+        m.course_deg = latest_gps_->course_deg;
+        m.fix_type   = latest_gps_->fix_type;
+        m.satellites = latest_gps_->satellites_used;
+        m.hdop       = latest_gps_->hdop;
+    }
+
+    // Depth map integrity fingerprint — truncated SHA-256.
+#ifdef VIGIA_HAVE_MBEDTLS
+    if (latest_depth_ && !latest_depth_->data.empty()) {
+        uint8_t full_hash[32];
+        mbedtls_sha256(
+            reinterpret_cast<const uint8_t*>(latest_depth_->data.data()),
+            latest_depth_->data.size() * sizeof(float),
+            full_hash, /*is224=*/0);
+        std::memcpy(m.depth_hash_trunc, full_hash, 8);
+    }
+#endif
+
+    meta_ring_->write_metadata(m);
 }

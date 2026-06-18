@@ -7,6 +7,7 @@
 #include <cstddef>
 
 #include "vigia_edge_node/vigia_qos.hpp"
+#include "vigia_edge_node/frame_metadata_ring.hpp"
 #include "vigia_msgs/msg/detection_array.hpp"
 #include "vigia_msgs/msg/depth_map.hpp"
 #include "vigia_msgs/msg/imu_sample.hpp"
@@ -81,4 +82,10 @@ private:
     double kf_Q_{0.01}, kf_R_{0.5};
     double gps_hdop_max_{2.5};
     std::string device_id_;
+
+    // ── FrameMetadataRing sidecar (writer side) ──────────────────────────────
+    std::unique_ptr<ShmMetaRing> meta_ring_shm_;
+    FrameMetadataRing *          meta_ring_{nullptr};
+    void write_frame_metadata(float rri, float iss, uint8_t det_count, float best_conf,
+                              uint32_t frame_id, uint64_t ts_us);
 };

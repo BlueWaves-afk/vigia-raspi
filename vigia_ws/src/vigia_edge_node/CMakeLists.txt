@@ -79,6 +79,30 @@ else()
     set(HAVE_ACL_EP FALSE)
 endif()
 
+# Paho MQTT C++ — Phase 5 MQTT uplink for AntiDeathNode (doc 05 §7)
+# Install on Pi: sudo apt install libpaho-mqtt-dev libpaho-mqttpp-dev
+# When not found, AntiDeathNode falls back to legacy HTTPS POST via libcurl.
+pkg_check_modules(PAHO_MQTTPP paho-mqttpp3)
+if(PAHO_MQTTPP_FOUND)
+    message(STATUS "Paho MQTT C++ ${PAHO_MQTTPP_VERSION} found — Phase 5 MQTT path enabled")
+    set(HAVE_PAHO_MQTT TRUE)
+else()
+    message(STATUS "Paho MQTT C++ not found — AntiDeathNode uses legacy HTTPS fallback")
+    set(HAVE_PAHO_MQTT FALSE)
+endif()
+
+# msgpack-c — Phase 5 MsgPack serialization for AntiDeathNode payload
+# Install on Pi: sudo apt install libmsgpack-dev
+find_path(MSGPACK_INCLUDE_DIR msgpack.hpp
+    PATHS /usr/include /usr/local/include)
+if(MSGPACK_INCLUDE_DIR)
+    message(STATUS "msgpack-c found at ${MSGPACK_INCLUDE_DIR}")
+    set(HAVE_MSGPACK TRUE)
+else()
+    message(STATUS "msgpack-c not found — MsgPack serialization disabled")
+    set(HAVE_MSGPACK FALSE)
+endif()
+
 # sdbus-c++ — BlueZ D-Bus GATT server for BleGattNode (§3, app_dashcam_integration.md)
 pkg_check_modules(SDBUS sdbus-c++)
 if(SDBUS_FOUND)
@@ -119,6 +143,8 @@ target_include_directories(vigia_edge_node
         $<$<BOOL:${HAVE_ORT}>:${ORT_INCLUDE_DIR}>
         $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_INCLUDE_DIRS}>
         $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_INCLUDE_DIRS}>
+        $<$<BOOL:${HAVE_PAHO_MQTT}>:${PAHO_MQTTPP_INCLUDE_DIRS}>
+        $<$<BOOL:${HAVE_MSGPACK}>:${MSGPACK_INCLUDE_DIR}>
 )
 
 target_compile_definitions(vigia_edge_node PRIVATE
@@ -127,6 +153,8 @@ target_compile_definitions(vigia_edge_node PRIVATE
     $<$<BOOL:${GPIOD_FOUND}>:VIGIA_HAVE_LIBGPIOD>
     $<$<BOOL:${HAVE_ACL_EP}>:VIGIA_HAVE_ACL_EP>
     $<$<BOOL:${HAVE_SDBUS}>:VIGIA_HAVE_SDBUS>
+    # Phase 5: both Paho and msgpack must be found for the MQTT+MsgPack path.
+    $<$<AND:$<BOOL:${HAVE_PAHO_MQTT}>,$<BOOL:${HAVE_MSGPACK}>>:VIGIA_HAVE_PAHO_MQTT>
 )
 
 ament_target_dependencies(vigia_edge_node
@@ -144,6 +172,7 @@ target_link_libraries(vigia_edge_node
     $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_LIBRARIES}>
     $<$<BOOL:${HAVE_ACL_EP}>:${ACL_EP_LIB}>
     $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_LIBRARIES}>
+    $<$<BOOL:${HAVE_PAHO_MQTT}>:${PAHO_MQTTPP_LIBRARIES}>
 )
 
 install(TARGETS vigia_edge_node
