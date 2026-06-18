@@ -45,14 +45,19 @@ struct SensorHealth {
     uint64_t imu_count{0};
     uint64_t gps_count{0};
     uint64_t ping_count{0};
+    uint64_t signed_et_count{0};
+    uint64_t signed_et_valid_count{0};
     uint64_t imu_seq_gaps{0};
     uint64_t gps_seq_gaps{0};
+    uint64_t signed_et_seq_gaps{0};
     uint64_t parse_errors{0};
     uint64_t last_ping_uptime_ms{0};
     uint32_t last_imu_seq{0};
     uint32_t last_gps_seq{0};
+    uint32_t last_signed_et_seq{0};
     bool have_imu_seq{false};
     bool have_gps_seq{false};
+    bool have_signed_et_seq{false};
 };
 
 std::optional<ImuSample> parseImuLine(std::string_view line);

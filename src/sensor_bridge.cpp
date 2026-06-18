@@ -1,7 +1,12 @@
 #include "sensor_bridge.hpp"
 
+#include "cobs.hpp"
+#include "ecdsa_verify.hpp"
+#include "signed_et_packet.hpp"
+
 #include <cerrno>
 #include <cstring>
+#include <memory>
 #include <string>
 
 #include <fcntl.h>
@@ -43,7 +48,18 @@ SensorBridge::SensorBridge()
     : SensorBridge(Config{}) {}
 
 SensorBridge::SensorBridge(Config config)
-    : config_(std::move(config)) {}
+    : config_(std::move(config))
+{
+    cobs_acc_.reserve(256);
+
+    if (!config_.pubkey_file.empty() || config_.allow_stub_sig) {
+        EcdsaVerifier::Config vcfg;
+        vcfg.pubkey_file = config_.pubkey_file;
+        vcfg.allow_stub_sig = config_.allow_stub_sig;
+        verifier_ = std::make_unique<EcdsaVerifier>(vcfg);
+        verifier_->loadPublicKey();
+    }
+}
 
 SensorBridge::~SensorBridge() {
     stop();
@@ -108,13 +124,40 @@ void SensorBridge::closeSerial() {
     }
 }
 
+void SensorBridge::detectProto(std::uint8_t byte) {
+    if (proto_ != WireProto::Unknown)
+        return;
+
+    if (byte == 0x56) {
+        proto_ = WireProto::Text;
+    } else if (byte == 0x00) {
+        proto_ = WireProto::Cobs;
+        in_cobs_frame_ = false;
+        cobs_acc_.clear();
+    }
+}
+
 void SensorBridge::readLoop() {
     std::string pending;
     pending.reserve(512);
 
     while (running_.load()) {
-        if (fd_ < 0)
-            break;
+        // Attempt (re-)open if the fd is gone.
+        if (fd_ < 0) {
+            std::this_thread::sleep_for(config_.reconnect_delay_ms);
+            if (!running_.load())
+                break;
+            if (!openSerial()) {
+                // Increment parse_errors so callers can detect the outage.
+                recordParseError();
+                continue;
+            }
+            // Reset protocol detector and accumulators on reconnect.
+            proto_ = WireProto::Unknown;
+            cobs_acc_.clear();
+            in_cobs_frame_ = false;
+            pending.clear();
+        }
 
         fd_set readfds;
         FD_ZERO(&readfds);
@@ -128,41 +171,111 @@ void SensorBridge::readLoop() {
         if (ready < 0) {
             if (errno == EINTR)
                 continue;
-            break;
+            closeSerial();
+            continue;
         }
 
         if (ready == 0)
             continue;
 
-        char chunk[256];
+        std::uint8_t chunk[256];
         const ssize_t n = ::read(fd_, chunk, sizeof(chunk));
         if (n < 0) {
             if (errno == EINTR)
                 continue;
-            break;
+            // EIO / ENODEV / other hard error — device disconnected.
+            closeSerial();
+            continue;
         }
-        if (n == 0)
-            break;
-
-        pending.append(chunk, static_cast<std::size_t>(n));
-
-        std::size_t pos = 0;
-        while (true) {
-            const std::size_t nl = pending.find('\n', pos);
-            if (nl == std::string::npos)
-                break;
-
-            std::string line = pending.substr(pos, nl - pos);
-            trimTrailingCrLf(line);
-            if (!line.empty())
-                processLine(line);
-
-            pos = nl + 1;
+        if (n == 0) {
+            // EOF — device was unplugged or closed its end.
+            closeSerial();
+            continue;
         }
 
-        if (pos > 0)
-            pending.erase(0, pos);
+        for (ssize_t i = 0; i < n; ++i) {
+            const std::uint8_t byte = chunk[i];
+
+            if (proto_ == WireProto::Unknown)
+                detectProto(byte);
+
+            if (proto_ == WireProto::Cobs) {
+                if (byte == 0x00) {
+                    if (!cobs_acc_.empty())
+                        processCobsFrame(cobs_acc_.data(), cobs_acc_.size());
+                    cobs_acc_.clear();
+                    in_cobs_frame_ = false;
+                    continue;
+                }
+
+                if (!in_cobs_frame_) {
+                    in_cobs_frame_ = true;
+                    cobs_acc_.clear();
+                }
+
+                // Guard against a runaway frame that never terminates.
+                if (cobs_acc_.size() >= config_.max_cobs_frame_bytes) {
+                    recordParseError();
+                    cobs_acc_.clear();
+                    in_cobs_frame_ = false;
+                    continue;
+                }
+
+                cobs_acc_.push_back(byte);
+                continue;
+            }
+
+            if (proto_ == WireProto::Text || proto_ == WireProto::Unknown) {
+                // Guard against a line stream with no newlines.
+                if (pending.size() >= config_.max_pending_bytes) {
+                    recordParseError();
+                    pending.clear();
+                }
+                pending.push_back(static_cast<char>(byte));
+            }
+        }
+
+        if (proto_ == WireProto::Text || proto_ == WireProto::Unknown) {
+            std::size_t pos = 0;
+            while (true) {
+                const std::size_t nl = pending.find('\n', pos);
+                if (nl == std::string::npos)
+                    break;
+
+                std::string line = pending.substr(pos, nl - pos);
+                trimTrailingCrLf(line);
+                if (!line.empty())
+                    processLine(line);
+
+                pos = nl + 1;
+            }
+
+            if (pos > 0)
+                pending.erase(0, pos);
+        }
     }
+}
+
+void SensorBridge::processCobsFrame(const std::uint8_t* src, std::size_t src_len) {
+    std::uint8_t decoded[256];
+    const std::size_t dec_len = cobsDecode(src, src_len, decoded, sizeof(decoded));
+    if (dec_len != kSignedEtPacketSize) {
+        recordParseError();
+        return;
+    }
+
+    SignedEtSample sample{};
+    if (!parseSignedEtPacket(decoded, dec_len, sample)) {
+        recordParseError();
+        return;
+    }
+
+    if (verifier_) {
+        sample.sig_valid = verifier_->verify(sample.et_hash.data(),
+                                             sample.ecdsa_sig.data());
+    }
+
+    handleSignedEt(sample);
 }
 
 void SensorBridge::processLine(const std::string& line) {
@@ -214,6 +327,51 @@ void SensorBridge::handleGps(const GpsFix& fix) {
     health_.have_gps_seq = true;
 
     state_.updateGps(fix);
+    state_.updateHealth(health_);
+}
+
+void SensorBridge::handleSignedEt(const SignedEtSample& sample) {
+    ++health_.signed_et_count;
+    if (sample.sig_valid)
+        ++health_.signed_et_valid_count;
+
+    if (health_.have_signed_et_seq) {
+        const uint32_t expected = health_.last_signed_et_seq + 1;
+        // Only count a gap when sequence advances forward; ignore wrap-around.
+        if (sample.sequence != expected && sample.sequence > health_.last_signed_et_seq)
+            health_.signed_et_seq_gaps += sample.sequence - expected;
+    }
+
+    health_.last_signed_et_seq = sample.sequence;
+    health_.have_signed_et_seq = true;
+
+    ImuSample imu{};
+    imu.seq = sample.sequence;
+    imu.timestamp_us = sample.timestamp_us;
+    imu.qw = sample.qw;
+    imu.qx = sample.qx;
+    imu.qy = sample.qy;
+    imu.qz = sample.qz;
+    imu.ax = sample.ax;
+    imu.ay = sample.ay;
+    imu.az = sample.az;
+    imu.cal_status = sample.cal_status;
+    imu.valid = true;
+    state_.updateImu(imu);
+
+    GpsFix gps{};
+    gps.seq = sample.sequence;
+    gps.timestamp_us = sample.timestamp_us;
+    gps.latitude = sample.latitude;
+    gps.longitude = sample.longitude;
+    gps.speed_ms = sample.speed_ms;
+    gps.fix_type = sample.fix_type;
+    gps.satellites = sample.satellites;
+    gps.valid = sample.fix_type >= 2;
+    gps.source = "cobs";
+    state_.updateGps(gps);
+
+    state_.updateSignedEt(sample);
     state_.updateHealth(health_);
 }
 

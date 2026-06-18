@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -68,6 +69,27 @@ std::string base64Encode(const uint8_t* data, std::size_t len)
 }
 #endif
 
+std::string bytesToHex(const uint8_t* data, std::size_t len)
+{
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (std::size_t i = 0; i < len; ++i)
+        oss << std::setw(2) << static_cast<unsigned>(data[i]);
+    return oss.str();
+}
+
+std::string formatSignedEtJson(const HazardObservation& obs)
+{
+    if (!obs.signed_et_valid)
+        return "null";
+
+    std::ostringstream oss;
+    oss << "{\"valid\":true,"
+        << "\"sequence\":" << obs.signed_et_sequence << ','
+        << "\"hash\":\"" << bytesToHex(obs.et_hash, 32) << "\"}";
+    return oss.str();
+}
+
 } // namespace
 
 EventSigner::EventSigner(Config cfg)
@@ -101,12 +123,19 @@ std::string EventSigner::canonicalPayload(
     const std::string& observedAt) const
 {
     // Keys sorted alphabetically to match Python's json.dumps(sort_keys=True).
-    // No std::fixed — default stream precision (6 sig figs, no trailing zeros)
-    // matches Python json.dumps float output for single-precision values.
+    // Floats use default precision (6 sig figs) to match Python json.dumps for
+    // single-precision values. Doubles (lat/lon) use precision(10) so that GPS
+    // coordinates carry ~1 cm resolution; mismatched precision here causes
+    // server-side HMAC re-computation to fail.
+
+    // Bound device_id: char[32] may not be null-terminated if misconfigured.
+    char safe_device_id[33]{};
+    std::memcpy(safe_device_id, obs.device_id, sizeof(obs.device_id));
+
     std::ostringstream oss;
 
     oss << '{'
-        << "\"device_id\":\"" << obs.device_id << "\","
+        << "\"device_id\":\"" << safe_device_id << "\","
         << "\"device_seq\":" << obs.device_seq << ','
         << "\"event_id\":\"" << eventId << "\","
         << "\"hazard\":{\"bbox\":[" << obs.bbox_x << ',' << obs.bbox_y << ','
@@ -119,7 +148,11 @@ std::string EventSigner::canonicalPayload(
         << "\"yolo_conf\":" << obs.yolo_conf
         << "},"
         << "\"hazard_class\":" << static_cast<unsigned>(obs.hazard_class) << ','
-        << "\"location\":{\"lat\":" << obs.lat << ",\"lon\":" << obs.lon << "},"
+        << "\"location\":{\"lat\":"
+        << std::setprecision(10) << obs.lat
+        << ",\"lon\":"
+        << std::setprecision(10) << obs.lon << "},"
+        << std::setprecision(6)
         << "\"motion\":{\"fix_type\":" << static_cast<unsigned>(obs.gps_fix_type)
         << ",\"hdop\":" << obs.hdop << ",\"speed_mps\":" << obs.speed_ms << "},"
         << "\"observed_at\":\"" << observedAt << "\""
@@ -193,13 +226,21 @@ std::string EventSigner::signEnvelope(const HazardObservation& obs) const
     // re-computed HMAC (strip signature, sort keys, re-serialize) will match.
     std::ostringstream oss;
 
+    // Bound device_id same as canonicalPayload — prevents ostream overread.
+    char safe_device_id[33]{};
+    std::memcpy(safe_device_id, obs.device_id, sizeof(obs.device_id));
+
     oss << '{'
         << "\"event_id\":\"" << eventId << "\","
-        << "\"device_id\":\"" << obs.device_id << "\","
+        << "\"device_id\":\"" << safe_device_id << "\","
         << "\"device_seq\":" << obs.device_seq << ','
         << "\"observed_at\":\"" << observedAt << "\","
         << "\"hazard_class\":" << static_cast<unsigned>(obs.hazard_class) << ','
-        << "\"location\":{\"lat\":" << obs.lat << ",\"lon\":" << obs.lon << "},"
+        << "\"location\":{\"lat\":"
+        << std::setprecision(10) << obs.lat
+        << ",\"lon\":"
+        << std::setprecision(10) << obs.lon << "},"
+        << std::setprecision(6)
         << "\"hazard\":{"
         << "\"rri\":" << obs.rri << ','
         << "\"iss\":" << obs.iss << ','
@@ -217,7 +258,7 @@ std::string EventSigner::signEnvelope(const HazardObservation& obs) const
         << "},"
         << "\"payload_hash\":\"" << payloadHash << "\","
         << "\"signature\":\"" << signature << "\","
-        << "\"signed_et\":null"
+        << "\"signed_et\":" << formatSignedEtJson(obs)
         << '}';
 
     return oss.str();
