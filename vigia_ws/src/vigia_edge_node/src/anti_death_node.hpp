@@ -174,7 +174,7 @@ private:
     FrameMetadataRing *          meta_ring_{nullptr};
 
     // ── Emergency sequence state ─────────────────────────────────────────────
-    std::atomic_flag             emergency_in_progress_ = ATOMIC_FLAG_INIT;
+    std::atomic<bool>            emergency_in_progress_{false};
     std::chrono::steady_clock::time_point t_zero_;
 
     // ── Paho MQTT async client ────────────────────────────────────────────────

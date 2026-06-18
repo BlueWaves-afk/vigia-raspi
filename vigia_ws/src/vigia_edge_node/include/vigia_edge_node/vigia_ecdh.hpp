@@ -18,6 +18,9 @@
 #include <string>
 #include <vector>
 
+// Allow access to MBEDTLS_PRIVATE() members (mbedTLS 3.x opaque struct policy).
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
+#include <sys/stat.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/ecdh.h>
 #include <mbedtls/ecdsa.h>

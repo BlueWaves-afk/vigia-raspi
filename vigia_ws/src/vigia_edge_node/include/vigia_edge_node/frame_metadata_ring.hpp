@@ -81,7 +81,7 @@ struct FrameMetadataRing {
     void snapshot(std::array<FrameMetadata, kMetaRingDepth> & out,
                   uint32_t & out_write_idx) noexcept
     {
-        uint32_t s1, s2;
+        uint32_t s1 = 0, s2 = 0;
         do {
             s1 = seq.load(std::memory_order_acquire);
             if (s1 & 1u) continue;   // writer in progress — spin

@@ -298,7 +298,7 @@ void AntiDeathNode::mqtt_client_init()
         .connect_timeout(std::chrono::seconds(5))
         .clean_session(false)  // persist QoS 1 state across reboots
         .will(mqtt::will_options(
-            "vigia/status/" + device_id_, "OFFLINE", 1, true))
+            "vigia/status/" + device_id_, std::string("OFFLINE"), 1, true))
         .finalize();
 
     try {
@@ -416,7 +416,7 @@ void AntiDeathNode::execute_emergency_sequence()
     EmergencyState state = EmergencyState::CAPTURING_SNAPSHOT;
 
 #ifdef VIGIA_HAVE_PAHO_MQTT
-    msgpack::sbuffer payload_buf;   // THE ONE PERMITTED HEAP ALLOCATION
+    msgpack::sbuffer payload_buf(500 * 1024);  // THE ONE PERMITTED HEAP ALLOCATION (~440KB)
 #endif
 
     SnapshotData snapshot{};        // ~36 KB on stack (SCHED_FIFO 99 thread, 512 KB stack)
@@ -614,7 +614,7 @@ bool AntiDeathNode::do_serialize(const SnapshotData & snap, msgpack::sbuffer & b
 {
     // Single upfront reserve — no realloc during packing.
     // 500 KB covers the estimated ~440 KB payload (doc 05 §5).
-    buf.reserve(500 * 1024);
+    // msgpack::sbuffer has no reserve(); pre-size via constructor in the caller.
 
     msgpack::packer<msgpack::sbuffer> pk(buf);
 
@@ -704,7 +704,8 @@ bool AntiDeathNode::do_mqtt_connect()
                 StateBudget::kConnectDeadlineS - elapsed_seconds_since_t0();
             auto tok = mqtt_client_->connect(conn_opts_);
             const bool ok =
-                tok->wait_for(std::chrono::duration<double>(remaining / kMaxRetries));
+                tok->wait_for(std::chrono::milliseconds(
+                    static_cast<long long>(remaining / kMaxRetries * 1000.0)));
             if (ok && mqtt_client_->is_connected()) {
                 RCLCPP_INFO(get_logger(),
                     "MQTT reconnected on attempt %d. T+%.2fs",
@@ -745,16 +746,20 @@ void AntiDeathNode::do_mqtt_transmit(
         buf.size() / 1024.0, topic.c_str(), elapsed_seconds_since_t0());
 
     try {
-        // Zero-copy reference: Paho reads directly from buf (stack lifetime
-        // of execute_emergency_sequence ensures buf outlives the publish).
-        auto msg = mqtt::make_message(topic, nullptr, 0, 1, false);
-        msg->set_payload_ref(buf.data(), buf.size());
+        // binary_ref: zero-copy view into buf (no heap allocation for payload).
+        // buf lives in execute_emergency_sequence()'s stack frame and outlives publish.
+        auto msg = mqtt::make_message(
+            topic,
+            mqtt::binary_ref(buf.data(), buf.size()),
+            /*qos=*/1,
+            /*retained=*/false);
 
         auto tok = mqtt_client_->publish(msg);
 
         const double budget_remaining =
             StateBudget::kTransmitDeadlineS - elapsed_seconds_since_t0();
-        const bool puback = tok->wait_for(std::chrono::duration<double>(budget_remaining));
+        const bool puback = tok->wait_for(std::chrono::milliseconds(
+            static_cast<long long>(budget_remaining * 1000.0)));
 
         if (puback) {
             RCLCPP_INFO(get_logger(),

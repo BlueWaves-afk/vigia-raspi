@@ -81,25 +81,32 @@ endif()
 
 # Paho MQTT C++ — Phase 5 MQTT uplink for AntiDeathNode (doc 05 §7)
 # Install on Pi: sudo apt install libpaho-mqtt-dev libpaho-mqttpp-dev
-# When not found, AntiDeathNode falls back to legacy HTTPS POST via libcurl.
-pkg_check_modules(PAHO_MQTTPP paho-mqttpp3)
-if(PAHO_MQTTPP_FOUND)
-    message(STATUS "Paho MQTT C++ ${PAHO_MQTTPP_VERSION} found — Phase 5 MQTT path enabled")
+# Debian Trixie ships no .pc or cmake config — use find_library + find_path directly.
+find_library(PAHO_MQTTPP_LIB paho-mqttpp3
+    PATHS /usr/lib/aarch64-linux-gnu /usr/local/lib)
+find_library(PAHO_MQTT3AS_LIB paho-mqtt3as
+    PATHS /usr/lib/aarch64-linux-gnu /usr/local/lib)
+find_path(PAHO_MQTTPP_INCLUDE_DIR mqtt/async_client.h
+    PATHS /usr/include /usr/local/include)
+if(PAHO_MQTTPP_LIB AND PAHO_MQTTPP_INCLUDE_DIR)
+    message(STATUS "Paho MQTT C++ found: ${PAHO_MQTTPP_LIB} — Phase 5 MQTT path enabled")
     set(HAVE_PAHO_MQTT TRUE)
+    set(PAHO_MQTTPP_LIBRARIES ${PAHO_MQTTPP_LIB} ${PAHO_MQTT3AS_LIB})
+    set(PAHO_MQTTPP_INCLUDE_DIRS ${PAHO_MQTTPP_INCLUDE_DIR})
 else()
     message(STATUS "Paho MQTT C++ not found — AntiDeathNode uses legacy HTTPS fallback")
     set(HAVE_PAHO_MQTT FALSE)
 endif()
 
-# msgpack-c — Phase 5 MsgPack serialization for AntiDeathNode payload
-# Install on Pi: sudo apt install libmsgpack-dev
+# msgpack-cxx — Phase 5 MsgPack serialization (header-only C++ API)
+# Install on Pi: sudo apt install libmsgpack-cxx-dev
 find_path(MSGPACK_INCLUDE_DIR msgpack.hpp
     PATHS /usr/include /usr/local/include)
 if(MSGPACK_INCLUDE_DIR)
-    message(STATUS "msgpack-c found at ${MSGPACK_INCLUDE_DIR}")
+    message(STATUS "msgpack-cxx found at ${MSGPACK_INCLUDE_DIR}")
     set(HAVE_MSGPACK TRUE)
 else()
-    message(STATUS "msgpack-c not found — MsgPack serialization disabled")
+    message(STATUS "msgpack-cxx not found — MsgPack serialization disabled")
     set(HAVE_MSGPACK FALSE)
 endif()
 
