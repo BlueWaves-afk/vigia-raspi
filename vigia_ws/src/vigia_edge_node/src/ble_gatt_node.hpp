@@ -62,6 +62,7 @@ private:
     // ── D-Bus thread ──────────────────────────────────────────────────────────
     std::thread           dbus_thread_;
     std::atomic<bool>     shutdown_{false};
+    bool                  stream_paused_{false};
 
     // ── Params ────────────────────────────────────────────────────────────────
     std::string ble_adapter_;

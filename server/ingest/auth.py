@@ -78,6 +78,12 @@ def authenticate_event(
         # ECDSA path — preferred for ATECC608A-provisioned devices.
         if not verify_ecdsa_header(payload, signature, cert_pem):
             raise InvalidSignatureError(device_id)
+        # Use the hardware-attested sequence from signed_et when present.
+        # signed_et.sequence is inside the EtHashInput that the ATECC608A signed,
+        # so it cannot be forged without breaking the ECDSA verification above.
+        signed_et = payload.get("signed_et")
+        if isinstance(signed_et, dict) and isinstance(signed_et.get("sequence"), int):
+            device_seq = signed_et["sequence"]
     else:
         # HMAC fallback for legacy devices.
         if not verify_hmac(payload, signature, hmac_key):

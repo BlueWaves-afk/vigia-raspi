@@ -78,7 +78,20 @@ VisionNode::VisionNode(const rclcpp::NodeOptions & options)
     // NOTE: KleidiAI MLAS INT8 UDOT kernels are separate — baked into ORT at compile time,
     // not activated via this EP call. This only enables the explicit ACL operator dispatch.
 #if defined(VIGIA_HAVE_ACL_EP)
-    OrtSessionOptionsAppendExecutionProvider_ACL(session_opts, /*enable_fast_math=*/1);
+    if ([]() -> bool {
+        std::ifstream cpu("/proc/cpuinfo");
+        for (std::string line; std::getline(cpu, line); )
+            if (line.find("Features") != std::string::npos &&
+                line.find("asimddp")  != std::string::npos)
+                return true;
+        return false;
+    }()) {
+        OrtSessionOptionsAppendExecutionProvider_ACL(session_opts, /*enable_fast_math=*/1);
+        RCLCPP_INFO(get_logger(), "VisionNode: KleidiAI ACL EP active (asimddp confirmed)");
+    } else {
+        RCLCPP_WARN(get_logger(),
+                    "VisionNode: asimddp not in /proc/cpuinfo — ACL EP skipped, using CPU EP");
+    }
 #endif
 
     session_    = std::make_unique<Ort::Session>(env_, model_path_.c_str(), session_opts);

@@ -132,22 +132,23 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | 9.2 | `EcdsaVerifier` unused in sensor_bridge | `[x]` | See 2.11. <!-- resolved: 2026-06-18 --> |
 | 9.3 | Kalman velocity dead-reckoning | `[x]` | See 4.3. <!-- resolved: 2026-06-18 --> |
 | 9.4 | IoBinding on VisionNode hot path | `[x]` | See 3.5. <!-- resolved: 2026-06-18 --> |
-| 9.5 | GPS at 10 Hz | `[ ]` | See 2.5. 1 Hz default from NEO-M8N. |
+| 9.5 | GPS at 10 Hz | `[x]` | See 2.5. Fixed. <!-- resolved: 2026-06-19 --> |
 | 9.6 | PREEMPT_RT booted | `[ ]` | See 1.1. Physical Pi access needed. |
+| 9.7 | Anti-replay uses hardware sequence | `[x]` | `auth.py` `authenticate_event()` now extracts `signed_et.sequence` (ATECC-attested) when cert_pem present, overriding client-supplied `device_seq`. HMAC path unchanged. <!-- resolved: 2026-06-19 --> |
+| 9.8 | `verify_kleidiai_capable()` CPUID check | `[x]` | `vision_node.cpp`: reads `/proc/cpuinfo` for `asimddp` before calling `AppendExecutionProvider_ACL`. Logs WARN and skips EP if not found. <!-- resolved: 2026-06-19 --> |
+| 9.9 | BLE response characteristic | `[x]` | `kResponseUuid` added to `ble_gatt_constants.hpp`. CONTROL_CHAR now returns ACK/NACK/PONG via RESPONSE_CHAR notify. `stream_paused_` flag honours kPauseStream/kResumeStream. <!-- resolved: 2026-06-19 --> |
+| 9.10 | HazardUplinkNode continuous uplink | `[x]` | `hazard_uplink_node.cpp` — subscribes to `/vigia/hazard_events`, packs MsgPack matching `attestation.py` schema, publishes QoS-1 to `vigia/attest/{id}/hazard` via TLS mTLS Paho. Wired into `main.cpp` at SCHED_OTHER priority 30. <!-- resolved: 2026-06-19 --> |
 
 ---
 
-## Quickest wins (no hardware needed)
+## Remaining software work
 
-In rough priority order:
-
-1. **Fix static_assert bug** — `sensor_bridge_node.cpp:54`: `165` → `173`. 1-line fix, prevents next build from breaking.
-2. **`vigia-sim7600-init.sh`** — write the script so the systemd service can start.
-3. **Wire `EcdsaVerifier` into `sensor_bridge_node.cpp`** — instantiate, call `verify()`, assign `msg->sig_valid`. Unblocks Phase 6 the moment SE is physically wired.
-4. **Kalman predict step** — 3-line fix in `fusion_node.cpp` IMU callback.
-5. **Wire `attestation.py` into server** — replace HMAC ingest with ECDSA pipeline + add MQTT subscriber.
-6. **Set `latent_layer_name`** — Netron-inspect the latent YOLO ONNX, set param in `vision_params.yaml`. Enables real S_t streaming.
-7. **libgpiod v2 port** — port `anti_death_node.cpp` GPIO path to v2 API. Unblocks the entire emergency sequence.
+1. **Global seqlock bulk snapshot** (item 1.3) — replace per-slot seqlock with one atomic 300-frame snapshot. Medium refactor.
+2. **SIM7600 ECM provisioning** (item 5.3) — physical AT command, one-time.
+3. **PREEMPT_RT boot** (item 9.6) — physical Pi, edit `/boot/firmware/cmdline.txt`.
+4. **TLS certs + MQTT broker** (items 5.4, 5.5) — run `vigia-gen-ca.sh` + `docker compose up`.
+5. **ATECC provisioning** (item 2.8) — `atcab_genkey(0)` once on wired device.
+6. **2% VLM sampling** — in `vigia-amazon` OrchestratorFunction, not yet built.
 
 ## Requires Ben (hardware)
 

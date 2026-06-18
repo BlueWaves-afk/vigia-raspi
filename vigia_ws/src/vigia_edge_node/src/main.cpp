@@ -11,6 +11,9 @@
 #if defined(VIGIA_HAVE_SDBUS)
 #  include "ble_gatt_node.hpp"
 #endif
+#if defined(VIGIA_HAVE_PAHO_MQTT)
+#  include "hazard_uplink_node.hpp"
+#endif
 
 int main(int argc, char * argv[])
 {
@@ -33,6 +36,11 @@ int main(int argc, char * argv[])
     // launch_rt_node is not used — BLE is best-effort, not RT.
     auto ble_node = std::make_shared<BleGattNode>(make_ipc_options());
 #endif
+#if defined(VIGIA_HAVE_PAHO_MQTT)
+    // HazardUplinkNode: continuous QoS-1 MQTT attestation uplink per hazard event.
+    // Runs at SCHED_OTHER — network I/O is not RT. Pre-connects at startup.
+    auto uplink_node = std::make_shared<HazardUplinkNode>(make_ipc_options());
+#endif
 
     // Launch RT threads — highest priority first to ensure scheduler sees them in order.
     auto t5 = launch_rt_node(antideath_node, {99, 3, "vigia_antideath"});
@@ -45,10 +53,17 @@ int main(int argc, char * argv[])
     auto t6 = launch_rt_node(ble_node,       {40, 3, "vigia_ble"});
 #endif
 
+#if defined(VIGIA_HAVE_PAHO_MQTT)
+    auto t7 = launch_rt_node(uplink_node,  {30, 3, "vigia_uplink"});
+#endif
+
     t0.join(); t1.join(); t2.join();
     t3.join(); t4.join(); t5.join();
 #if defined(VIGIA_HAVE_SDBUS)
     t6.join();
+#endif
+#if defined(VIGIA_HAVE_PAHO_MQTT)
+    t7.join();
 #endif
 
     rclcpp::shutdown();

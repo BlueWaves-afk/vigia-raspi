@@ -28,6 +28,7 @@ static constexpr const char* kHandshakeObjPath = "/com/vigia/ble/service0/char0"
 static constexpr const char* kTelemetryObjPath = "/com/vigia/ble/service0/char1";
 static constexpr const char* kControlObjPath   = "/com/vigia/ble/service0/char2";
 static constexpr const char* kAttestObjPath    = "/com/vigia/ble/service0/char3";
+static constexpr const char* kResponseObjPath  = "/com/vigia/ble/service0/char4";
 static constexpr const char* kAdvObjPath       = "/com/vigia/ble/advertisement0";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -355,7 +356,24 @@ void BleGattNode::dbus_thread_main()
                 })
         ).forInterface(kGattCharIface);
 
-        // ── CONTROL_CHAR — dim selection ──────────────────────────────────────
+        // ── RESPONSE_CHAR — ACK/NACK reply to control opcodes (Pi -> phone) ───
+        std::vector<uint8_t> resp_notify_buf;
+        auto resp_obj = sdbus::createObject(*conn, sdbus::ObjectPath{kResponseObjPath});
+        resp_obj->addVTable(
+            sdbus::registerProperty("UUID")
+                .withGetter([](){ return std::string(vigia::ble::kResponseUuid); }),
+            sdbus::registerProperty("Service")
+                .withGetter([](){ return sdbus::ObjectPath(kSvcObjPath); }),
+            sdbus::registerProperty("Flags")
+                .withGetter([](){ return std::vector<std::string>{"notify",
+                                                                  "encrypt-authenticated-read"}; }),
+            sdbus::registerProperty("Value")
+                .withGetter([&resp_notify_buf](){ return resp_notify_buf; }),
+            sdbus::registerMethod("StartNotify").implementedAs([&](){}),
+            sdbus::registerMethod("StopNotify").implementedAs([&](){})
+        ).forInterface(kGattCharIface);
+
+        // ── CONTROL_CHAR — dim selection, stream control, rekey, ping ─────────
         auto ctrl_obj = sdbus::createObject(*conn, sdbus::ObjectPath{kControlObjPath});
         ctrl_obj->addVTable(
             sdbus::registerProperty("UUID")
@@ -363,17 +381,39 @@ void BleGattNode::dbus_thread_main()
             sdbus::registerProperty("Service")
                 .withGetter([](){ return sdbus::ObjectPath(kSvcObjPath); }),
             sdbus::registerProperty("Flags")
-                .withGetter([](){ return std::vector<std::string>{"write-without-response",
+                .withGetter([](){ return std::vector<std::string>{"write",
                                                                   "encrypt-authenticated-write"}; }),
             sdbus::registerProperty("Value")
                 .withGetter([](){ return std::vector<uint8_t>{}; }),
             sdbus::registerMethod("WriteValue")
                 .withInputParamNames("value", "options")
-                .implementedAs([this](std::vector<uint8_t> val,
+                .implementedAs([this, &resp_notify_buf](std::vector<uint8_t> val,
                                       std::map<std::string, sdbus::Variant>) {
                     if (val.empty()) return;
-                    if (val[0] == vigia::ble::control::kRequest256) default_dims_ = 256;
-                    else if (val[0] == vigia::ble::control::kRequest512) default_dims_ = 512;
+                    const uint8_t op = val[0];
+                    const bool bound = (hs_state_ == HandshakeState::Bound);
+                    namespace ctrl = vigia::ble::control;
+                    namespace rsp  = vigia::ble::response;
+
+                    // Stream control and rekey require an authenticated session.
+                    if ((op == ctrl::kPauseStream || op == ctrl::kResumeStream ||
+                         op == ctrl::kRekey) && !bound) {
+                        resp_notify_buf = {op, rsp::kNack, 0x01 /* not bound */};
+                        return;
+                    }
+
+                    if      (op == ctrl::kRequest256)  { default_dims_ = 256; }
+                    else if (op == ctrl::kRequest512)  { default_dims_ = 512; }
+                    else if (op == ctrl::kPauseStream) { stream_paused_ = true; }
+                    else if (op == ctrl::kResumeStream){ stream_paused_ = false; }
+                    else if (op == ctrl::kPing)        { resp_notify_buf = {rsp::kPong}; return; }
+                    else if (op == ctrl::kRekey)       {
+                        // Invalidate session key — phone must re-handshake.
+                        session_key_.clear();
+                        hs_state_ = HandshakeState::Idle;
+                        RCLCPP_INFO(rclcpp::get_logger("ble_gatt_node"), "REKEY — session cleared");
+                    }
+                    resp_notify_buf = {op, rsp::kAck};
                 })
         ).forInterface(kGattCharIface);
 
@@ -447,6 +487,7 @@ void BleGattNode::dbus_thread_main()
             static_cast<int>(1000.0f / stream_hz_));
         auto last_notify = std::chrono::steady_clock::now();
         std::vector<uint8_t> prev_hs_buf;
+        std::vector<uint8_t> prev_resp_buf;
 
         while (!shutdown_.load(std::memory_order_relaxed)) {
             auto now = std::chrono::steady_clock::now();
@@ -457,7 +498,13 @@ void BleGattNode::dbus_thread_main()
                 hs_obj->emitPropertiesChangedSignal(kGattCharIface);
             }
 
-            // Emit TELEMETRY_CHAR notification at stream_hz — only when Bound.
+            // Emit RESPONSE_CHAR notification when a new control reply is ready.
+            if (resp_notify_buf != prev_resp_buf && !resp_notify_buf.empty()) {
+                prev_resp_buf = resp_notify_buf;
+                resp_obj->emitPropertiesChangedSignal(kGattCharIface);
+            }
+
+            // Emit TELEMETRY_CHAR notification at stream_hz — only when Bound and not paused.
             if (now - last_notify >= interval_ms) {
                 last_notify = now;
                 const bool bound = (hs_state_ == HandshakeState::Bound);
@@ -466,7 +513,7 @@ void BleGattNode::dbus_thread_main()
 #else
                 const bool auth_ok = true;
 #endif
-                if (auth_ok) {
+                if (auth_ok && !stream_paused_) {
                     auto frame = encode_current_frame();
                     if (!frame.empty()) {
                         telemetry_value = frame;

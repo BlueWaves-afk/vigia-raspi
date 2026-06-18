@@ -19,6 +19,7 @@ inline constexpr const char * kHandshakeUuid = "eb4b161b-3be6-4719-aa0f-8ef40bd4
 inline constexpr const char * kTelemetryUuid = "4d231514-5514-4847-bb6d-64e3aa7a3ffb";  // Notify
 inline constexpr const char * kControlUuid   = "0bb821dd-6b24-4185-ad69-662510769d19";  // Write (phone->Pi)
 inline constexpr const char * kAttestUuid    = "580c5fb6-5283-4194-84c8-5d6aec75b88a";  // Notify (anti-spoof)
+inline constexpr const char * kResponseUuid  = "a3f1c2d7-88e4-4b9a-b3c1-5d7e9f012345";  // Notify (Pi->phone control ACK)
 inline constexpr const char * kCccdUuid      = "00002902-0000-1000-8000-00805f9b34fb";
 
 // ── Handshake protocol bytes (mirror GattConstants.Protocol) ────────────────
@@ -41,6 +42,14 @@ namespace control {
     inline constexpr uint8_t kPauseStream = 0x12;  // stop telemetry notifications
     inline constexpr uint8_t kResumeStream= 0x13;  // resume telemetry notifications
     inline constexpr uint8_t kRekey       = 0x20;  // rotate session key (§5)
+    inline constexpr uint8_t kPing        = 0xF0;  // liveness check
+}
+
+// ── RESPONSE_CHAR reply bytes (Pi -> phone), mirrors control opcodes ─────────
+namespace response {
+    inline constexpr uint8_t kAck  = 0x00;  // [echo_opcode, ACK]
+    inline constexpr uint8_t kNack = 0x01;  // [echo_opcode, NACK, reason]
+    inline constexpr uint8_t kPong = 0xF1;  // reply to kPing
 }
 
 }  // namespace vigia::ble

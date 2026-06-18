@@ -138,6 +138,10 @@ if(HAVE_SDBUS)
     list(APPEND NODE_SRCS src/ble_gatt_node.cpp)
 endif()
 
+if(HAVE_PAHO_MQTT AND HAVE_MSGPACK)
+    list(APPEND NODE_SRCS src/hazard_uplink_node.cpp)
+endif()
+
 add_executable(vigia_edge_node ${NODE_SRCS})
 
 target_include_directories(vigia_edge_node
