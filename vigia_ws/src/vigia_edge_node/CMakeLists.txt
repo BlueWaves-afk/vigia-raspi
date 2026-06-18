@@ -24,9 +24,17 @@ pkg_check_modules(SODIUM REQUIRED libsodium)
 find_package(CURL REQUIRED)
 
 # libgpiod — GPIO edge-wait for UPS POWER_FAIL (AntiDeathNode)
+# NOTE: libgpiod v2 (Debian Trixie) has a breaking API vs v1. The GPIO code
+# uses the v1 line/event API; v2 requires a full rewrite. Until ported, v2
+# falls back to the poll implementation inside AntiDeathNode.
 pkg_check_modules(GPIOD libgpiod)
 if(GPIOD_FOUND)
-    message(STATUS "libgpiod found — real GPIO edge-wait enabled")
+    if(GPIOD_VERSION VERSION_GREATER_EQUAL "2.0")
+        message(STATUS "libgpiod ${GPIOD_VERSION} (v2 API) — not yet ported, GPIO poll fallback will be used")
+        set(GPIOD_FOUND FALSE)
+    else()
+        message(STATUS "libgpiod ${GPIOD_VERSION} found — real GPIO edge-wait enabled")
+    endif()
 else()
     message(STATUS "libgpiod not found — GPIO poll fallback will be used")
 endif()
@@ -71,6 +79,16 @@ else()
     set(HAVE_ACL_EP FALSE)
 endif()
 
+# sdbus-c++ — BlueZ D-Bus GATT server for BleGattNode (§3, app_dashcam_integration.md)
+pkg_check_modules(SDBUS sdbus-c++)
+if(SDBUS_FOUND)
+    message(STATUS "sdbus-c++ ${SDBUS_VERSION} found — BleGattNode will build")
+    set(HAVE_SDBUS TRUE)
+else()
+    message(STATUS "sdbus-c++ not found — BleGattNode will not build (install libsdbus-c++-dev)")
+    set(HAVE_SDBUS FALSE)
+endif()
+
 # ── vigia_edge_node executable ─────────────────────────────────────────────
 
 set(NODE_SRCS
@@ -85,6 +103,10 @@ if(HAVE_ORT)
     list(APPEND NODE_SRCS src/vision_node.cpp src/depth_node.cpp)
 endif()
 
+if(HAVE_SDBUS)
+    list(APPEND NODE_SRCS src/ble_gatt_node.cpp)
+endif()
+
 add_executable(vigia_edge_node ${NODE_SRCS})
 
 target_include_directories(vigia_edge_node
@@ -96,12 +118,15 @@ target_include_directories(vigia_edge_node
         ${CURL_INCLUDE_DIRS}
         $<$<BOOL:${HAVE_ORT}>:${ORT_INCLUDE_DIR}>
         $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_INCLUDE_DIRS}>
+        $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_INCLUDE_DIRS}>
 )
 
 target_compile_definitions(vigia_edge_node PRIVATE
+    $<$<BOOL:${HAVE_ORT}>:VIGIA_HAVE_ORT>
     $<$<BOOL:${HAVE_MBEDTLS}>:VIGIA_HAVE_MBEDTLS>
     $<$<BOOL:${GPIOD_FOUND}>:VIGIA_HAVE_LIBGPIOD>
     $<$<BOOL:${HAVE_ACL_EP}>:VIGIA_HAVE_ACL_EP>
+    $<$<BOOL:${HAVE_SDBUS}>:VIGIA_HAVE_SDBUS>
 )
 
 ament_target_dependencies(vigia_edge_node
@@ -118,6 +143,7 @@ target_link_libraries(vigia_edge_node
     $<$<BOOL:${HAVE_MBEDTLS}>:MbedTLS::mbedcrypto>
     $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_LIBRARIES}>
     $<$<BOOL:${HAVE_ACL_EP}>:${ACL_EP_LIB}>
+    $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_LIBRARIES}>
 )
 
 install(TARGETS vigia_edge_node
@@ -128,5 +154,14 @@ install(DIRECTORY config/
 
 install(FILES systemd/vigia-edge.service
     DESTINATION share/${PROJECT_NAME}/systemd)
+
+# ── Unit tests — pure C++, no ROS2/ORT/BlueZ deps (run with `colcon test`) ──
+if(BUILD_TESTING)
+    foreach(_t test_ble_frame_codec test_vigia_rri)
+        add_executable(${_t} test/${_t}.cpp)
+        target_include_directories(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        add_test(NAME ${_t} COMMAND ${_t})
+    endforeach()
+endif()
 
 ament_package()
