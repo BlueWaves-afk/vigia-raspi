@@ -504,32 +504,36 @@ The guide covers Raspberry Pi OS configuration and performance tuning, building 
 
 ## Deployment Startup Sequence
 
-This covers bringing up the full VIGIA DePIN stack from a clean state: ingest server, device provisioning, and Pi edge node.
+This covers bringing up the full VIGIA DePIN stack from a clean state.  
+The ingest server is fully serverless (AWS IoT Core + Lambda + DynamoDB) — no Docker, no self-hosted Mosquitto, no PostgreSQL.
 
-### Step 1 — Ingest server (first run only)
+### Step 1 — Deploy AWS cloud stack (once per AWS account)
 
 ```bash
-# Generate VIGIA Root CA, server cert, and Mosquitto TLS config
-./tools/vigia-gen-ca.sh
-
-# Start PostGIS + Mosquitto (mTLS 8883) + FastAPI ingest
-cd deploy && docker compose up -d
+cd /path/to/vigia-amazon
+npm install
+npx cdk deploy VigiaStack --require-approval never
 ```
 
-The Root CA lives at `deploy/mosquitto/certs/vigia-ca.crt`. Keep `deploy/mosquitto/certs/*.key` out of version control (already in `deploy/.gitignore`).
+Note the outputs:
+- `ApiEndpoint`   — API Gateway URL (used as `VigiaApiBaseUrl` in the Android app)
+- `HazardsTableName` — DynamoDB table name
 
-### Step 2 — Provision each device (once per Pico 2)
+### Step 2 — Provision each Pi device (once per unit)
 
 ```bash
-# Generate a per-device P-256 keypair, sign it against the VIGIA CA,
-# and export the 65-byte uncompressed pubkey for the SE verification path.
+# Generate a per-device P-256 keypair, create an AWS IoT Thing, register the
+# device cert, and attach the vigia-pi-device-policy from the CDK stack.
 ./tools/vigia-sign-device.sh vigia-001
 
-# The script prints the exact scp and psql commands to run, e.g.:
-#   scp deploy/mosquitto/certs/vigia-001.crt vigiasense@<pi-ip>:/etc/vigia/device_cert.pem
-#   scp deploy/mosquitto/certs/vigia-001.key vigiasense@<pi-ip>:/etc/vigia/device.key
-#   scp deploy/mosquitto/certs/vigia-001-pubkey.bin vigiasense@<pi-ip>:/etc/vigia/atecc_pubkey.bin
-#   psql $DATABASE_URL -c "INSERT INTO device_registry ..."
+# The script prints the exact scp commands to run, e.g.:
+#   scp certs/vigia-001.crt vigiasense@<pi-ip>:/etc/vigia/device_cert.pem
+#   scp certs/vigia-001.key vigiasense@<pi-ip>:/etc/vigia/device.key
+#   curl -o /etc/vigia/AmazonRootCA1.pem https://www.amazontrust.com/repository/AmazonRootCA1.pem
+#
+# After scp, write the device record to DynamoDB PiDeviceRegistryTable:
+#   aws dynamodb put-item --table-name VigiaPiDeviceRegistry \
+#     --item '{"device_id":{"S":"vigia-001"},"cert_pem":{"S":"<PEM>"},"last_seq":{"N":"0"}}'
 ```
 
 Flash the Phase 2 live firmware to the Pico 2:
@@ -556,10 +560,12 @@ ros2 launch vigia_edge_node vigia_full.launch.py
 
 Nodes start in priority order: `sensor_bridge` (SCHED_FIFO 85) → `camera` (80) → `vision` (75) → `fusion` → `anti_death` (99). The BLE GATT server advertises once `anti_death_node` initialises.
 
-**Env vars for live mode:**
+**Required env vars on Pi:**
+- `MQTT_BROKER_HOST` — AWS IoT Core endpoint (`<prefix>-ats.iot.<region>.amazonaws.com`)
 - `COSMOS3_API_KEY` — activates Cosmos 3 world model submission (stub mode if unset)
-- `MQTT_BROKER_HOST` — enables the server-side MQTT attestation subscriber
-- `DATABASE_URL` — PostgreSQL connection string for the ingest server
+
+Pi MQTT publishes to `vigia/attest/<device_id>/hazard` using the device certificate.  
+IoT Core topic rule `vigia_hazard_attest` forwards each event to `AttestationFn` Lambda for full ECDSA + anti-replay + H3 geo-dedup pipeline.
 
 ---
 

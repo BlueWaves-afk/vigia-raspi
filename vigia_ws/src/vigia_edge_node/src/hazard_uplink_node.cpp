@@ -31,8 +31,10 @@ HazardUplinkNode::HazardUplinkNode(const rclcpp::NodeOptions& options)
                        "/etc/vigia/device_cert.pem");
     key_path_    = declare_parameter<std::string>("mqtt_key_path",
                        "/etc/vigia/device.key");
+    // AWS IoT Core CA — download from https://www.amazontrust.com/repository/AmazonRootCA1.pem
+    // and install to /etc/vigia/AmazonRootCA1.pem on each Pi before first boot.
     ca_path_     = declare_parameter<std::string>("mqtt_ca_path",
-                       "/etc/vigia/vigia-ca.crt");
+                       "/etc/vigia/AmazonRootCA1.pem");
 
     if (broker_host_.empty()) {
         RCLCPP_WARN(get_logger(),
@@ -69,7 +71,10 @@ bool HazardUplinkNode::connect_mqtt()
 {
     const std::string server_uri =
         "ssl://" + broker_host_ + ":" + std::to_string(broker_port_);
-    const std::string client_id = "vigia-uplink-" + device_id_;
+    // client_id MUST equal device_id exactly — IoT Core policy grants
+    // iot:Connect to arn:.../client/${iot:ClientId} and iot:Publish to
+    // vigia/attest/${iot:ClientId}/hazard. Any prefix breaks the policy match.
+    const std::string client_id = device_id_;
 
     auto* c = new mqtt::async_client(server_uri, client_id);
     mqtt_client_ = c;
