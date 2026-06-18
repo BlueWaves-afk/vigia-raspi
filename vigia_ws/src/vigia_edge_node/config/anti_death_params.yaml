@@ -1,0 +1,22 @@
+anti_death_node:
+  ros__parameters:
+    # UPS GPIO — Pi 5 uses gpiochip4, active-low POWER_FAIL signal
+    ups_gpio_chip: "/dev/gpiochip4"
+    ups_gpio_line: 17
+    ups_gpio_active_low: true
+
+    # AWS API Gateway endpoint (Phase 1 HTTPS uplink)
+    aws_telemetry_url: "https://sq2ri2n51g.execute-api.us-east-1.amazonaws.com/prod/telemetry"
+
+    # Ed25519 signing key (provisioned by tools/provision_device.py)
+    device_key_path: "/etc/vigia/device_ed25519.key"
+
+    # Emergency sequence time budget (seconds) — UPS holds power for ~15s
+    emergency_budget_sec: 13.0   # 2s margin before hard power cut
+
+    # Geohash precision for event location (characters, 1–12)
+    # 6 chars = ~1.2km², 8 chars = ~19m² — use 6 for privacy
+    geohash_precision: 6
+
+    # /dev/shm ring buffer path (must match camera_params.yaml shm_path)
+    shm_path: "/dev/shm/vigia_ring.buf"

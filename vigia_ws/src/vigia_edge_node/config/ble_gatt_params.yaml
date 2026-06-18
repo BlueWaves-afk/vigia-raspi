@@ -1,0 +1,19 @@
+ble_gatt_node:
+  ros__parameters:
+    # BlueZ HCI adapter
+    ble_adapter: "hci0"
+
+    # Device ID embedded in BLE advertisement name ("VIGIA-<last4 of id>")
+    # Must match the id provisioned in vigia-pair-qr.py
+    device_id: "vigia-001"
+
+    # Telemetry notification rate (Hz) — design spec §6.1 mandates ≥1 Hz, target 5 Hz
+    stream_hz: 5.0
+
+    # Default spatial latent dimensionality (256 or 512)
+    # Phone can override via CONTROL_CHAR (0x00=256D, 0x01=512D, 0xFF=RRI-only)
+    default_dims: 256
+
+    # Pi P-256 identity key for ECDH handshake (design spec §4.2a)
+    # Generate with: sudo python3 tools/vigia-pair-qr.py --provision
+    identity_key_path: "/etc/vigia/pi_p256.der"

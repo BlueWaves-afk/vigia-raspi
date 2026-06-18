@@ -1,0 +1,25 @@
+vision_node:
+  ros__parameters:
+    # ONNX model paths (generate with tools/model_prep/ scripts)
+    model_path: "models/yolov26/vigia_v26n_int8_convonly.onnx"
+
+    # Latent layer name — set after running tools/model_prep/02_inspect_latent_layer.py
+    # Leave empty ("") if the _with_latent variant is used; the node falls back to
+    # publishing an empty SpatialLatent rather than crashing.
+    # Known layer from YOLO v26n: /model.22/cv2/act/Mul_output_0
+    latent_layer_name: "/model.22/cv2/act/Mul_output_0"
+
+    # Model input dimensions (must match export imgsz)
+    input_width: 320
+    input_height: 320
+
+    # Detection thresholds
+    conf_threshold: 0.25
+    nms_threshold: 0.45
+
+    # KleidiAI ACL EP (uncomment after ACL EP build is verified)
+    # use_acl_ep: true
+    use_acl_ep: false
+
+    # Maximum number of detected objects per frame (pre-alloc)
+    max_detections: 100

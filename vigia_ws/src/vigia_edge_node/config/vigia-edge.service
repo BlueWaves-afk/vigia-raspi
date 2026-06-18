@@ -1,0 +1,64 @@
+[Unit]
+Description=VIGIA Edge Node — ADAS DePIN perception pipeline
+Documentation=https://github.com/VigiaLabs/vigia-raspi
+After=network.target bluetooth.service
+Wants=bluetooth.service
+# Wait for camera and Pico 2 USB-CDC to enumerate
+After=dev-video0.device dev-ttyACM0.device
+Wants=dev-video0.device dev-ttyACM0.device
+
+[Service]
+Type=simple
+User=vigiasense
+Group=vigiasense
+
+# ROS2 environment
+Environment="ROS_DOMAIN_ID=42"
+Environment="RCUTILS_COLORIZED_OUTPUT=1"
+EnvironmentFile=-/etc/vigia/ros2.env
+
+# Lock memory pages to prevent page faults during RT execution
+# mlockall(MCL_CURRENT|MCL_FUTURE) is also called in main.cpp,
+# but the systemd limit must be set to allow it.
+LimitMEMLOCK=infinity
+LimitRTPRIO=99
+LimitRTTIME=infinity
+
+# Give the process real-time scheduling capability
+AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_SYS_NICE CAP_IPC_LOCK
+
+WorkingDirectory=/home/vigiasense/vigia_ws
+
+ExecStartPre=/bin/bash -c 'source /home/vigiasense/vigia_ws/install/setup.bash'
+ExecStart=/bin/bash -c '\
+  source /home/vigiasense/vigia_ws/install/setup.bash && \
+  ros2 run vigia_edge_node vigia_edge_node \
+    --ros-args \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/camera_params.yaml \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/vision_params.yaml \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/depth_params.yaml \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/fusion_params.yaml \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/sensor_bridge_params.yaml \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/anti_death_params.yaml \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/ble_gatt_params.yaml \
+'
+
+# Restart on crash — but not on clean exit (e.g. deliberate shutdown)
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+# Signal handling — let the node clean up BLE advertisement + GPIO before SIGKILL
+TimeoutStopSec=10s
+KillSignal=SIGTERM
+SendSIGKILL=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vigia-edge
+
+[Install]
+WantedBy=multi-user.target

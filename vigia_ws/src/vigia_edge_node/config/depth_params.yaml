@@ -1,0 +1,16 @@
+depth_node:
+  ros__parameters:
+    # MiDaS v2.1 small FP32 model
+    model_path: "models/midasv21/midas_v21_small_256.onnx"
+
+    # Model input/output dimensions (MiDaS v2.1 small native)
+    input_width: 256
+    input_height: 256
+
+    # Thermal-adaptive stride: skip frames when processing falls behind
+    # 1 = process every frame, 2 = every other frame, etc.
+    adaptive_stride_max: 2
+
+    # FP32 only — INT8/FP16 graph transforms are blocked in session config
+    # Do not change — doc 04 mixed precision invariant
+    force_fp32: true

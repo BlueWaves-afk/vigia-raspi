@@ -1,0 +1,32 @@
+fusion_node:
+  ros__parameters:
+    # Road Roughness Index weights (vigia_rri.hpp RriWeights)
+    rri_w_vision: 0.35
+    rri_w_depth: 0.30
+    rri_w_imu: 0.25
+    rri_w_temporal: 0.10
+
+    # ISS (Impact Severity Score) thresholds
+    iss_threshold_minor: 0.30
+    iss_threshold_major: 0.65
+    iss_threshold_severe: 0.85
+
+    # Kalman filter process noise (IMU velocity estimate)
+    kalman_process_noise: 0.01
+    kalman_measurement_noise: 0.1
+
+    # Gravity compensation — BNO085 outputs quaternion in sensor frame
+    # Pi Camera is mounted with Y-axis forward; IMU mounted flat (Z-up)
+    imu_mount_rotation_deg: 0.0  # adjust if IMU is tilted relative to vehicle plane
+
+    # Velocity floor for ISS normalization (prevents divide-by-zero in parking lots)
+    v_min_ms: 2.0
+
+    # Temporal analyzer window (frames)
+    temporal_window: 10
+
+    # Minimum confidence to emit a HazardEvent
+    hazard_conf_threshold: 0.50
+
+    # IMU is optional — node degrades gracefully without it
+    require_imu: false

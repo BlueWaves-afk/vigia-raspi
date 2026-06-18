@@ -1,0 +1,12 @@
+camera_node:
+  ros__parameters:
+    # Camera device
+    camera_index: 0          # /dev/video0 — Pi Camera Module 3
+    target_fps: 30.0
+    frame_width: 1280
+    frame_height: 720
+
+    # /dev/shm seqlock ring buffer (doc 02 §7)
+    # 300 frames × (1280×720×3) ≈ 829 MB — Pi 5 has 8 GB LPDDR4X
+    shm_ring_size: 300       # frames in ring (must match SHM_RING_DEPTH in shm_ring_buffer.hpp)
+    shm_path: "/dev/shm/vigia_ring.buf"

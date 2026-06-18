@@ -1,0 +1,22 @@
+sensor_bridge_node:
+  ros__parameters:
+    # Serial port for Pico 2 USB-CDC bridge
+    serial_port: "/dev/ttyACM0"
+    baud_rate: 921600
+
+    # Protocol auto-detect: text ('V' prefix) or COBS binary (0x00 prefix)
+    # Phase 1 firmware sends text; Phase 2 firmware sends COBS.
+    # The node detects automatically — no config change needed when firmware is updated.
+    protocol_hint: "auto"   # "auto" | "text" | "cobs"
+
+    # ECDSA verification of Pico 2 signed E_t packets (Phase 2, blocked on ATECC608A)
+    # Device certificate must match the ATECC608A public key provisioned at manufacture.
+    device_cert_path: "/etc/vigia/device_cert.pem"
+    verify_ecdsa: false    # set true once ATECC608A is wired and provisioned
+
+    # IMU history ring buffer size (samples)
+    # Used by imu_at_or_before() for timestamp-matched fusion
+    imu_history_size: 200
+
+    # Health publisher rate (Hz)
+    health_publish_hz: 1.0
