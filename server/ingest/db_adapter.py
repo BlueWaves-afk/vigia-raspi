@@ -63,6 +63,42 @@ class VigiaDb:
             row = cur.fetchone()
         return row[0] if row else None
 
+    def claim_device(self, device_id: str, wallet_pubkey: str) -> str:
+        """Try to bind device_id → wallet_pubkey atomically.
+
+        Returns "ok" if the binding was created or already exists for this
+        exact (device_id, wallet_pubkey) pair.
+        Raises ValueError with a machine-readable reason on conflict:
+          "device_taken"  — device already bound to a different wallet
+          "wallet_taken"  — wallet already bound to a different device
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO device_bindings (device_id, wallet_pubkey)
+                VALUES (%s, %s)
+                ON CONFLICT (device_id) DO UPDATE
+                    SET device_id = EXCLUDED.device_id  -- no-op, just to lock row
+                RETURNING wallet_pubkey
+                """,
+                (device_id, wallet_pubkey),
+            )
+            row = cur.fetchone()
+        if row and row[0] != wallet_pubkey:
+            raise ValueError("device_taken")
+
+        # Check wallet uniqueness (separate constraint in case INSERT was a no-op).
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT device_id FROM device_bindings WHERE wallet_pubkey = %s",
+                (wallet_pubkey,),
+            )
+            wrow = cur.fetchone()
+        if wrow and wrow[0] != device_id:
+            raise ValueError("wallet_taken")
+
+        return "ok"
+
     def log_verified_event(self, device_id: str, event: dict[str, Any]) -> None:
         with self._conn.cursor() as cur:
             cur.execute(

@@ -68,3 +68,14 @@ CREATE TABLE attestation_log (
 );
 CREATE INDEX idx_attestation_log_device_id ON attestation_log (device_id);
 CREATE INDEX idx_attestation_log_logged_at ON attestation_log (logged_at DESC);
+
+-- 1:1 binding between a hardware device and a wallet (phone account).
+-- UNIQUE on device_id: one device can only be claimed by one wallet.
+-- UNIQUE on wallet_pubkey: one wallet can only claim one device.
+-- Both constraints together prevent multi-account farming from a single unit
+-- and prevent a single account from claiming multiple units.
+CREATE TABLE device_bindings (
+    device_id     TEXT PRIMARY KEY,
+    wallet_pubkey TEXT NOT NULL UNIQUE,
+    claimed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

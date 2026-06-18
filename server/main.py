@@ -584,6 +584,32 @@ def get_hazard(
     }
 
 
+class ClaimDeviceRequest(BaseModel):
+    device_id: str
+    wallet_pubkey: str
+
+
+@app.post("/v1/claim-device")
+def claim_device(req: ClaimDeviceRequest) -> dict[str, str]:
+    """Bind a device to a wallet (1:1 enforcement).
+
+    Returns 200 {"status": "ok"} on success or idempotent re-claim.
+    Returns 409 {"detail": "device_taken"|"wallet_taken"} on conflict.
+    """
+    if not req.device_id or not req.wallet_pubkey:
+        raise HTTPException(status_code=400, detail="device_id and wallet_pubkey are required")
+
+    with get_conn() as conn:
+        db = VigiaDb(conn)
+        try:
+            with db.transaction():
+                db.claim_device(req.device_id, req.wallet_pubkey)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return {"status": "ok"}
+
+
 @app.get("/map")
 def hazard_map() -> FileResponse:
     index = os.path.join(WEB_DIR, "index.html")
