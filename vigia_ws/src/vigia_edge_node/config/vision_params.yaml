@@ -1,7 +1,7 @@
 vision_node:
   ros__parameters:
     # ONNX model paths (generate with tools/model_prep/ scripts)
-    model_path: "models/yolov26/vigia_v26n_int8_convonly.onnx"
+    model_path: "models/yolo26/vigia_v26n_int8_convonly_with_latent.onnx"
 
     # Latent layer name — set after running tools/model_prep/02_inspect_latent_layer.py
     # Leave empty ("") if the _with_latent variant is used; the node falls back to
