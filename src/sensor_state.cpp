@@ -16,6 +16,11 @@ void SensorState::updateGps(const GpsFix& fix) {
     latest_gps_ = fix;
 }
 
+void SensorState::updateSignedEt(const SignedEtSample& sample) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    latest_signed_et_ = sample;
+}
+
 void SensorState::updateHealth(const SensorHealth& health) {
     std::lock_guard<std::mutex> lock(mutex_);
     health_ = health;
@@ -29,6 +34,11 @@ std::optional<ImuSample> SensorState::getLatestImu() const {
 std::optional<GpsFix> SensorState::getLatestGps() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return latest_gps_;
+}
+
+std::optional<SignedEtSample> SensorState::getLatestSignedEt() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return latest_signed_et_;
 }
 
 SensorHealth SensorState::getHealth() const {

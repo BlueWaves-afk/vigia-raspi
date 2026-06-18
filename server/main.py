@@ -36,6 +36,16 @@ MERGE_RADIUS_M = float(os.environ.get("HAZARD_MERGE_RADIUS_M", "5"))
 POOL_MIN = int(os.environ.get("DB_POOL_MIN", "2"))
 POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
 TRUST_LEVEL_SIGNED = "software_signed"
+TRUST_LEVEL_HARDWARE = "hardware_attested"
+
+
+def _resolve_trust_level(event: dict[str, Any]) -> str:
+    signed_et = event.get("signed_et")
+    if isinstance(signed_et, dict) and signed_et.get("valid") is True:
+        return TRUST_LEVEL_HARDWARE
+    if event.get("signed_et_valid") is True:
+        return TRUST_LEVEL_HARDWARE
+    return TRUST_LEVEL_SIGNED
 
 # ---------------------------------------------------------------------------
 # Connection pool — created once at startup, shared across all requests.
@@ -212,7 +222,7 @@ def _insert_observation(cur, event: dict[str, Any], hazard_id: str) -> str:
             json.dumps(bbox) if bbox is not None else None,
             motion.get("speed_mps"),
             motion.get("hdop"),
-            TRUST_LEVEL_SIGNED,
+            _resolve_trust_level(event),
             json.dumps(event),
         ),
     )

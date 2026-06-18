@@ -32,6 +32,9 @@ struct HazardObservation {
     float    hdop{0.0f};
     uint8_t  gps_fix_type{0};
     bool     gps_valid{false};
+    bool     signed_et_valid{false};
+    uint8_t  et_hash[32]{};       // SHA-256 of EtHashInput when signed_et_valid
+    uint32_t signed_et_sequence{0};
 };
 
 /* Sync-thread only — may allocate std::string. */

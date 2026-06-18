@@ -22,15 +22,15 @@ _Static_assert(sizeof(SignedEtPacket) == SIGNED_ET_PACKET_SIZE, "SignedEtPacket 
 #define VIGIA_ATCA_SDA_PIN  2
 #define VIGIA_ATCA_SCL_PIN  3
 #define VIGIA_ATCA_I2C_HZ   400000   /* 400 kHz Fast Mode */
-#define VIGIA_ATCA_ADDR     0x60     /* ADDR pin → GND */
+#define VIGIA_ATCA_ADDR     0xC0     /* 8-bit I2C addr (7-bit 0x60); ADDR pin → GND */
 
 /* ── LED blink error codes ────────────────────────────────────────────────── */
 static void blink_panic(uint32_t code) {
-    extern const uint LED_PIN;
+    const uint led_pin = PICO_DEFAULT_LED_PIN;
     while (true) {
         for (uint32_t i = 0; i < code; ++i) {
-            gpio_put(LED_PIN, 1); sleep_ms(200);
-            gpio_put(LED_PIN, 0); sleep_ms(200);
+            gpio_put(led_pin, 1); sleep_ms(200);
+            gpio_put(led_pin, 0); sleep_ms(200);
         }
         sleep_ms(800);
     }
@@ -71,7 +71,7 @@ static ATCAIfaceCfg g_atca_cfg = {
     .devtype     = ATECC608,
     .atcai2c     = {
         .slave_address = VIGIA_ATCA_ADDR,
-        .bus           = 1,      /* i2c1 */
+        .bus           = 1,
         .baud          = VIGIA_ATCA_I2C_HZ,
     },
     .wake_delay  = 1500,

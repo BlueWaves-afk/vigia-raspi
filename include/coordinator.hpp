@@ -67,6 +67,9 @@ private:
         float gpsHdop{99.0f};
         uint8_t gpsFixType{0};
         bool gpsValid{false};
+        bool signedEtValid{false};
+        uint8_t etHash[32]{};
+        uint32_t signedEtSequence{0};
     };
     SensorSnapshot querySensors() const;
 

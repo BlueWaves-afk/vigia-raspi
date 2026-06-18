@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from main import TRUST_LEVEL_HARDWARE, TRUST_LEVEL_SIGNED, _resolve_trust_level
 from ingest.auth import InvalidSignatureError, authenticate_event
 from ingest.replay import ReplayError, check_device_seq
 from ingest.signature import canonical_json, compute_hmac, verify_hmac
@@ -74,6 +75,17 @@ class TestReplay:
     def test_rejects_decreasing_seq(self) -> None:
         with pytest.raises(ReplayError):
             check_device_seq(100, 99, DEVICE_ID)
+
+
+class TestTrustLevel:
+    def test_software_signed_default(self) -> None:
+        event = _sample_event()
+        del event["signature"]
+        assert _resolve_trust_level(event) == TRUST_LEVEL_SIGNED
+
+    def test_hardware_attested_with_signed_et(self) -> None:
+        event = _sample_event(signed_et={"valid": True, "sequence": 42, "hash": "ab" * 16})
+        assert _resolve_trust_level(event) == TRUST_LEVEL_HARDWARE
 
 
 class TestAuth:

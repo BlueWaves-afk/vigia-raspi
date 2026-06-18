@@ -80,7 +80,7 @@ curl http://127.0.0.1:8080/health
 - Signature via `X-Vigia-Signature` header or body `signature` field
 - **Anti-replay:** `device_seq` must be strictly greater than `device_registry.last_device_seq`
 - **Idempotency:** duplicate `event_id` returns HTTP 200 with `status: duplicate`
-- Server assigns `trust_level=software_signed` on successful verification
+- Server assigns `trust_level=software_signed` on successful verification; `hardware_attested` when `signed_et.valid` is true in the event payload
 
 ### Example signed ingest
 

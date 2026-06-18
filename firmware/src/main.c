@@ -204,6 +204,7 @@ int main(void) {
                 s_et_input.satellites = report.satellites;
                 memset(s_et_input._pad0, 0, sizeof(s_et_input._pad0));
                 memset(s_et_input._pad1, 0, sizeof(s_et_input._pad1));
+                memset(s_et_input._pad2, 0, sizeof(s_et_input._pad2));
 
                 /* Hash (~40 ms) then sign (~57 ms) — runs in GPS branch (1 Hz budget) */
                 vigia_atca_sha((const uint8_t *)&s_et_input, ET_HASH_INPUT_SIZE,
@@ -227,6 +228,7 @@ int main(void) {
                 s_et_pkt.fix_type   = report.fix_type;
                 s_et_pkt.satellites = report.satellites;
                 memset(s_et_pkt._gps_pad, 0, sizeof(s_et_pkt._gps_pad));
+                memset(s_et_pkt._wire_pad, 0, sizeof(s_et_pkt._wire_pad));
 
                 /* COBS encode and transmit */
                 size_t frame_len = cobs_encode(

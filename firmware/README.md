@@ -138,6 +138,62 @@ Bench checks (Milestone 1):
 
 Disable IMU USB debug: rebuild with `-DVIGIA_IMU_DEBUG_USB=0` in CMake.
 
+## ATECC608P Secure Element (I2C1 — Phase 2)
+
+4-pin breakout (VCC, GND, SCL, SDA only). ADDR is hardwired on the PCB (usually **0x60**).
+
+| Breakout pin | Pico 2 GPIO | Notes |
+|--------------|-------------|-------|
+| SDA | **GP2** | I2C1 |
+| SCL | **GP3** | I2C1 |
+| VCC | 3.3 V sensor rail | Shared with BNO085 + GPS — see [power-distribution.md](../docs/power-distribution.md) |
+| GND | Common ground | Star point at regulator |
+
+**Pull-ups:** Most breakouts include onboard SDA/SCL pull-ups (2.2–10 kΩ). If your PCB has them, do **not** add external 4.7 kΩ resistors. Pico `gpio_pull_up()` in the driver is supplementary only (~50 kΩ).
+
+**If init fails** (LED blinks 3×): I2C-scan GP2/GP3. Trust&GO parts may use `0x35`/`0x36` — change `VIGIA_ATCA_ADDR` in `src/atecc608a_driver.c`.
+
+### Phase 2 stub build (COBS pipeline, zero signatures — no SE required)
+
+```bash
+cd firmware
+cmake -B build-phase2-stub -DPICO_BOARD=pico2 -DVIGIA_BUILD_PHASE2_STUB=ON
+cmake --build build-phase2-stub
+# Flash: build-phase2-stub/vigia_pico_phase2_stub.uf2
+```
+
+On the Pi, validate COBS output:
+
+```bash
+python3 tools/pico_packet_monitor.py --port /dev/ttyACM0 --duration 30
+```
+
+### Phase 2 live build (real ECDSA — SE wired)
+
+```bash
+# One-time: clone cryptoauthlib (or run scripts/setup_cryptoauthlib.sh)
+git clone https://github.com/MicrochipTech/cryptoauthlib.git firmware/third_party/cryptoauthlib
+
+cd firmware
+cmake -B build-phase2-live -DPICO_BOARD=pico2 \
+  -DVIGIA_BUILD_PHASE2_LIVE=ON \
+  -DCRYPTOAUTHLIB_DIR=third_party/cryptoauthlib
+cmake --build build-phase2-live
+# Flash: build-phase2-live/vigia_pico_phase2_live.uf2
+```
+
+Provision slot-0 key and export pubkey:
+
+```bash
+python3 tools/atecc_provision.py --port /dev/ttyACM0 --device-id vigia-pico-001
+```
+
+Bench validation:
+
+```bash
+./scripts/bench_phase2_validate.sh --port /dev/ttyACM0
+```
+
 ## Next step
 
-When link + GPS + IMU work, move to separate VSYS power + **data-only USB** per [power-distribution.md](../docs/power-distribution.md), then add ATECC608A and `VIGIA_IMU` @ 100 Hz wire protocol (Milestone 2).
+When link + GPS + IMU work, move to separate VSYS power + **data-only USB** per [power-distribution.md](../docs/power-distribution.md). Phase 2 COBS+signing firmware replaces text `VIGIA_GPS` output when `VIGIA_PHASE2=1`.

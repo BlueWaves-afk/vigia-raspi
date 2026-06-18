@@ -151,7 +151,12 @@ int main(int argc, char** argv)
         // M6: sensor bridge — start before Coordinator so the first frames
         // already have IMU/GPS state.  Tolerates Pico not being plugged in;
         // the bridge logs a warning and Coordinator falls back to vision-only.
-        vigia::SensorBridge bridge(vigia::SensorBridge::Config{sensorPort, 115200});
+        vigia::SensorBridge::Config bridgeCfg;
+        bridgeCfg.device = sensorPort;
+        bridgeCfg.baud = 115200;
+        bridgeCfg.pubkey_file = envOrDefault("VIGIA_PUBKEY_FILE", "");
+        bridgeCfg.allow_stub_sig = envBool("VIGIA_ALLOW_STUB_SIG", false);
+        vigia::SensorBridge bridge(bridgeCfg);
         bridge.start();
 
         vigia::EventStore eventStore(loadEventStoreConfig());

@@ -58,14 +58,16 @@ if(VIGIA_BUILD_PHASE2_STUB)
     pico_add_extra_outputs(vigia_pico_phase2_stub)
 endif()
 
-# ── Phase 2 live build (real ATECC608A — requires SE wired on I2C1) ───────
+# ── Phase 2 live build (real ATECC608P — requires SE wired on I2C1) ───────
 # Build with: cmake -DVIGIA_BUILD_PHASE2_LIVE=ON -DCRYPTOAUTHLIB_DIR=<path> ..
-option(VIGIA_BUILD_PHASE2_LIVE "Build Phase 2 firmware with real ATECC608A signing" OFF)
+option(VIGIA_BUILD_PHASE2_LIVE "Build Phase 2 firmware with real ATECC608P signing" OFF)
 
 if(VIGIA_BUILD_PHASE2_LIVE)
     if(NOT DEFINED CRYPTOAUTHLIB_DIR)
         message(FATAL_ERROR "CRYPTOAUTHLIB_DIR must be set for Phase 2 live build")
     endif()
+
+    include(cmake/cryptoauthlib_pico.cmake)
 
     add_executable(vigia_pico_phase2_live
         src/main.c
@@ -82,7 +84,6 @@ if(VIGIA_BUILD_PHASE2_LIVE)
         VIGIA_IMU_DEBUG_USB=0
         VIGIA_PHASE2=1
         VIGIA_PHASE2_STUB=0
-        ATCA_NO_HEAP           # cryptoauthlib: no heap allocation
     )
     target_link_libraries(vigia_pico_phase2_live
         pico_stdlib
@@ -91,8 +92,8 @@ if(VIGIA_BUILD_PHASE2_LIVE)
         hardware_spi
         hardware_i2c
         m
-        # cryptoauthlib target must be added_subdirectory'd by caller
     )
+    vigia_link_cryptoauthlib(vigia_pico_phase2_live)
     pico_enable_stdio_usb(vigia_pico_phase2_live 1)
     pico_enable_stdio_uart(vigia_pico_phase2_live 0)
     pico_add_extra_outputs(vigia_pico_phase2_live)

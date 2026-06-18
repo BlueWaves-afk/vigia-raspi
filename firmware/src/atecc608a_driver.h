@@ -36,6 +36,7 @@ typedef struct {
     uint8_t  fix_type;        /* NAV-PVT fixType@20 */
     uint8_t  satellites;      /* NAV-PVT numSV@23 */
     uint8_t  _pad1[2];        /* explicit end-of-struct pad */
+    uint8_t  _pad2[12];       /* reserved — keeps EtHashInput at 96 bytes for SHA */
 } EtHashInput;
 #pragma pack(pop)
 
@@ -69,6 +70,9 @@ typedef struct {
     /* Signing — 96 bytes */
     uint8_t  et_hash[32];     /* SHA-256 of EtHashInput via atcab_sha() */
     uint8_t  ecdsa_sig[64];   /* secp256r1 ECDSA-SHA256 via atcab_sign() slot 0 */
+
+    /* Wire padding — keeps total frame at 173 bytes (ABI with Pi decoder) */
+    uint8_t  _wire_pad[8];
 } SignedEtPacket;
 #pragma pack(pop)
 

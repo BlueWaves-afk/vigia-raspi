@@ -49,6 +49,7 @@ struct SignedEtPacketPi {
     uint8_t  _gps_pad[1];
     uint8_t  et_hash[32];
     uint8_t  ecdsa_sig[64];
+    uint8_t  _wire_pad[8];
 };
 #pragma pack(pop)
 static_assert(sizeof(SignedEtPacketPi) == 165, "SignedEtPacket size mismatch with firmware");

@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 config/device.key
+config/device_keys/
+firmware/build-*/
+firmware/third_party/
