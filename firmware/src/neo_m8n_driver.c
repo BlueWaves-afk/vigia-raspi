@@ -434,8 +434,9 @@ static void configure_gps(uart_inst_t *uart) {
     ubx_send(uart, UBX_CLASS_CFG, UBX_ID_CFG_MSG, cfg_msg, (uint16_t)sizeof(cfg_msg));
     sleep_ms(50);
 
+    /* measRate=100ms (10 Hz), navRate=1, timeRef=UTC */
     const uint8_t cfg_rate[] = {
-        0xE8u, 0x03u, 0x01u, 0x00u, 0x00u, 0x00u,
+        0x64u, 0x00u, 0x01u, 0x00u, 0x00u, 0x00u,
     };
     ubx_send(uart, UBX_CLASS_CFG, UBX_ID_CFG_RATE, cfg_rate, (uint16_t)sizeof(cfg_rate));
     sleep_ms(50);

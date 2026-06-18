@@ -1,6 +1,6 @@
 # VIGIA System Gap Tracker
 
-**Last updated:** 2026-06-18 (session 2)  
+**Last updated:** 2026-06-18 (session 3)  
 **Audited against:** commits through `3e1a873` (our M9 build fixes) + `bf6e8d6` (Ben's SE commit) + this session  
 **Build status:** `colcon build` ✅ passing on Pi (Debian Trixie, aarch64)
 
@@ -35,18 +35,18 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 |---|------|--------|-------|
 | 2.1 | ATECC608A I2C driver | `[~]` | `firmware/src/atecc608a_driver.c` written. **Default build is `VIGIA_PHASE2_STUB=1`** (zero-fills hash + sig). Live path requires physical wiring: GP2=SDA, GP3=SCL, 4.7 kΩ pull-ups to 3.3 V. Ben's commit `bf6e8d6`. |
 | 2.2 | cryptoauthlib cross-build | `[~]` | `firmware/cmake/cryptoauthlib_pico.cmake` added. `scripts/setup_cryptoauthlib.sh` + `scripts/build_phase2_live.sh` present. Not yet confirmed built with `VIGIA_PHASE2_STUB=0`. |
-| 2.3 | `E_t` hash + ECDSA signing loop | `[~]` | Called in `firmware/src/main.c` (`vigia_atca_sign()`). Active only when stub mode is off and SE is physically wired. |
+| 2.3 | `E_t` hash + ECDSA signing loop | `[~]` | Called in `firmware/src/main.c` (`vigia_atca_sign()`). `k_device_id` now reads from `atcab_read_serial_number()` instead of hardcoded placeholder. Active once `build_phase2_live.sh` built and flashed. |
 | 2.4 | COBS encoder | `[~]` | `include/cobs.hpp` added. Referenced in firmware but integration not confirmed end-to-end. |
-| 2.5 | GPS rate 10 Hz (`UBX-CFG-RATE`) | `[ ]` | NEO-M8N defaults to 1 Hz NAV-PVT. Need to send `UBX-CFG-RATE` (measurement period 100 ms) at firmware boot. Spec §2 requires 10 Hz. |
-| 2.6 | `no_heap.cpp` link-time enforcement | `[ ]` | Not present. Spec requires `operator new` / `malloc` to panic in firmware. |
-| 2.7 | ATECC608A physically wired | `[ ]` | **Hardware blocker.** GP2=SDA, GP3=SCL. Until wired, all signing is zero-filled stub. |
-| 2.8 | ATECC608A provisioned (Microchip Trust Platform) | `[ ]` | `tools/atecc_provision.py` added in `bf6e8d6`. Run against a wired device. Needs Microchip account + Trust Platform certificate chain. |
+| 2.5 | GPS rate 10 Hz (`UBX-CFG-RATE`) | `[x]` | `neo_m8n_driver.c` `configure_gps()` now sends `UBX-CFG-RATE` with measRate=0x0064 (100 ms). Was 0x03E8 (1000 ms = 1 Hz). <!-- resolved: 2026-06-18 --> |
+| 2.6 | `no_heap.cpp` link-time enforcement | `[x]` | `firmware/src/no_heap.cpp` present. `operator new` / `operator new[]` are `static_assert(false, ...)` — any TU calling `new` fails to compile. <!-- resolved: 2026-06-18 --> |
+| 2.7 | ATECC608A physically wired | `[x]` | **Confirmed wired by user.** GP2=SDA, GP3=SCL, 4.7 kΩ pull-ups to 3.3 V. <!-- resolved: 2026-06-18 --> |
+| 2.8 | ATECC608A provisioned (Microchip Trust Platform) | `[~]` | `tools/atecc_provision.py` added. Chip is wired; run `scripts/build_phase2_live.sh` then `tools/atecc_provision.py --device-id vigia-001` after flashing. Needs one-time `atcab_genkey(0)` call via Trust Platform or live firmware. |
 
 ### Pi side (sensor_bridge_node)
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| 2.9 | COBS baud rate 921600 | `[ ]` | Spec §6.5 mandates 921600 baud. Current default is 115200. One-line param change in `sensor_bridge_params.yaml` and confirming Pico firmware agrees. |
+| 2.9 | COBS baud rate 921600 | `[x]` | `sensor_bridge_params.yaml` already set to 921600. `sensor_bridge_node.cpp` termios now handles `B921600` case (was binary: B115200 or B9600). <!-- resolved: 2026-06-18 --> |
 | 2.10 | `SignedEtPacketPi` struct size 173 bytes | `[x]` | Fixed in `ff5683d`. <!-- resolved: 2026-06-18, ff5683d --> |
 | 2.11 | `sig_valid` ECDSA verify wired | `[x]` | `sensor_bridge_node.cpp` now loads `/etc/vigia/atecc_pubkey.bin` at startup and calls `vigia::VigiaIdentityKey::verify_peer()` in `process_cobs_frame`. Returns `false` for all-zero stubs. <!-- resolved: 2026-06-18 --> |
 
@@ -151,7 +151,7 @@ In rough priority order:
 
 ## Requires Ben (hardware)
 
-- ATECC608A wiring (GP2=SDA, GP3=SCL, pull-ups) → items 2.7, 2.1 live, 2.2 live, 2.3
+- ~~ATECC608A wiring (GP2=SDA, GP3=SCL, pull-ups)~~ — **done** (2026-06-18)
 - SIM7600 ECM provisioning → item 5.3
 - PREEMPT_RT cmdline.txt edit → item 1.1
 

@@ -224,7 +224,9 @@ void SensorBridgeNode::open_serial_and_start()
     struct termios tty{};
     tcgetattr(fd_, &tty);
     cfmakeraw(&tty);
-    const speed_t spd = (baud_rate_ == 115200) ? B115200 : B9600;
+    const speed_t spd = (baud_rate_ == 921600) ? B921600
+                      : (baud_rate_ == 115200) ? B115200
+                      : B9600;
     cfsetispeed(&tty, spd);
     cfsetospeed(&tty, spd);
     tty.c_cflag |= (CLOCAL | CREAD | CS8);

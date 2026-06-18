@@ -139,12 +139,17 @@ int main(void) {
     static uint8_t         s_cobs_frame[COBS_FRAME_MAX];
     static uint32_t        s_et_seq = 0;
 
-    /* Phase 2: device_id provisioned in ATECC608A data zone.
-     * Hardcoded placeholder until provisioning script runs. */
-    static const uint8_t k_device_id[16] = {
-        0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03,
-        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B
-    };
+    /* Phase 2: read 9-byte serial from ATECC608A, zero-padded to 16 bytes. */
+    static uint8_t k_device_id[16] = {0};
+    {
+        uint8_t atca_serial[ATCA_SERIAL_NUM_SIZE]; /* 9 bytes */
+        const ATCA_STATUS atca_s = atcab_read_serial_number(atca_serial);
+        if (atca_s == ATCA_SUCCESS) {
+            memcpy(k_device_id, atca_serial, ATCA_SERIAL_NUM_SIZE);
+        } else {
+            blink_panic(2); /* serial read failed — SE may need provisioning */
+        }
+    }
 #endif
 
     const uint32_t boot_ms = to_ms_since_boot(get_absolute_time());
