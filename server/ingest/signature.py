@@ -1,4 +1,4 @@
-"""HMAC-SHA256 signature verification over canonical JSON."""
+"""HMAC-SHA256 and ECDSA-SHA256 signature verification over canonical JSON."""
 
 from __future__ import annotations
 
@@ -39,3 +39,24 @@ def extract_signature(payload: dict[str, Any], header_signature: str | None) -> 
     if isinstance(body_sig, str) and body_sig:
         return body_sig
     return None
+
+
+def verify_ecdsa_header(payload: dict[str, Any], signature: str, cert_pem: str) -> bool:
+    """
+    Verify base64-encoded DER ECDSA-SHA256 signature over canonical JSON.
+    The device signs canonical_json(payload) with its ATECC608A private key.
+    """
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.x509 import load_pem_x509_certificate
+        from cryptography.hazmat.backends import default_backend
+
+        der_sig = base64.b64decode(signature)
+        cert = load_pem_x509_certificate(cert_pem.encode(), default_backend())
+        msg = canonical_json(payload)
+        cert.public_key().verify(der_sig, msg, ec.ECDSA(hashes.SHA256()))
+        return True
+    except (InvalidSignature, Exception):
+        return False

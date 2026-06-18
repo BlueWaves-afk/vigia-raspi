@@ -7,6 +7,7 @@
 
 #include "vigia_edge_node/vigia_qos.hpp"
 #include "vigia_edge_node/shm_ring_buffer.hpp"
+#include "vigia_edge_node/frame_metadata_ring.hpp"
 
 class CameraNode : public rclcpp::Node {
 public:
@@ -19,7 +20,10 @@ private:
     rclcpp::TimerBase::SharedPtr                          timer_;
 
     cv::VideoCapture cap_;
-    std::unique_ptr<ShmRingBuffer> shm_ring_;
+    std::unique_ptr<ShmRingBuffer>  shm_ring_;
+    // Metadata ring — opened lazily (FusionNode creates it; CameraNode is a late joiner).
+    std::unique_ptr<ShmMetaRing>   meta_ring_shm_;
+    FrameMetadataRing *            meta_ring_{nullptr};
 
     // Pre-allocated frame buffer — reused every cycle, no per-frame heap alloc.
     cv::Mat frame_buf_;

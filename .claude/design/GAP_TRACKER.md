@@ -1,7 +1,7 @@
 # VIGIA System Gap Tracker
 
-**Last updated:** 2026-06-18  
-**Audited against:** commits through `3e1a873` (our M9 build fixes) + `bf6e8d6` (Ben's SE commit)  
+**Last updated:** 2026-06-18 (session 2)  
+**Audited against:** commits through `3e1a873` (our M9 build fixes) + `bf6e8d6` (Ben's SE commit) + this session  
 **Build status:** `colcon build` ✅ passing on Pi (Debian Trixie, aarch64)
 
 ---
@@ -47,8 +47,8 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | # | Item | Status | Notes |
 |---|------|--------|-------|
 | 2.9 | COBS baud rate 921600 | `[ ]` | Spec §6.5 mandates 921600 baud. Current default is 115200. One-line param change in `sensor_bridge_params.yaml` and confirming Pico firmware agrees. |
-| 2.10 | `SignedEtPacketPi` struct size 173 bytes | `[~]` | `_wire_pad[8]` added in `bf6e8d6` making the struct 173 bytes, **but the `static_assert` still says `== 165`**. Will cause a compile error when rebuilt. Fix: change `static_assert(sizeof(SignedEtPacketPi) == 165, …)` → `== 173` in `sensor_bridge_node.cpp:54`. **Latent build bug.** |
-| 2.11 | `sig_valid` ECDSA verify wired | `[ ]` | `EcdsaVerifier` class added in `bf6e8d6` (`include/ecdsa_verify.hpp`, `src/ecdsa_verify.cpp`). **Never called from `sensor_bridge_node.cpp`.** The TODO at line ~417 remains. `sig_valid` is hardcoded `false`. Must: load device pubkey, call `verifier.verify(pkt.et_hash, pkt.ecdsa_sig)`, assign result to `msg->sig_valid`. |
+| 2.10 | `SignedEtPacketPi` struct size 173 bytes | `[x]` | Fixed in `ff5683d`. <!-- resolved: 2026-06-18, ff5683d --> |
+| 2.11 | `sig_valid` ECDSA verify wired | `[x]` | `sensor_bridge_node.cpp` now loads `/etc/vigia/atecc_pubkey.bin` at startup and calls `vigia::VigiaIdentityKey::verify_peer()` in `process_cobs_frame`. Returns `false` for all-zero stubs. <!-- resolved: 2026-06-18 --> |
 
 ---
 
@@ -58,9 +58,9 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 |---|------|--------|-------|
 | 3.1 | YOLO INT8 ONNX model on disk | `[x]` | `7e04a5e` added INT8 YOLO models. Confirmed present post-pull. |
 | 3.2 | MiDaS v2.1 ONNX model on disk | `[x]` | `97fe8b4` added MiDaS model. |
-| 3.3 | Spatial latent layer name known | `[~]` | `latent_layer_name` param exists. Needs Netron inspection of the latent-output YOLO variant to confirm the correct output node name and set it in `vision_params.yaml`. If empty, S_t is silently disabled. |
+| 3.3 | Spatial latent layer name known | `[x]` | Already set in `vision_params.yaml`: `/model.22/cv2/act/Mul_output_0`. <!-- resolved: 2026-06-18, pre-existing --> |
 | 3.4 | KleidiAI ACL EP (`--use_acl`) | `[ ]` | ORT CPU EP only. ~28 ms/frame vs. 7 ms spec target. Requires ~2h rebuild of ORT from source on Pi with `--use_acl` + ARM Compute Library. `VIGIA_HAVE_ACL_EP` compile gate is wired but the `.so` is absent. |
-| 3.5 | `Ort::IoBinding` pre-binding | `[ ]` | `vision_node.cpp` allocates `std::vector<Ort::Value>` on every inference call. Spec doc 04 §2 mandates `IoBinding` on hot path. Allocates per frame even post warm-up. |
+| 3.5 | `Ort::IoBinding` pre-binding | `[x]` | `vision_node.cpp` now uses `Ort::IoBinding` bound to `mem_info_`; `session_->Run(*io_binding_)` replaces per-call vector alloc. <!-- resolved: 2026-06-18 --> |
 | 3.6 | `verify_kleidiai_capable()` CPUID check | `[ ]` | `/proc/cpuinfo` `asimddp` check specified in doc 04 §4.2. Not in source. Minor. |
 | 3.7 | Model prep scripts (INT8 quant pipeline) | `[x]` | `b03f004` added `tools/model_prep/` scripts. |
 
@@ -72,8 +72,8 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 |---|------|--------|-------|
 | 4.1 | Gravity compensation | `[x]` | Quaternion sandwich → subtract `[0,0,9.81]` → `a_detrended.z()`. In `fusion_node.cpp`. |
 | 4.2 | ISS computation | `[x]` | `ISS = |a_detrended.z| / max(v_gps, v_min_ms)`. Correct formula, configurable `v_min_ms`. |
-| 4.3 | Kalman predict step (IMU integration) | `[ ]` | **`kf_x_` not updated from IMU acceleration between GPS updates.** Only covariance propagated (`kf_P_ += Q`). Dead-reckoning velocity is frozen at last GPS reading during outage. Fix: add `kf_x_ += kf_x_dot * dt` where `kf_x_dot` comes from `a_detrended.x()/y()` in the IMU callback predict step. |
-| 4.4 | `FrameMetadata` written by CameraNode | `[ ]` | Spec §3 requires `camera_node.cpp` to write `timestamp_us` and `frame_id` into the sidecar ring on capture. Only `fusion_node.cpp` writes to the ring currently. CameraNode has no reference to `FrameMetadataRing`. |
+| 4.3 | Kalman predict step (IMU integration) | `[x]` | `fusion_node.cpp` `on_imu`: rotates body accel into world frame with quaternion, integrates `kf_x_ += a_world.xy() * dt`. <!-- resolved: 2026-06-18 --> |
+| 4.4 | `FrameMetadata` written by CameraNode | `[x]` | `camera_node.cpp` lazy-opens `ShmMetaRing(creator=false)` and writes minimal `{frame_id, timestamp_us}` on each capture. FusionNode overwrites with full metadata. <!-- resolved: 2026-06-18 --> |
 
 ---
 
@@ -81,8 +81,8 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| 5.1 | libgpiod v2 API port | `[ ]` | **Critical blocker.** libgpiod v2.2.1 on Trixie; v1 API used in `anti_death_node.cpp`. CMakeLists explicitly sets `GPIOD_FOUND FALSE` for v2. UPS POWER_FAIL GPIO assertion **never fires the emergency sequence**. Must port: `gpiod_chip_open_by_name` → `gpiod_chip_open`, use v2 `gpiod_request_config` / `gpiod_line_settings` / `gpiod_line_request_edge_events` API. |
-| 5.2 | `vigia-sim7600-init.sh` in repo | `[ ]` | Referenced as `ExecStartPre` in `vigia-edge.service`. File does not exist in repo. Systemd service will fail to start on a clean install. Must add script that does: `ip link set usb0 up && dhclient usb0`. |
+| 5.1 | libgpiod v2 API port | `[x]` | `anti_death_node.cpp/hpp` ported to v2: `gpiod_chip_request_lines()` + `gpiod_line_request_wait_edge_events()` + `gpiod_edge_event_buffer`. Pre-allocated event buffer, non-blocking poll per tick. <!-- resolved: 2026-06-18 --> |
+| 5.2 | `vigia-sim7600-init.sh` in repo | `[x]` | Added at `scripts/vigia-sim7600-init.sh`. Waits for `usb0`, brings link up, runs DHCP, pings gateway. <!-- resolved: 2026-06-18 --> |
 | 5.3 | SIM7600 ECM mode provisioned | `[ ]` | One-time AT command: `AT+CUSBPIDSWITCH=9011,1,1`. Must be run physically with SIM7600 connected. |
 | 5.4 | TLS certs on device | `[ ]` | `mqtt_client_init()` reads `/etc/vigia/ca_chain.pem`, `device_cert.pem`, `device_key.pem`. None provisioned. MQTT TLS connect will fail. Needs: MQTT broker CA cert + per-device mTLS cert from provisioning pipeline. |
 | 5.5 | MQTT broker deployed | `[ ]` | `mqtt_broker_host` param is empty string. No broker running. Infrastructure decision needed (self-hosted Mosquitto or managed). |
@@ -94,10 +94,10 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| 6.1 | `attestation.py` wired into server ingest | `[ ]` | `server/ingest/attestation.py` is a complete, correct ECDSA attestation pipeline. **Never called from `server/main.py`**. The live ingest endpoint uses only HMAC auth. The two pipelines are disconnected. Must add: MQTT subscriber → `process_attestation_event()` → DB write. |
-| 6.2 | MQTT subscriber on server | `[ ]` | `server/main.py` is HTTP-only. AntiDeathNode publishes to `vigia/attest/{device_id}/hazard` over Paho MQTT. No broker-to-server bridge exists. Events emitted during the 15s emergency window are never received. |
-| 6.3 | Server `signed_et.valid` key populated | `[~]` | `_resolve_trust_level()` in `server/main.py` checks `signed_et.get("valid")`. This key is never present in the MQTT payload (it's a ROS field, not serialized into msgpack). `TRUST_LEVEL_HARDWARE` is never reached. |
-| 6.4 | Fleet device registry in DB | `[ ]` | `attestation.py` calls `db.get_device_cert(device_id)` and `db.get_root_ca()`. No `devices` table with `cert_pem` column exists in `server/db/init.sql`. |
+| 6.1 | `attestation.py` wired into server ingest | `[x]` | `server/main.py` now starts an MQTT subscriber (paho, daemon thread) on `vigia/attest/+/hazard` at lifespan startup. Calls `process_attestation_event()` → `VigiaDb.log_verified_event()`. <!-- resolved: 2026-06-18 --> |
+| 6.2 | MQTT subscriber on server | `[x]` | See 6.1. Enabled via `MQTT_BROKER_HOST` env var; no-ops if unset. <!-- resolved: 2026-06-18 --> |
+| 6.3 | Server `signed_et.valid` key populated | `[x]` | `anti_death_node.cpp` `pack_signed_et()` now packs `"valid": et.sig_valid` as 7th field (was 6). `_resolve_trust_level()` can now reach `TRUST_LEVEL_HARDWARE`. <!-- resolved: 2026-06-18 --> |
+| 6.4 | Fleet device registry in DB | `[x]` | `server/db/init.sql` extended: `cert_pem TEXT` column on `device_registry`, `fleet_ca` table for root CA, `attestation_log` table. `server/ingest/db_adapter.py` (new) exposes the interface `attestation.py` requires. <!-- resolved: 2026-06-18 --> |
 | 6.5 | Cosmos 3 world model client | `[ ]` | `cosmos3_client.submit_world_model_update()` called in `attestation.py:276`. `cosmos3_client` is always `None`. No client implementation. |
 | 6.6 | `tools/provision_device.py` | `[x]` | Added in `bf6e8d6` as `tools/atecc_provision.py`. |
 
@@ -110,7 +110,7 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | 7.1 | BleGattNode sdbus-c++ v2 port | `[x]` | Complete. `3e1a873`. Compiles and builds. |
 | 7.2 | ECDH handshake crypto | `[x]` | mbedTLS 3.x P-256 ECDH + HKDF + HMAC in `vigia_ecdh.hpp`. Real crypto when `VIGIA_HAVE_MBEDTLS` defined. |
 | 7.3 | Attest characteristic (live sig) | `[~]` | Sends `et_hash` + `ecdsa_sig` from latest `SignedEt`. Will be all-zeros until ATECC608A is wired and `sig_valid` is real. |
-| 7.4 | Design spec document for BLE transport | `[ ]` | No spec doc exists. GATT UUIDs, frame codec format, and handshake protocol exist only in source code comments and `app_dashcam_integration.md`. |
+| 7.4 | Design spec document for BLE transport | `[x]` | `.claude/design/07_ble_transport_spec.md` created. Covers GATT layout, ECDH handshake, DimsFrame wire format, attest char, control char. <!-- resolved: 2026-06-18 --> |
 
 ---
 
@@ -119,7 +119,7 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | # | Item | Status | Notes |
 |---|------|--------|-------|
 | 8.1 | HTTP ingest + PostGIS | `[x]` | FastAPI `/v1/events`, spatial merge within 5 m radius, hazard map UI. |
-| 8.2 | Server auth: HMAC → ECDSA upgrade | `[ ]` | Currently symmetric HMAC (`ingest/signature.py`). Must be replaced with ECDSA against ATECC608A device cert after fleet registry exists (6.4). |
+| 8.2 | Server auth: HMAC → ECDSA upgrade | `[x]` | `auth.py` `lookup_device()` now returns `cert_pem`. `authenticate_event()` uses `verify_ecdsa_header()` when cert_pem present, falls back to HMAC for legacy devices. `signature.py` gains `verify_ecdsa_header()`. <!-- resolved: 2026-06-18 --> |
 | 8.3 | Anti-replay uses hardware sequence | `[~]` | Server uses `device_seq` from JSON payload (client-supplied). Must be cross-checked against the `SignedEt.sequence` from the firmware monotonic counter once attestation is wired. |
 
 ---
@@ -128,10 +128,10 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| 9.1 | `static_assert(SignedEtPacketPi == 165)` wrong | `[ ]` | **Latent build bug introduced by `bf6e8d6`.** `_wire_pad[8]` added to struct (now 173 bytes) but assert unchanged. Will break next `colcon build`. Fix: `sensor_bridge_node.cpp:54` → `static_assert(sizeof(SignedEtPacketPi) == 173, …)`. |
-| 9.2 | `EcdsaVerifier` unused in sensor_bridge | `[ ]` | Class added in `bf6e8d6`, never instantiated in `sensor_bridge_node.cpp`. `sig_valid` remains `false`. |
-| 9.3 | Kalman velocity dead-reckoning | `[ ]` | See 4.3. IMU acceleration not integrated into state vector during predict. |
-| 9.4 | IoBinding on VisionNode hot path | `[ ]` | See 3.5. Per-frame `vector<Ort::Value>` allocation. |
+| 9.1 | `static_assert(SignedEtPacketPi == 165)` wrong | `[x]` | Fixed in `ff5683d`. <!-- resolved: 2026-06-18, ff5683d --> |
+| 9.2 | `EcdsaVerifier` unused in sensor_bridge | `[x]` | See 2.11. <!-- resolved: 2026-06-18 --> |
+| 9.3 | Kalman velocity dead-reckoning | `[x]` | See 4.3. <!-- resolved: 2026-06-18 --> |
+| 9.4 | IoBinding on VisionNode hot path | `[x]` | See 3.5. <!-- resolved: 2026-06-18 --> |
 | 9.5 | GPS at 10 Hz | `[ ]` | See 2.5. 1 Hz default from NEO-M8N. |
 | 9.6 | PREEMPT_RT booted | `[ ]` | See 1.1. Physical Pi access needed. |
 

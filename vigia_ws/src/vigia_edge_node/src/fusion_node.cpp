@@ -81,6 +81,15 @@ void FusionNode::on_imu(std::shared_ptr<const vigia_msgs::msg::ImuSample> msg) {
         float dt = static_cast<float>(
             (rclcpp::Time(msg->header.stamp) - last_imu_stamp_).seconds());
         if (dt > 0 && dt < 0.1f) {
+            // Kalman predict: propagate velocity state with gravity-compensated acceleration.
+            // Rotate body-frame accel into world frame, then integrate (no gravity subtraction
+            // needed for horizontal x/y — only z carries the 1g component).
+            Eigen::Quaternionf q(msg->q_w, msg->q_x, msg->q_y, msg->q_z);
+            q.normalize();
+            Eigen::Vector3f a_body(msg->lin_accel_x, msg->lin_accel_y, msg->lin_accel_z);
+            Eigen::Vector3f a_world = q * a_body;
+            kf_x_ += Eigen::Vector2f(a_world.x(), a_world.y()) * dt;
+
             Eigen::Matrix2f Q = Eigen::Matrix2f::Identity() * static_cast<float>(kf_Q_);
             kf_P_ = kf_P_ + Q;
         }

@@ -9,6 +9,9 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from typing import Any, Generator
 
+import logging
+import threading
+
 import psycopg2
 import psycopg2.extras
 from psycopg2.pool import ThreadedConnectionPool
@@ -18,6 +21,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from ingest.attestation import AttestationError, process_attestation_event
+from ingest.db_adapter import VigiaDb
 from ingest.auth import (
     AuthError,
     InvalidSignatureError,
@@ -33,6 +38,11 @@ DATABASE_URL = os.environ.get(
     "postgresql://vigia:vigia_dev@127.0.0.1:5432/vigia",
 )
 MERGE_RADIUS_M = float(os.environ.get("HAZARD_MERGE_RADIUS_M", "5"))
+MQTT_BROKER_HOST = os.environ.get("MQTT_BROKER_HOST", "")
+MQTT_BROKER_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
+MQTT_ATTEST_TOPIC = "vigia/attest/+/hazard"
+
+log = logging.getLogger(__name__)
 POOL_MIN = int(os.environ.get("DB_POOL_MIN", "2"))
 POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
 TRUST_LEVEL_SIGNED = "software_signed"
@@ -53,10 +63,47 @@ def _resolve_trust_level(event: dict[str, Any]) -> str:
 _pool: ThreadedConnectionPool | None = None
 
 
+def _mqtt_on_message(client, userdata, msg) -> None:
+    """Handle incoming MQTT attestation event from an edge node."""
+    try:
+        with get_conn() as conn:
+            db = VigiaDb(conn)
+            verified = process_attestation_event(msg.payload, db)
+            log.info("Attestation verified: device=%s seq=%s",
+                     verified.get("device_id"), verified.get("sequence"))
+    except AttestationError as exc:
+        log.warning("Attestation failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        log.error("MQTT handler error: %s", exc)
+
+
+def _start_mqtt_subscriber() -> None:
+    """Launch MQTT subscriber in a daemon thread (no-op if broker not configured)."""
+    if not MQTT_BROKER_HOST:
+        log.info("MQTT_BROKER_HOST not set — attestation MQTT subscriber disabled")
+        return
+    try:
+        import paho.mqtt.client as mqtt  # optional dep — only needed when broker is up
+    except ImportError:
+        log.warning("paho-mqtt not installed — MQTT subscriber disabled")
+        return
+
+    client = mqtt.Client(client_id="vigia-server-attest")
+    client.on_message = _mqtt_on_message
+    client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=60)
+    client.subscribe(MQTT_ATTEST_TOPIC)
+    log.info("MQTT subscriber connected to %s:%d topic=%s",
+             MQTT_BROKER_HOST, MQTT_BROKER_PORT, MQTT_ATTEST_TOPIC)
+
+    t = threading.Thread(target=client.loop_forever, daemon=True, name="mqtt-attest")
+    t.start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
     _pool = ThreadedConnectionPool(POOL_MIN, POOL_MAX, DATABASE_URL)
+    _start_mqtt_subscriber()
     yield
     if _pool:
         _pool.closeall()
@@ -256,12 +303,13 @@ def ingest_single_event(
                 status="duplicate",
             )
 
-        hmac_key, last_seq = lookup_device(cur, device_id)
+        hmac_key, last_seq, cert_pem = lookup_device(cur, device_id)
         device_seq = authenticate_event(
             event,
             header_signature,
             hmac_key=hmac_key,
             last_device_seq=last_seq,
+            cert_pem=cert_pem,
         )
 
         location = event.get("location") or {}

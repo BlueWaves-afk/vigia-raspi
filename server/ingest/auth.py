@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ingest.replay import ReplayError, check_device_seq
-from ingest.signature import extract_signature, verify_hmac
+from ingest.signature import extract_signature, verify_hmac, verify_ecdsa_header
 
 
 class AuthError(Exception):
@@ -33,16 +33,16 @@ class MissingDeviceIdError(AuthError):
         super().__init__("Missing device_id in payload")
 
 
-def lookup_device(cur, device_id: str) -> tuple[str, int]:
-    """Return (hmac_key, last_device_seq) for a registered device."""
+def lookup_device(cur, device_id: str) -> tuple[str, int, str | None]:
+    """Return (hmac_key, last_device_seq, cert_pem|None) for a registered device."""
     cur.execute(
-        "SELECT hmac_key, last_device_seq FROM device_registry WHERE device_id = %s",
+        "SELECT hmac_key, last_device_seq, cert_pem FROM device_registry WHERE device_id = %s",
         (device_id,),
     )
     row = cur.fetchone()
     if row is None:
         raise UnknownDeviceError(device_id)
-    return row[0], int(row[1])
+    return row[0], int(row[1]), row[2]
 
 
 def authenticate_event(
@@ -51,9 +51,14 @@ def authenticate_event(
     *,
     hmac_key: str,
     last_device_seq: int,
+    cert_pem: str | None = None,
 ) -> int:
     """
-    Verify HMAC signature and anti-replay seq for a single event payload.
+    Verify signature and anti-replay seq for a single event payload.
+
+    When cert_pem is available the signature is verified as ECDSA-SHA256 against the
+    device certificate (ATECC608A / Microchip Trust Platform).  Falls back to HMAC
+    for devices provisioned before Phase 6.
 
     Returns validated device_seq on success.
     """
@@ -66,8 +71,17 @@ def authenticate_event(
         raise AuthError("device_seq must be an integer")
 
     signature = extract_signature(payload, header_signature)
-    if not signature or not verify_hmac(payload, signature, hmac_key):
+    if not signature:
         raise InvalidSignatureError(device_id)
+
+    if cert_pem:
+        # ECDSA path — preferred for ATECC608A-provisioned devices.
+        if not verify_ecdsa_header(payload, signature, cert_pem):
+            raise InvalidSignatureError(device_id)
+    else:
+        # HMAC fallback for legacy devices.
+        if not verify_hmac(payload, signature, hmac_key):
+            raise InvalidSignatureError(device_id)
 
     check_device_seq(last_device_seq, device_seq, device_id)
     return device_seq

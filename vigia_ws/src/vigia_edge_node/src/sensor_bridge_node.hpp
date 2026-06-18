@@ -20,6 +20,9 @@
 #include <thread>
 
 #include "vigia_edge_node/vigia_qos.hpp"
+#ifdef VIGIA_HAVE_MBEDTLS
+#  include "vigia_edge_node/vigia_ecdh.hpp"
+#endif
 #include "vigia_msgs/msg/imu_sample.hpp"
 #include "vigia_msgs/msg/gps_pvt.hpp"
 #include "vigia_msgs/msg/signed_et.hpp"
@@ -99,6 +102,14 @@ private:
     uint32_t last_imu_seq_{0};
     uint32_t last_gps_seq_{0};
     uint32_t last_et_seq_{0};
+
+    /* ── ECDSA verify (Phase 2 — ATECC608A device pubkey) ─────────────────── */
+    std::string device_pubkey_path_;
+#ifdef VIGIA_HAVE_MBEDTLS
+    std::array<uint8_t, 65> device_pubkey_{};  // uncompressed P-256: 0x04 || X || Y
+    bool pubkey_loaded_{false};
+    void load_device_pubkey();
+#endif
 
     /* ── IMU history ring buffer (200 samples, mutex-protected) ──────────── */
     static constexpr size_t kImuHistorySize = 200;

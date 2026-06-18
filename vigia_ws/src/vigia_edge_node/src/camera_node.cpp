@@ -80,5 +80,23 @@ void CameraNode::timer_callback()
                 static_cast<size_t>(frame_width_ * frame_height_ * 3));
 
     pub_->publish(std::move(msg));
+
+    // Lazy-open metadata ring (FusionNode creates it; retry silently until ready).
+    if (!meta_ring_) {
+        try {
+            meta_ring_shm_ = std::make_unique<ShmMetaRing>(/*creator=*/false);
+            meta_ring_ = meta_ring_shm_->ring();
+        } catch (...) {
+            meta_ring_ = nullptr;
+        }
+    }
+    // Write minimal sidecar so AntiDeathNode can correlate frame timestamps.
+    if (meta_ring_) {
+        FrameMetadata m{};
+        m.frame_id     = frame_counter_;
+        m.timestamp_us = ts_us;
+        meta_ring_->write_metadata(m);
+    }
+
     ++frame_counter_;
 }

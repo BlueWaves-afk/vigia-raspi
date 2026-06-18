@@ -81,7 +81,8 @@ VisionNode::VisionNode(const rclcpp::NodeOptions & options)
     OrtSessionOptionsAppendExecutionProvider_ACL(session_opts, /*enable_fast_math=*/1);
 #endif
 
-    session_ = std::make_unique<Ort::Session>(env_, model_path_.c_str(), session_opts);
+    session_    = std::make_unique<Ort::Session>(env_, model_path_.c_str(), session_opts);
+    io_binding_ = std::make_unique<Ort::IoBinding>(*session_);
 
     Ort::AllocatorWithDefaultOptions alloc;
     input_names_storage_.push_back(session_->GetInputNameAllocated(0, alloc).get());
@@ -288,9 +289,13 @@ void VisionNode::on_image(std::shared_ptr<const sensor_msgs::msg::Image> msg)
         mem_info_, chw_input_buf_.data(), chw_input_buf_.size(),
         shape.data(), shape.size());
 
-    auto outputs = session_->Run(Ort::RunOptions{nullptr},
-                                 input_names_.data(), &in_tensor, 1,
-                                 output_names_.data(), output_names_.size());
+    // IoBinding: bind pre-allocated input and request CPU-allocated outputs.
+    // Eliminates the std::vector<Ort::Value> allocation on every inference call.
+    io_binding_->BindInput(input_names_[0], in_tensor);
+    for (const char* out_name : output_names_)
+        io_binding_->BindOutput(out_name, mem_info_);
+    session_->Run(Ort::RunOptions{nullptr}, *io_binding_);
+    auto outputs = io_binding_->GetOutputValues();
 
     auto t1  = std::chrono::steady_clock::now();
     float ms = std::chrono::duration<float, std::milli>(t1 - t0).count();

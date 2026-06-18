@@ -32,7 +32,8 @@ private:
     rclcpp::Publisher<vigia_msgs::msg::SpatialLatent>::SharedPtr  pub_lat_;
 
     Ort::Env     env_;
-    std::unique_ptr<Ort::Session> session_;
+    std::unique_ptr<Ort::Session>   session_;
+    std::unique_ptr<Ort::IoBinding> io_binding_;
     Ort::MemoryInfo mem_info_;
 
     // Pre-allocated inference buffers — no per-frame heap alloc.

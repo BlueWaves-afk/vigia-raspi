@@ -120,8 +120,9 @@ AntiDeathNode::AntiDeathNode(const rclcpp::NodeOptions & opts)
 AntiDeathNode::~AntiDeathNode()
 {
 #ifdef VIGIA_HAVE_LIBGPIOD
-    if (gpio_line_) gpiod_line_release(gpio_line_);
-    if (gpio_chip_) gpiod_chip_close(gpio_chip_);
+    if (gpio_event_buf_) gpiod_edge_event_buffer_free(gpio_event_buf_);
+    if (gpio_req_)       gpiod_line_request_release(gpio_req_);
+    if (gpio_chip_)      gpiod_chip_close(gpio_chip_);
 #endif
 }
 
@@ -149,17 +150,33 @@ void AntiDeathNode::startup_init()
             e.what());
     }
 
-    // 4. libgpiod setup (v1 API; v2 falls through to timer poll)
+    // 4. libgpiod v2 edge-event setup (gpiod_chip_request_lines API).
 #ifdef VIGIA_HAVE_LIBGPIOD
     gpio_chip_ = gpiod_chip_open(ups_gpio_chip_.c_str());
     if (gpio_chip_) {
-        gpio_line_ = gpiod_chip_get_line(gpio_chip_, ups_gpio_line_);
-        if (gpio_line_) {
-            if (gpiod_line_request_falling_edge_events(gpio_line_, "vigia_antideath") < 0) {
-                RCLCPP_WARN(get_logger(), "gpiod_line_request failed — using timer poll");
-                gpiod_line_ = nullptr;
+        struct gpiod_line_settings * ls = gpiod_line_settings_new();
+        struct gpiod_line_config *   lc = gpiod_line_config_new();
+        struct gpiod_request_config* rc = gpiod_request_config_new();
+        if (ls && lc && rc) {
+            gpiod_line_settings_set_edge_detection(ls, GPIOD_LINE_EDGE_FALLING);
+            unsigned int offset = static_cast<unsigned int>(ups_gpio_line_);
+            gpiod_line_config_add_line_settings(lc, &offset, 1, ls);
+            gpiod_request_config_set_consumer(rc, "vigia_antideath");
+            gpio_req_ = gpiod_chip_request_lines(gpio_chip_, rc, lc);
+            if (!gpio_req_) {
+                RCLCPP_WARN(get_logger(), "gpiod_chip_request_lines failed — using timer poll");
+            } else {
+                gpio_event_buf_ = gpiod_edge_event_buffer_new(4);
+                RCLCPP_INFO(get_logger(), "libgpiod v2: monitoring GPIO %s line %d",
+                            ups_gpio_chip_.c_str(), ups_gpio_line_);
             }
         }
+        if (ls) gpiod_line_settings_free(ls);
+        if (lc) gpiod_line_config_free(lc);
+        if (rc) gpiod_request_config_free(rc);
+    } else {
+        RCLCPP_WARN(get_logger(), "gpiod_chip_open(%s) failed — using timer poll",
+                    ups_gpio_chip_.c_str());
     }
 #endif
 
@@ -368,13 +385,18 @@ void AntiDeathNode::gpio_poll_callback()
     bool triggered = false;
 
 #ifdef VIGIA_HAVE_LIBGPIOD
-    if (gpio_line_) {
-        struct timespec zero{0, 0};
-        int ev = gpiod_line_event_wait(gpio_line_, &zero);
-        if (ev == 1) {
-            struct gpiod_line_event event;
-            gpiod_line_event_read(gpio_line_, &event);
-            triggered = (event.event_type == GPIOD_LINE_EVENT_FALLING_EDGE);
+    if (gpio_req_ && gpio_event_buf_) {
+        // Non-blocking poll: 0 ns timeout. Returns 1 if events pending, 0 if not.
+        if (gpiod_line_request_wait_edge_events(gpio_req_, 0) == 1) {
+            int n = gpiod_line_request_read_edge_events(gpio_req_, gpio_event_buf_, 4);
+            for (int i = 0; i < n && !triggered; ++i) {
+                struct gpiod_edge_event * ev_obj =
+                    gpiod_edge_event_buffer_get_event(gpio_event_buf_,
+                                                      static_cast<unsigned long>(i));
+                if (ev_obj &&
+                    gpiod_edge_event_get_event_type(ev_obj) == GPIOD_EDGE_EVENT_FALLING_EDGE)
+                    triggered = true;
+            }
         }
     }
 #endif
@@ -578,7 +600,7 @@ void AntiDeathNode::pack_signed_et(
     bool valid)
 {
     if (!valid) { pk.pack_nil(); return; }
-    pk.pack_map(6);
+    pk.pack_map(7);
     pk.pack("sequence");          pk.pack(et.sequence);
     pk.pack("mcu_timestamp_us"); pk.pack(et.timestamp_us);
     pk.pack("imu_cal_status");   pk.pack(et.calibration_status);
@@ -589,6 +611,7 @@ void AntiDeathNode::pack_signed_et(
     pk.pack("ecdsa_sig");
         pk.pack_bin(64);
         pk.pack_bin_body(reinterpret_cast<const char*>(et.ecdsa_sig.data()), 64);
+    pk.pack("valid");             pk.pack(et.sig_valid);
 }
 
 void AntiDeathNode::pack_hazard_event(

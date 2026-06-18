@@ -183,10 +183,11 @@ private:
     mqtt::connect_options                 conn_opts_;
 #endif
 
-    // ── GPIO (libgpiod) ──────────────────────────────────────────────────────
+    // ── GPIO (libgpiod v2) ───────────────────────────────────────────────────
 #ifdef VIGIA_HAVE_LIBGPIOD
-    struct gpiod_chip * gpio_chip_{nullptr};
-    struct gpiod_line * gpio_line_{nullptr};
+    struct gpiod_chip *          gpio_chip_{nullptr};
+    struct gpiod_line_request *  gpio_req_{nullptr};
+    struct gpiod_edge_event_buffer * gpio_event_buf_{nullptr};
 #endif
 
     // ── Parameters ───────────────────────────────────────────────────────────
