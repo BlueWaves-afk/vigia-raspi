@@ -59,7 +59,7 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | 3.1 | YOLO INT8 ONNX model on disk | `[x]` | `7e04a5e` added INT8 YOLO models. Confirmed present post-pull. |
 | 3.2 | MiDaS v2.1 ONNX model on disk | `[x]` | `97fe8b4` added MiDaS model. |
 | 3.3 | Spatial latent layer name known | `[x]` | Already set in `vision_params.yaml`: `/model.22/cv2/act/Mul_output_0`. <!-- resolved: 2026-06-18, pre-existing --> |
-| 3.4 | KleidiAI ACL EP (`--use_acl`) | `[ ]` | ORT CPU EP only. ~28 ms/frame vs. 7 ms spec target. Requires ~2h rebuild of ORT from source on Pi with `--use_acl` + ARM Compute Library. `VIGIA_HAVE_ACL_EP` compile gate is wired but the `.so` is absent. |
+| 3.4 | KleidiAI ACL EP (`--use_acl`) | `[~]` | `scripts/build_ort_acl.sh` written — run it on the Pi in a tmux session (~2h). CMakeLists already detects `onnxruntime_providers_acl.so` and sets `VIGIA_HAVE_ACL_EP`. CMakeLists gpiod v2 gate also fixed (was incorrectly blocking v2). **Run the script.** |
 | 3.5 | `Ort::IoBinding` pre-binding | `[x]` | `vision_node.cpp` now uses `Ort::IoBinding` bound to `mem_info_`; `session_->Run(*io_binding_)` replaces per-call vector alloc. <!-- resolved: 2026-06-18 --> |
 | 3.6 | `verify_kleidiai_capable()` CPUID check | `[ ]` | `/proc/cpuinfo` `asimddp` check specified in doc 04 §4.2. Not in source. Minor. |
 | 3.7 | Model prep scripts (INT8 quant pipeline) | `[x]` | `b03f004` added `tools/model_prep/` scripts. |
@@ -84,8 +84,8 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | 5.1 | libgpiod v2 API port | `[x]` | `anti_death_node.cpp/hpp` ported to v2: `gpiod_chip_request_lines()` + `gpiod_line_request_wait_edge_events()` + `gpiod_edge_event_buffer`. Pre-allocated event buffer, non-blocking poll per tick. <!-- resolved: 2026-06-18 --> |
 | 5.2 | `vigia-sim7600-init.sh` in repo | `[x]` | Added at `scripts/vigia-sim7600-init.sh`. Waits for `usb0`, brings link up, runs DHCP, pings gateway. <!-- resolved: 2026-06-18 --> |
 | 5.3 | SIM7600 ECM mode provisioned | `[ ]` | One-time AT command: `AT+CUSBPIDSWITCH=9011,1,1`. Must be run physically with SIM7600 connected. |
-| 5.4 | TLS certs on device | `[ ]` | `mqtt_client_init()` reads `/etc/vigia/ca_chain.pem`, `device_cert.pem`, `device_key.pem`. None provisioned. MQTT TLS connect will fail. Needs: MQTT broker CA cert + per-device mTLS cert from provisioning pipeline. |
-| 5.5 | MQTT broker deployed | `[ ]` | `mqtt_broker_host` param is empty string. No broker running. Infrastructure decision needed (self-hosted Mosquitto or managed). |
+| 5.4 | TLS certs on device | `[~]` | Provisioning pipeline complete: `tools/vigia-gen-ca.sh` generates root CA + server cert; `tools/vigia-sign-device.sh` generates per-device P-256 keypair + cert signed by VIGIA CA. Deploy to Pi via scp as documented in sign-device output. Requires running the scripts and copying files. |
+| 5.5 | MQTT broker deployed | `[~]` | Self-hosted Mosquitto chosen. Config at `deploy/mosquitto/config/mosquitto.conf` (mTLS 8883, ACL per device_id). `deploy/docker-compose.yml` runs broker + FastAPI + PostgreSQL as a stack. Requires `docker compose up` on ingest server after running `vigia-gen-ca.sh`. |
 | 5.6 | Ed25519 signing in legacy HTTPS path | `[~]` | `device_ed25519.key` param exists. Key path read but never used in the curl transmit path — the JSON payload is unsigned. Only relevant when Paho not compiled in. |
 
 ---
@@ -98,7 +98,7 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | 6.2 | MQTT subscriber on server | `[x]` | See 6.1. Enabled via `MQTT_BROKER_HOST` env var; no-ops if unset. <!-- resolved: 2026-06-18 --> |
 | 6.3 | Server `signed_et.valid` key populated | `[x]` | `anti_death_node.cpp` `pack_signed_et()` now packs `"valid": et.sig_valid` as 7th field (was 6). `_resolve_trust_level()` can now reach `TRUST_LEVEL_HARDWARE`. <!-- resolved: 2026-06-18 --> |
 | 6.4 | Fleet device registry in DB | `[x]` | `server/db/init.sql` extended: `cert_pem TEXT` column on `device_registry`, `fleet_ca` table for root CA, `attestation_log` table. `server/ingest/db_adapter.py` (new) exposes the interface `attestation.py` requires. <!-- resolved: 2026-06-18 --> |
-| 6.5 | Cosmos 3 world model client | `[ ]` | `cosmos3_client.submit_world_model_update()` called in `attestation.py:276`. `cosmos3_client` is always `None`. No client implementation. |
+| 6.5 | Cosmos 3 world model client | `[~]` | `server/ingest/cosmos3_stub.py`: `Cosmos3Client` class — stub mode by default (logs payload, no HTTP call), live mode activated by `COSMOS3_API_KEY` env var. Wired into `main.py` lifespan and passed to `process_attestation_event`. Strategic pitch: "pipeline ready, API partnership pending." |
 | 6.6 | `tools/provision_device.py` | `[x]` | Added in `bf6e8d6` as `tools/atecc_provision.py`. |
 
 ---

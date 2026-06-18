@@ -24,16 +24,16 @@ pkg_check_modules(SODIUM REQUIRED libsodium)
 find_package(CURL REQUIRED)
 
 # libgpiod — GPIO edge-wait for UPS POWER_FAIL (AntiDeathNode)
-# NOTE: libgpiod v2 (Debian Trixie) has a breaking API vs v1. The GPIO code
-# uses the v1 line/event API; v2 requires a full rewrite. Until ported, v2
-# falls back to the poll implementation inside AntiDeathNode.
+# AntiDeathNode uses the v2 API (gpiod_chip_request_lines / gpiod_edge_event_buffer).
+# Both v1 and v2 are accepted; v1 will also compile but the runtime path uses v2 structs
+# only present from 2.0 onward, so we gate on version >= 2.0.
 pkg_check_modules(GPIOD libgpiod)
 if(GPIOD_FOUND)
     if(GPIOD_VERSION VERSION_GREATER_EQUAL "2.0")
-        message(STATUS "libgpiod ${GPIOD_VERSION} (v2 API) — not yet ported, GPIO poll fallback will be used")
-        set(GPIOD_FOUND FALSE)
+        message(STATUS "libgpiod ${GPIOD_VERSION} (v2 API) — GPIO edge-wait enabled")
     else()
-        message(STATUS "libgpiod ${GPIOD_VERSION} found — real GPIO edge-wait enabled")
+        message(STATUS "libgpiod ${GPIOD_VERSION} (v1) — v2 API required; GPIO poll fallback will be used")
+        set(GPIOD_FOUND FALSE)
     endif()
 else()
     message(STATUS "libgpiod not found — GPIO poll fallback will be used")

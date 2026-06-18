@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ingest.attestation import AttestationError, process_attestation_event
+from ingest.cosmos3_stub import get_cosmos3_client
 from ingest.db_adapter import VigiaDb
 from ingest.auth import (
     AuthError,
@@ -63,12 +64,15 @@ def _resolve_trust_level(event: dict[str, Any]) -> str:
 _pool: ThreadedConnectionPool | None = None
 
 
+_cosmos3_client = None  # initialised in lifespan after pool is ready
+
+
 def _mqtt_on_message(client, userdata, msg) -> None:
     """Handle incoming MQTT attestation event from an edge node."""
     try:
         with get_conn() as conn:
             db = VigiaDb(conn)
-            verified = process_attestation_event(msg.payload, db)
+            verified = process_attestation_event(msg.payload, db, _cosmos3_client)
             log.info("Attestation verified: device=%s seq=%s",
                      verified.get("device_id"), verified.get("sequence"))
     except AttestationError as exc:
@@ -101,8 +105,9 @@ def _start_mqtt_subscriber() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _pool
+    global _pool, _cosmos3_client
     _pool = ThreadedConnectionPool(POOL_MIN, POOL_MAX, DATABASE_URL)
+    _cosmos3_client = get_cosmos3_client()
     _start_mqtt_subscriber()
     yield
     if _pool:
