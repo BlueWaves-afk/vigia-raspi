@@ -1,0 +1,20 @@
+{
+  "collapse-filter": true, "search": "", "showTags": true, "showAttachments": false,
+  "hideUnresolved": false, "showOrphans": true, "collapse-color-groups": false,
+  "colorGroups": [
+    {"query":"tag:#ros2-node","color":{"a":1,"rgb":4431943}},
+    {"query":"tag:#cpp-class","color":{"a":1,"rgb":2001125}},
+    {"query":"tag:#inference","color":{"a":1,"rgb":16635957}},
+    {"query":"tag:#firmware","color":{"a":1,"rgb":3754411}},
+    {"query":"tag:#hardware","color":{"a":1,"rgb":15022389}},
+    {"query":"tag:#transport","color":{"a":1,"rgb":44225}},
+    {"query":"tag:#security","color":{"a":1,"rgb":9315498}},
+    {"query":"tag:#config","color":{"a":1,"rgb":35195}},
+    {"query":"tag:#flow","color":{"a":1,"rgb":14162784}},
+    {"query":"tag:#decision","color":{"a":1,"rgb":7162945}}
+  ],
+  "collapse-display": true, "showArrow": true, "textFadeMultiplier": 0,
+  "nodeSizeMultiplier": 1.1, "lineSizeMultiplier": 1, "collapse-forces": true,
+  "centerStrength": 0.3, "repelStrength": 12, "linkStrength": 1, "linkDistance": 90,
+  "scale": 1, "close": false
+}
