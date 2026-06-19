@@ -7,19 +7,12 @@ anti_death_node:
     # Device identity (overridden at runtime by /etc/vigia/device_id)
     device_id: "vigia-001"
 
-    # ── Phase 5: MQTT Uplink (Paho async_client, TLS 1.2 mTLS) ──────────────
-    # Broker must support persistent sessions (clean_session=false) for QoS 1.
-    # Set VIGIA_MQTT_BROKER_IP in /etc/vigia/env for the usb0 route.
-    mqtt_broker_host: ""          # e.g. "mqtt.vigia.io" — set before deployment
-    mqtt_broker_port: 8883        # MQTTS (TLS)
-    mqtt_topic_prefix: "vigia/attest"
-
     # SIM7600 AT command port (separate from usb0 data port)
     sim7600_port: "/dev/ttyUSB2"
 
     # Emergency sequence time budget (seconds) — UPS holds power for ~15s
     emergency_budget_sec: 13.0   # 2s margin before hard power cut
 
-    # ── Legacy Phase 1 fallback (used when Paho not compiled in) ─────────────
+    # Emergency HTTPS fallback (used when Paho MQTT not compiled in)
     aws_telemetry_url: "https://sq2ri2n51g.execute-api.us-east-1.amazonaws.com/prod/telemetry"
     device_key_path: "/etc/vigia/device_ed25519.key"
