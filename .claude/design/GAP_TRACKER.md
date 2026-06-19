@@ -1,8 +1,8 @@
 # VIGIA System Gap Tracker
 
-**Last updated:** 2026-06-18 (session 3)  
-**Audited against:** commits through `3e1a873` (our M9 build fixes) + `bf6e8d6` (Ben's SE commit) + this session  
-**Build status:** `colcon build` ✅ passing on Pi (Debian Trixie, aarch64)
+**Last updated:** 2026-06-19 (session 5 — cloud deploy: 2% VLM sampling, reward-economics hardening, register-device proof-of-possession, DLQs)  
+**Audited against:** commits through M12 (AWS IoT Core unification, FastAPI/Mosquitto deleted, BLE RESPONSE_CHAR wired) + session-5 `vigia-amazon` deploy (CloudFormation `VigiaStack` → `UPDATE_COMPLETE`)  
+**Build status:** `colcon build` ✅ passing on Pi (Debian Trixie, aarch64); `cdk deploy VigiaStack` ✅ deployed
 
 ---
 
@@ -85,8 +85,8 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 | 5.2 | `vigia-sim7600-init.sh` in repo | `[x]` | Added at `scripts/vigia-sim7600-init.sh`. Waits for `usb0`, brings link up, runs DHCP, pings gateway. <!-- resolved: 2026-06-18 --> |
 | 5.3 | SIM7600 ECM mode provisioned | `[ ]` | One-time AT command: `AT+CUSBPIDSWITCH=9011,1,1`. Must be run physically with SIM7600 connected. |
 | 5.4 | TLS certs on device | `[~]` | Provisioning pipeline complete: `tools/vigia-gen-ca.sh` generates root CA + server cert; `tools/vigia-sign-device.sh` generates per-device P-256 keypair + cert signed by VIGIA CA. Deploy to Pi via scp as documented in sign-device output. Requires running the scripts and copying files. |
-| 5.5 | MQTT broker deployed | `[~]` | Self-hosted Mosquitto chosen. Config at `deploy/mosquitto/config/mosquitto.conf` (mTLS 8883, ACL per device_id). `deploy/docker-compose.yml` runs broker + FastAPI + PostgreSQL as a stack. Requires `docker compose up` on ingest server after running `vigia-gen-ca.sh`. |
-| 5.6 | Ed25519 signing in legacy HTTPS path | `[~]` | `device_ed25519.key` param exists. Key path read but never used in the curl transmit path — the JSON payload is unsigned. Only relevant when Paho not compiled in. |
+| 5.5 | MQTT broker deployed | `[x]` | **M12: replaced by AWS IoT Core** — Mosquitto + FastAPI + PostgreSQL + docker-compose deleted. Pi publishes mTLS QoS-1 to `a3re4nls2cuv10-ats.iot.us-east-1.amazonaws.com:8883`. IoT Core Topic Rule triggers AttestationFn Lambda. CDK stack deploys rule + policy. TLS certs still need deploying to Pi (see 5.4). <!-- resolved: 2026-06-19, M12 --> |
+| 5.6 | Ed25519 signing in legacy HTTPS path | `[~]` | `device_ed25519.key` param exists. Key path read but never used in the curl transmit path — the JSON payload is unsigned. Only relevant when Paho not compiled in (anti-death HTTPS fallback). Low priority. |
 
 ---
 
@@ -94,11 +94,11 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| 6.1 | `attestation.py` wired into server ingest | `[x]` | `server/main.py` now starts an MQTT subscriber (paho, daemon thread) on `vigia/attest/+/hazard` at lifespan startup. Calls `process_attestation_event()` → `VigiaDb.log_verified_event()`. <!-- resolved: 2026-06-18 --> |
-| 6.2 | MQTT subscriber on server | `[x]` | See 6.1. Enabled via `MQTT_BROKER_HOST` env var; no-ops if unset. <!-- resolved: 2026-06-18 --> |
-| 6.3 | Server `signed_et.valid` key populated | `[x]` | `anti_death_node.cpp` `pack_signed_et()` now packs `"valid": et.sig_valid` as 7th field (was 6). `_resolve_trust_level()` can now reach `TRUST_LEVEL_HARDWARE`. <!-- resolved: 2026-06-18 --> |
-| 6.4 | Fleet device registry in DB | `[x]` | `server/db/init.sql` extended: `cert_pem TEXT` column on `device_registry`, `fleet_ca` table for root CA, `attestation_log` table. `server/ingest/db_adapter.py` (new) exposes the interface `attestation.py` requires. <!-- resolved: 2026-06-18 --> |
-| 6.5 | Cosmos 3 world model client | `[~]` | `server/ingest/cosmos3_stub.py`: `Cosmos3Client` class — stub mode by default (logs payload, no HTTP call), live mode activated by `COSMOS3_API_KEY` env var. Wired into `main.py` lifespan and passed to `process_attestation_event`. Strategic pitch: "pipeline ready, API partnership pending." |
+| 6.1 | Hardware attestation pipeline | `[x]` | **M12: AWS IoT Core + Lambda** — FastAPI `attestation.py` deleted. `packages/backend/functions/attestation/index.ts` is full TypeScript port: MsgPack decode → anti-replay DynamoDB conditional update → EtHashInput 96-byte reconstruction → ECDSA P-256 prehashed verify via `@noble/curves` → H3 res-10 geo-dedup → HazardsTable upsert → AttestationLogTable write. Triggered by IoT Rule `vigia_hazard_attest`. <!-- resolved: 2026-06-19, M12 --> |
+| 6.2 | MQTT subscriber on server | `[x]` | **M12: AWS IoT Core Topic Rule** — no self-hosted broker. IoT Rule SQL `SELECT encode(*, 'base64') AS payload, topic() AS topic, timestamp() AS ts FROM 'vigia/attest/+/hazard'` triggers AttestationFn Lambda directly. <!-- resolved: 2026-06-19, M12 --> |
+| 6.3 | `signed_et.valid` key populated | `[x]` | `hazard_uplink_node.cpp` packs `"valid": et.sig_valid` in MsgPack. AttestationFn reads `se.sig_valid`. <!-- resolved: 2026-06-18 --> |
+| 6.4 | Fleet device registry in DB | `[x]` | **M12: DynamoDB** — `VigiaPiDeviceRegistry` table (CDK, `RemovalPolicy.RETAIN`). `cert_pem` + `last_seq` stored. AttestationFn reads cert via `GetCommand`. Manual seed: `aws dynamodb put-item --table-name VigiaPiDeviceRegistry`. <!-- resolved: 2026-06-19, M12 --> |
+| 6.5 | Cosmos 3 / VLM world model client | `[x]` | OrchestratorFunction calls Bedrock Nova-Lite VLM + ReAct Agent. **2% sampling enforced** (`Math.random() < VLM_SAMPLE_RATE`, env-tunable; deployed session 5). 98% fast path scores from edge ONNX confidence; reward dedup + slashing make probabilistic verification economically sound. <!-- resolved: 2026-06-19, session 5 --> |
 | 6.6 | `tools/provision_device.py` | `[x]` | Added in `bf6e8d6` as `tools/atecc_provision.py`. |
 
 ---
@@ -114,15 +114,33 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 
 ---
 
-## Server-Side Pipeline
+## Server-Side Pipeline (AWS Lambda — M12 migration)
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| 8.1 | HTTP ingest + PostGIS | `[x]` | FastAPI `/v1/events`, spatial merge within 5 m radius, hazard map UI. |
-| 8.2 | Server auth: HMAC → ECDSA upgrade | `[x]` | `auth.py` `lookup_device()` now returns `cert_pem`. `authenticate_event()` uses `verify_ecdsa_header()` when cert_pem present, falls back to HMAC for legacy devices. `signature.py` gains `verify_ecdsa_header()`. <!-- resolved: 2026-06-18 --> |
-| 8.3 | Anti-replay uses hardware sequence | `[~]` | Server uses `device_seq` from JSON payload (client-supplied). Must be cross-checked against the `SignedEt.sequence` from the firmware monotonic counter once attestation is wired. |
+| 8.1 | Hazard ingest | `[x]` | **M12: DynamoDB + H3 geo-dedup** — FastAPI + PostGIS deleted. AttestationFn writes to HazardsTable with H3 resolution-10 dedup (replaces PostGIS `ST_DWithin`). Mobile ingest via ValidatorFn → HazardsTable. <!-- resolved: 2026-06-19, M12 --> |
+| 8.2 | Hardware ECDSA authentication | `[x]` | **M12: AttestationFn** — `verifyEcdsaP256Prehashed()` uses `@noble/curves` P-256 with `prehash:false, lowS:false` matching ATECC608A raw R‖S output. Cert fetched from `VigiaPiDeviceRegistry` DynamoDB. <!-- resolved: 2026-06-19, M12 --> |
+| 8.3 | Anti-replay monotonic sequence | `[x]` | **M12: DynamoDB conditional update** — `ConditionExpression: 'attribute_not_exists(last_seq) OR last_seq < :seq'` is atomic and race-safe. Firmware-attested ATECC608A sequence counter, not client-supplied. <!-- resolved: 2026-06-19, M12 --> |
 
 ---
+
+## Cloud Security Hardening (session 5 — `vigia-amazon`, deployed)
+
+Findings from a full cloud-pipeline security review, all fixed and deployed (`VigiaStack` → `UPDATE_COMPLETE`).
+
+| # | Severity | Item | Status | Notes |
+|---|----------|------|--------|-------|
+| S.1 | 🔴 | Reward farming via fast path | `[x]` | Fast path credited rewards with no dedup/ledger write. Now every reward (fast + VLM) goes through `tryCreditReward` — atomic `TransactWriteCommand` (dedup-lock + balance + ledger). <!-- resolved: 2026-06-19 --> |
+| S.2 | 🔴 | Reward double-spend race | `[x]` | Read-then-write replaced by single conditional transaction; concurrent stream records can't double-credit. <!-- resolved: 2026-06-19 --> |
+| S.3 | 🔴 | Open device registration (Sybil) | `[x]` | `register-device` now requires Ed25519 proof-of-possession over `VIGIA-REGISTER:<pubkey>`. **Android `WalletRepositoryImpl` updated to match — requires APK rebuild.** <!-- resolved: 2026-06-19 --> |
+| S.4 | 🔴 | Slash/blacklist not enforced | `[x]` | `ValidatorFn` now rejects `blacklisted=true` devices (403). <!-- resolved: 2026-06-19 --> |
+| S.5 | 🟠 | Attestation watermark poisoning | `[x]` | `AttestationFn` verifies ECDSA signature **before** advancing the anti-replay sequence. <!-- resolved: 2026-06-19 --> |
+| S.6 | 🟠 | Validator input/freshness | `[x]` | `ValidatorFn` validates types/ranges (lat/lon/confidence) + ±10 min timestamp freshness. <!-- resolved: 2026-06-19 --> |
+| S.7 | 🟠 | VLM JSON parse fail-open | `[x]` | OrchestratorFn extracts first `{…}` block, fail-closed on NaN/garbage. <!-- resolved: 2026-06-19 --> |
+| S.8 | 🟡 | No DLQ on async invokes | `[x]` | Orchestrator + slash-node have SQS DLQs (2 retries). Maintenance pipe filter fixed `INSERT`→`MODIFY`. IoT error-log role scoped from `*`. <!-- resolved: 2026-06-19 --> |
+| S.9 | 🟡 | Legacy duplicate pipe | `[ ]` | `vigia-hazards-to-orchestrator` (3rd stream consumer, double-invokes orchestrator) — needs manual `aws pipes delete-pipe`. |
+
+> **Note:** the cloud code lives in the **`vigia-amazon`** repo (not pushed here). This table tracks its status for system-wide visibility.
 
 ## Cross-Cutting
 
@@ -146,9 +164,14 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 1. **Global seqlock bulk snapshot** (item 1.3) — replace per-slot seqlock with one atomic 300-frame snapshot. Medium refactor.
 2. **SIM7600 ECM provisioning** (item 5.3) — physical AT command, one-time.
 3. **PREEMPT_RT boot** (item 9.6) — physical Pi, edit `/boot/firmware/cmdline.txt`.
-4. **TLS certs + MQTT broker** (items 5.4, 5.5) — run `vigia-gen-ca.sh` + `docker compose up`.
-5. **ATECC provisioning** (item 2.8) — `atcab_genkey(0)` once on wired device.
-6. **2% VLM sampling** — in `vigia-amazon` OrchestratorFunction, not yet built.
+4. **TLS certs deploy to Pi** (item 5.4) — run `tools/vigia-gen-ca.sh` → `tools/vigia-sign-device.sh` → scp to `/etc/vigia/` → download `AmazonRootCA1.pem`.
+5. **DynamoDB Pi device seed** — after cert PEM generated, run `aws dynamodb put-item --table-name VigiaPiDeviceRegistry --item '{"device_id":{"S":"vigia-001"},"cert_pem":{"S":"<PEM>"},"last_seq":{"N":"0"}}'`
+6. **ATECC provisioning** (item 2.8) — `tools/atecc_provision.py` once on wired device, then `build_phase2_live.sh`, then set `verify_ecdsa: true` in `sensor_bridge_params.yaml`.
+7. ~~**2% VLM sampling**~~ — **done** (session 5, deployed). Env-tunable `VLM_SAMPLE_RATE`.
+8. **Stripe payout integration** — `StripePayRepositoryImpl.kt` all 3 methods are empty stubs (Phase 4). Also needs a backend payout endpoint (none exists; rewards currently settle to Solana).
+9. **Wallet balance UI** — balance is fetched (`WalletRepositoryImpl.refreshBalance`) and surfaced via `CopilotViewModel`; no dedicated dashboard screen yet.
+10. **APK rebuild** — Android `register-device` now sends the proof-of-possession signature (session 5); rebuild/redeploy required or new-device onboarding 401s.
+11. **Delete legacy duplicate pipe** — `aws pipes delete-pipe --name vigia-hazards-to-orchestrator` (see S.9).
 
 ## Requires Ben (hardware)
 
@@ -156,8 +179,10 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 - SIM7600 ECM provisioning → item 5.3
 - PREEMPT_RT cmdline.txt edit → item 1.1
 
-## Requires infrastructure decisions
+## Requires infrastructure / operational steps
 
-- MQTT broker → items 5.4, 5.5, 6.2
-- Cosmos 3 account / API → item 6.5
+- ~~MQTT broker~~ — **resolved** (M12: AWS IoT Core)
+- TLS cert pipeline → item 5.4 (run scripts, scp to Pi)
+- DynamoDB device seed → item above
 - ACL EP ORT rebuild (~2h on Pi) → item 3.4
+- Cosmos 3 / Bedrock partnership → item 6.5 (hardcoded agent ID works; 2% sampling gate pending)

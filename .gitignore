@@ -10,3 +10,14 @@ config/device.key
 config/device_keys/
 firmware/build-*/
 firmware/third_party/
+
+# Secrets — device keys / certs (NEVER commit). out/ holds IoT device private keys.
+out/
+*.pem
+*.key
+iot_device_key*.pem
+
+# Local build artifacts / debug output (untracked test binaries, debug images)
+# Root-level compiled test binaries (source tests live in tests/*.cpp)
+/*_test
+depth_debug*.png
