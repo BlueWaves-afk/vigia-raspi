@@ -10,7 +10,9 @@
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?style=flat-square&logo=cplusplus)](https://en.cppreference.com/w/cpp/17)
 [![Platform](https://img.shields.io/badge/Platform-ARM_Cortex--A76-orange?style=flat-square&logo=arm)](https://www.arm.com/)
-[![Inference](https://img.shields.io/badge/Inference-OpenVINO_2025-purple?style=flat-square&logo=intel)](https://docs.openvino.ai/)
+[![Inference](https://img.shields.io/badge/Inference-ONNX_Runtime_(prod)_·_OpenVINO_(legacy)-purple?style=flat-square&logo=onnx)](https://onnxruntime.ai/)
+[![Runtime](https://img.shields.io/badge/Runtime-ROS_2-blue?style=flat-square&logo=ros)](https://docs.ros.org/)
+[![Cloud](https://img.shields.io/badge/Cloud-AWS_Serverless-orange?style=flat-square&logo=amazonaws)](https://aws.amazon.com/)
 [![Vision](https://img.shields.io/badge/Vision-OpenCV_4.14-green?style=flat-square&logo=opencv)](https://opencv.org/)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=flat-square)](LICENSE)
 
@@ -95,7 +97,17 @@ VIGIA addresses this by rethinking the problem at the architecture level: a CPU-
 
 ## System Architecture
 
-VIGIA implements a **4-stage parallel perception pipeline** where each stage is pinned to a dedicated CPU core and communicates through lock-free queues. This eliminates cross-core migration overhead, reduces scheduler contention, and delivers deterministic latency bounds across all processing stages.
+> **Production runtime (current):** VIGIA now runs as a **ROS 2 node graph**
+> (`vigia_ws/`) using **ONNX Runtime** for inference (YOLO26 INT8 + MiDaS), feeding an
+> **AWS serverless** DePIN backend (IoT Core → Lambda → DynamoDB). The
+> single-process OpenVINO pipeline described in this section and the deep-dives below
+> is the **original Bharat-AI-SoC hackathon system** — preserved here as the record of
+> the edge-optimization work it pioneered. For the current architecture see
+> [`docs/system_architecture.md`](docs/system_architecture.md) (Part A) and the
+> `.wiki/` notes `08_ROS2_Edge_Nodes`, `09_Cloud_Pipeline`, `10_Cloud_Security_Model`.
+> The benchmarks below were measured on the OpenVINO build.
+
+The original pipeline implements a **4-stage parallel perception pipeline** where each stage is pinned to a dedicated CPU core and communicates through lock-free queues. This eliminates cross-core migration overhead, reduces scheduler contention, and delivers deterministic latency bounds across all processing stages.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -213,15 +225,23 @@ The Cortex-A76 uses dynamic frequency scaling by default. Under inference load, 
 
 ## Design Trade-offs & Hard Decisions
 
-### Why Not TFLite or ONNX Runtime?
+### Inference Runtime: OpenVINO (original) → ONNX Runtime (production)
+
+The original benchmark below drove the OpenVINO choice for the hackathon build:
 
 | Framework         | ARM CPU Optimization | KleidiAI Support       | Latency (YOLO26 INT8, Pi 5) |
 |-------------------|---------------------|------------------------|------------------------------|
 | **OpenVINO 2025** | JIT + KleidiAI INT8 | ✅ Full (source build) | **28.4 ms**                  |
-| ONNX Runtime      | Generic reference    | ❌                    | ~115 ms                      |
+| ONNX Runtime (stock) | Generic reference | ❌ (no ACL EP)         | ~115 ms                      |
 | TFLite            | Standard NEON        | ❌                    | ~130 ms                      |
 
-OpenVINO 2025 with KleidiAI provides a **3× YOLO speedup** over the Pi 4 ACL FP16 path and **35–55% uplift** over generic frameworks via INT8 GEMM kernels compiled from source.
+> [!NOTE] Why production moved to ONNX Runtime
+> The production ROS 2 node uses **ONNX Runtime** — chosen for its first-class C++
+> session API (`Ort::IoBinding` zero-copy hot path), portable `.onnx` model format,
+> and an **ARM Compute Library / KleidiAI execution provider** built from source
+> (`scripts/build_ort_acl.sh` → `onnxruntime_providers_acl.so`), which recovers the
+> INT8 GEMM acceleration the "stock" row above lacks. OpenVINO's edge optimizations
+> (NEON HWC→CHW, INT8 GEMM micro-kernels) informed the ONNX EP configuration.
 
 ### Why Separate Cores for YOLO and MiDaS?
 

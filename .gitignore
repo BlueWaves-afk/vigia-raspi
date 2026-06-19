@@ -21,3 +21,6 @@ iot_device_key*.pem
 # Root-level compiled test binaries (source tests live in tests/*.cpp)
 /*_test
 depth_debug*.png
+
+# Firmware CMake build output (artifacts, not source)
+firmware/build/

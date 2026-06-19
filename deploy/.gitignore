@@ -1,6 +1,0 @@
-# Never commit private keys or generated certs
-mosquitto/certs/*.key
-mosquitto/certs/*.crt
-mosquitto/certs/*.srl
-out/
-.env

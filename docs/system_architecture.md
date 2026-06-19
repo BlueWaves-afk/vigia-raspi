@@ -1,7 +1,68 @@
-# VIGIA-ARM — Factual System Architecture
+# VIGIA — System Architecture
+
+> [!IMPORTANT] Two architectures live in this repo
+> - **Current production runtime** = the ROS 2 workspace (`vigia_ws/`) with **ONNX
+>   Runtime** inference + the **AWS serverless** backend. Documented in Part A below
+>   and in `.wiki/08_ROS2_Edge_Nodes`, `.wiki/09_Cloud_Pipeline`, `.wiki/10_Cloud_Security_Model`.
+> - **Legacy monolith** = the original Bharat-AI-SoC hackathon pipeline in `src/`
+>   (OpenVINO + `coordinator.cpp`). Preserved as **Part B** — it is no longer the
+>   deployed runtime but remains a valid record of the edge-optimization work.
+
+---
+
+# Part A — Current Production Architecture (ROS 2 + ONNX + AWS)
+
+## A.1 Edge runtime (`vigia_ws/src/vigia_edge_node`)
+
+Multi-node ROS 2 graph; each node runs on a dedicated thread with an explicit
+scheduling class (`launch_rt_node()` → `pthread_setschedparam(SCHED_FIFO, prio)`).
+
+| Node | Inference / role | Sched prio |
+|------|------------------|-----------|
+| `camera_node` | CSI capture → `/dev/shm` frame ring + `ShmMetaRing` | FIFO 80 |
+| `vision_node` | **YOLO26 INT8 via ONNX Runtime** (`Ort::IoBinding`); emits spatial latent `S_t` | FIFO 75 |
+| `depth_node` | **MiDaS v2.1 via ONNX Runtime** | FIFO 75 |
+| `fusion_node` | Gravity-compensated ISS, RRI, Kalman dead-reckoning → `/vigia/hazard_events` | FIFO 70 |
+| `sensor_bridge_node` | COBS@921600 from Pico; IMU/GPS/`SignedEtPacketPi`; ECDSA verify | FIFO 85 |
+| `anti_death_node` | UPS GPIO (libgpiod v2); seqlock snapshot; emergency uplink in 15 s | FIFO 99 |
+| `ble_gatt_node` | sdbus-c++ v2 GATT; ECDH handshake; phone telemetry | OTHER 40 |
+| `hazard_uplink_node` | MsgPack → MQTT QoS-1 mTLS → AWS IoT Core | OTHER 30 |
+
+> [!NOTE]
+> Inference is **ONNX Runtime**, not OpenVINO. `vision_node.cpp`/`depth_node.cpp`
+> use `Ort::` APIs. The optional KleidiAI/ACL execution provider is built via
+> `scripts/build_ort_acl.sh` (`onnxruntime_providers_acl.so`).
+
+## A.2 Cloud backend (`vigia-amazon`, CDK `VigiaStack`)
+
+Fully serverless since **M12** — no Docker, Mosquitto, FastAPI, or PostgreSQL.
+
+```
+Pi hazard_uplink ──MQTT mTLS──▶ IoT Core ──rule vigia_hazard_attest──▶ AttestationFn ─┐
+Phone ──HTTPS Ed25519──▶ ValidatorFn ────────────────────────────────────────────────┴─▶ HazardsTable
+                                                            (DynamoDB stream INSERT pipe) │
+                                                                                          ▼
+                                              OrchestratorFn  (2% Bedrock VLM / 98% ONNX fast path)
+                                                                  │ VERIFIED
+                                                  tryCreditReward (atomic) ─▶ RewardsLedger + Solana
+```
+
+- **AttestationFn** — MsgPack decode → EtHash SHA-256 → ECDSA P-256 verify → advance
+  anti-replay watermark → H3 res-10 dedup → `HazardsTable`. See `.wiki/10_Cloud_Security_Model`.
+- **OrchestratorFn** — `VLM_SAMPLE_RATE` (default 0.02) gates Bedrock Nova + ReAct Agent;
+  rewards are atomic + deduped per (wallet, geohash)/30 days.
+- DynamoDB: `HazardsTable`, `VigiaPiDeviceRegistry`, `VigiaDeviceBindings`,
+  `RewardsLedger`, Ledger (`ContributorGeohashIndex`), Cooldown, `AttestationLog`.
+
+Full detail: `.wiki/09_Cloud_Pipeline` and `.claude/design/` contracts.
+
+---
+
+# Part B — Legacy `src/` Monolith (hackathon system)
 
 > Generated from source inspection of `src/`, `include/`, `tests/`, and `CMakeLists.txt`.
-> All claims are grounded in actual code, not documentation intent.
+> All claims are grounded in actual code. This is the **original** OpenVINO pipeline,
+> retained for reference; it is **not** the deployed production runtime (see Part A).
 
 ---
 

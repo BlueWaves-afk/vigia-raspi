@@ -1,7 +1,0 @@
-/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool/picotool
-/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool/picotoolTargets.cmake
-/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool/picotoolTargets-release.cmake
-/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool/picotoolConfig.cmake
-/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool/picotoolConfigVersion.cmake
-/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool/enc_bootloader.elf
-/Users/ben/Desktop/vigia-raspi/firmware/build/_deps/picotool/enc_bootloader_mbedtls.elf

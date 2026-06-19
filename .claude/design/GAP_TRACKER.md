@@ -1,6 +1,6 @@
 # VIGIA System Gap Tracker
 
-**Last updated:** 2026-06-19 (session 5 — cloud deploy: 2% VLM sampling, reward-economics hardening, register-device proof-of-possession, DLQs)  
+**Last updated:** 2026-06-19 (session 6 — full security audit + doc consistency: firmware/build untracked, deploy/ removed, README/system_architecture reconciled to ROS 2 + ONNX)  
 **Audited against:** commits through M12 (AWS IoT Core unification, FastAPI/Mosquitto deleted, BLE RESPONSE_CHAR wired) + session-5 `vigia-amazon` deploy (CloudFormation `VigiaStack` → `UPDATE_COMPLETE`)  
 **Build status:** `colcon build` ✅ passing on Pi (Debian Trixie, aarch64); `cdk deploy VigiaStack` ✅ deployed
 
@@ -141,6 +141,31 @@ Findings from a full cloud-pipeline security review, all fixed and deployed (`Vi
 | S.9 | 🟡 | Legacy duplicate pipe | `[ ]` | `vigia-hazards-to-orchestrator` (3rd stream consumer, double-invokes orchestrator) — needs manual `aws pipes delete-pipe`. |
 
 > **Note:** the cloud code lives in the **`vigia-amazon`** repo (not pushed here). This table tracks its status for system-wide visibility.
+
+## Session 6 — Full Security Audit & Doc Consistency (2026-06-19)
+
+### Fixed (vigia-raspi, on `main`)
+| # | Item | Status |
+|---|------|--------|
+| A.1 | Stop tracking `firmware/build/` (1167 artifacts) + gitignore | `[x]` |
+| A.2 | Remove stale `deploy/` (Mosquitto + docker-compose + PostgreSQL — superseded by M12 AWS) | `[x]` |
+| A.3 | `docs/system_architecture.md` — lead with current ROS 2 + ONNX + AWS (Part A); legacy OpenVINO monolith preserved (Part B) | `[x]` |
+| A.4 | `README.md` — reconcile OpenVINO (legacy) vs ONNX Runtime (production) without changing structure; badges updated | `[x]` |
+
+### Residual security items — require the `vigia-amazon` session (deferred) or coordinated client+server change
+| # | Sev | Item | Where |
+|---|-----|------|-------|
+| A.5 | 🟠 | **H2** — `ValidatorFn` signed message omits the frame image; a valid signer can attach any photo. Add `sha256(frame)` to the signed payload (validator + Android telemetry signer). | vigia-amazon + Android |
+| A.6 | 🟡 | **Sarvam API key** baked into Android `BuildConfig` → extractable from APK. Real fix = backend STT/TTS proxy (no new client key). | Android + new Lambda |
+| A.7 | 🟡 | **CORS `*` + no auth** on read endpoints (`rewards-balance` leaks any wallet balance cross-origin). | vigia-amazon |
+| A.8 | 🟡 | **Bedrock IAM** `resources: ['*']` (intelligence-stack:142,304) — scope to model/agent ARNs. | vigia-amazon |
+| A.9 | ⚪ | `VLM_SAMPLE_RATE` not set as a CDK env var — works via code default 0.02, but tuning requires adding the env var. | vigia-amazon |
+
+### Android — clean (audited)
+- ✅ Ed25519 private key AES-GCM-wrapped by a TEE-backed Keystore key.
+- ✅ Exported `CdmPresenceService` guarded by `BIND_COMPANION_DEVICE_SERVICE`; network service `exported=false`.
+- ✅ No secrets logged; secrets sourced from gitignored `secrets.properties`; HTTPS only.
+- 🟡 OAuth via custom scheme `vigia://callback` — safe only with PKCE (Amplify default; confirm).
 
 ## Cross-Cutting
 
