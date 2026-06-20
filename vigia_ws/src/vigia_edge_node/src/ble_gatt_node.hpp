@@ -10,6 +10,7 @@
 
 #include "vigia_msgs/msg/spatial_latent.hpp"
 #include "vigia_msgs/msg/detection_array.hpp"
+#include "vigia_msgs/msg/gps_pvt.hpp"
 #include "vigia_edge_node/ble_frame_codec.hpp"
 #include "vigia_edge_node/ble_gatt_constants.hpp"
 #include "vigia_edge_node/ttc_estimator.hpp"
@@ -35,6 +36,7 @@ private:
     // ROS2 callbacks — cache latest frame into mailbox.
     void on_latent(vigia_msgs::msg::SpatialLatent::ConstSharedPtr msg);
     void on_detections(vigia_msgs::msg::DetectionArray::ConstSharedPtr msg);
+    void on_gps(vigia_msgs::msg::GpsPvt::ConstSharedPtr msg);
 
     // Encode a 6-byte FCW alert frame: [0x10 | ttc_f32_le(4) | class_id_u8(1)]
     static std::vector<uint8_t> encode_fcw(float ttc_s, int class_id);
@@ -49,6 +51,8 @@ private:
     // ── ROS2 ────────────────────────────────────────────────────────────
     rclcpp::Subscription<vigia_msgs::msg::SpatialLatent>::SharedPtr  sub_latent_;
     rclcpp::Subscription<vigia_msgs::msg::DetectionArray>::SharedPtr sub_det_;
+    rclcpp::Subscription<vigia_msgs::msg::GpsPvt>::SharedPtr         sub_gps_;
+    std::atomic<float> ego_speed_ms_{0.f};  // updated by on_gps, read by on_detections
 
     // ── Mailbox (single-slot, lock-free hand-off to D-Bus thread) ───────
     // Guarded by mailbox_mutex_ — the notify timer fires at stream_hz so

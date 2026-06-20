@@ -57,6 +57,9 @@ namespace control {
     inline constexpr uint8_t kPauseStream = 0x12;  // stop telemetry notifications
     inline constexpr uint8_t kResumeStream= 0x13;  // resume telemetry notifications
     inline constexpr uint8_t kRekey       = 0x20;  // rotate session key (§5)
+    // M11 §3.3: profile-scaled TTC threshold push. Payload: [0xA0 | ttc_f32_le(4)] = 5 bytes.
+    // Matches GattConstants.Control.SET_TTC_THRESHOLD in Android app.
+    inline constexpr uint8_t kSetTtcThreshold = 0xA0;
 }
 
 }  // namespace vigia::ble

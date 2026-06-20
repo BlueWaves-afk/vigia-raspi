@@ -44,6 +44,10 @@ BleGattNode::BleGattNode(const rclcpp::NodeOptions& options)
         "/vigia/detections", vigia::qos::inference_results(),
         std::bind(&BleGattNode::on_detections, this, std::placeholders::_1));
 
+    sub_gps_ = create_subscription<vigia_msgs::msg::GpsPvt>(
+        "/vigia/gps_pvt", vigia::qos::sensor_stream(),
+        std::bind(&BleGattNode::on_gps, this, std::placeholders::_1));
+
     dbus_thread_ = std::thread(&BleGattNode::dbus_thread_main, this);
     RCLCPP_INFO(get_logger(), "BleGattNode started — adapter=%s stream=%.1f Hz dims=%d",
                 ble_adapter_.c_str(), static_cast<double>(stream_hz_), default_dims_);
@@ -53,6 +57,13 @@ BleGattNode::~BleGattNode()
 {
     shutdown_.store(true, std::memory_order_relaxed);
     if (dbus_thread_.joinable()) dbus_thread_.join();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+void BleGattNode::on_gps(vigia_msgs::msg::GpsPvt::ConstSharedPtr msg)
+{
+    if (msg->valid_fix)
+        ego_speed_ms_.store(msg->speed_ms, std::memory_order_relaxed);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +103,8 @@ void BleGattNode::on_detections(vigia_msgs::msg::DetectionArray::ConstSharedPtr 
     static constexpr uint32_t kClassBus       = 5;
     static constexpr uint32_t kClassTruck     = 7;
 
+    const float ego_spd = ego_speed_ms_.load(std::memory_order_relaxed);
+
     vigia::TtcResult best{};
     for (const auto& d : msg->detections) {
         if (d.confidence < 0.55f) continue;
@@ -104,11 +117,11 @@ void BleGattNode::on_detections(vigia_msgs::msg::DetectionArray::ConstSharedPtr 
         const uint32_t cid = d.class_id;
 
         if (cid == kClassPerson) {
-            res = ttc_pedestrian_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, 0.f, ttc_threshold_s_);
+            res = ttc_pedestrian_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, ego_spd, ttc_threshold_s_);
         } else if (cid == kClassBicycle || cid == kClassMotorbike) {
-            res = ttc_cyclist_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, 0.f, ttc_threshold_s_);
+            res = ttc_cyclist_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, ego_spd, ttc_threshold_s_);
         } else if (cid == kClassCar || cid == kClassBus || cid == kClassTruck) {
-            res = ttc_vehicle_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, 0.f, ttc_threshold_s_);
+            res = ttc_vehicle_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, ego_spd, ttc_threshold_s_);
         }
 
         if (res.valid && (!best.valid || res.ttc_s < best.ttc_s))
@@ -260,6 +273,22 @@ void BleGattNode::dbus_thread_main()
                             if (val.empty()) return;
                             if (val[0] == vigia::ble::control::kRequest256) default_dims_ = 256;
                             else if (val[0] == vigia::ble::control::kRequest512) default_dims_ = 512;
+                            else if (val[0] == vigia::ble::control::kSetTtcThreshold
+                                     && val.size() >= 5) {
+                                // Decode little-endian float32 from bytes [1..4]
+                                uint32_t bits = static_cast<uint32_t>(val[1])
+                                              | (static_cast<uint32_t>(val[2]) << 8)
+                                              | (static_cast<uint32_t>(val[3]) << 16)
+                                              | (static_cast<uint32_t>(val[4]) << 24);
+                                float threshold = 0.f;
+                                std::memcpy(&threshold, &bits, sizeof(threshold));
+                                if (threshold > 0.f && threshold < 60.f) {
+                                    std::lock_guard<std::mutex> lk(fcw_mutex_);
+                                    ttc_threshold_s_ = threshold;
+                                    RCLCPP_INFO(get_logger(),
+                                        "TTC threshold updated to %.2f s", threshold);
+                                }
+                            }
                         })
                 )
         ).forInterface(kGattCharIface);
