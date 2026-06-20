@@ -99,8 +99,17 @@ bool EcdsaVerifier::verify(const std::uint8_t hash[32],
     if (!hash || !sig)
         return false;
 
-    if (isStubSignature(sig))
+    if (isStubSignature(sig)) {
+#if defined(VIGIA_DEV)
+        // P0-8 fix: all-zero "stub" signatures are accepted ONLY in dev builds. Release
+        // builds (no VIGIA_DEV) fail closed regardless of the allow_stub_sig flag, so a
+        // misconfigured env var can never bypass edge attestation in the field.
         return cfg_.allow_stub_sig;
+#else
+        (void)cfg_;
+        return false;
+#endif
+    }
 
 #if defined(VIGIA_HAVE_OPENSSL)
     if (!hasKey())
