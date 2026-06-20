@@ -19,6 +19,7 @@ inline constexpr const char * kHandshakeUuid = "eb4b161b-3be6-4719-aa0f-8ef40bd4
 inline constexpr const char * kTelemetryUuid = "4d231514-5514-4847-bb6d-64e3aa7a3ffb";  // Notify
 inline constexpr const char * kControlUuid   = "0bb821dd-6b24-4185-ad69-662510769d19";  // Write (phone->Pi)
 inline constexpr const char * kAttestUuid    = "580c5fb6-5283-4194-84c8-5d6aec75b88a";  // Notify (anti-spoof)
+inline constexpr const char * kAlertUuid     = "c3a7d812-4f9e-4b3a-a5d2-7e1f8c0b6e94";  // Notify (FCW + CRITICAL alerts, Pi->phone)
 inline constexpr const char * kCccdUuid      = "00002902-0000-1000-8000-00805f9b34fb";
 
 // ── Handshake protocol bytes (mirror GattConstants.Protocol) ────────────────
@@ -32,6 +33,21 @@ namespace proto {
     inline constexpr uint8_t kBound     = 0x04;  // Pi -> phone  (CONFIRM on success)
     inline constexpr uint8_t kErr       = 0xFF;  // Pi -> phone  (failure)
     inline constexpr int     kNonceBytes = 32;
+}
+
+// ── ALERT_CHAR opcodes (Pi -> phone), §5 M11 FCW ────────────────────────────
+// Wire format: [opcode(1) | payload...]
+// FCW: [0x10 | ttc_f32_le(4) | class_id_u8(1)]  = 6 bytes total
+namespace alert {
+    inline constexpr uint8_t kFcwAlert = 0x10;   // Forward Collision Warning
+
+    // class_id values (COCO subset VIGIA detects)
+    inline constexpr uint8_t kClassVehicle    = 1;
+    inline constexpr uint8_t kClassPedestrian = 2;
+    inline constexpr uint8_t kClassCyclist    = 3;
+    inline constexpr uint8_t kClassUnknown    = 0xFF;
+
+    inline constexpr std::size_t kFcwPayloadBytes = 6;  // opcode + float32 + uint8
 }
 
 // ── CONTROL_CHAR opcodes (phone -> Pi), design spec §7.1 ────────────────────

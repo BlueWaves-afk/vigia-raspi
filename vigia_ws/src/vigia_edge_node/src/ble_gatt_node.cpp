@@ -24,6 +24,7 @@ static constexpr const char* kHandshakeObjPath = "/com/vigia/ble/service0/char0"
 static constexpr const char* kTelemetryObjPath = "/com/vigia/ble/service0/char1";
 static constexpr const char* kControlObjPath   = "/com/vigia/ble/service0/char2";
 static constexpr const char* kAttestObjPath    = "/com/vigia/ble/service0/char3";
+static constexpr const char* kAlertObjPath     = "/com/vigia/ble/service0/char4";
 static constexpr const char* kAdvObjPath       = "/com/vigia/ble/advertisement0";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,15 +66,74 @@ void BleGattNode::on_latent(vigia_msgs::msg::SpatialLatent::ConstSharedPtr msg)
 void BleGattNode::on_detections(vigia_msgs::msg::DetectionArray::ConstSharedPtr msg)
 {
     // Derive a lightweight continuous RRI proxy from detection confidence.
-    // Full RRI (with IMU/depth) is computed in FusionNode; this is the
-    // "stream RRI" described in §6.3 — max detection confidence, renormalized.
     float rri = 0.0f;
     for (const auto& d : msg->detections)
         rri = std::max(rri, d.confidence);
     rri = std::min(rri, 1.0f);
 
-    std::lock_guard<std::mutex> lk(mailbox_mutex_);
-    latest_rri_ = rri;
+    {
+        std::lock_guard<std::mutex> lk(mailbox_mutex_);
+        latest_rri_ = rri;
+    }
+
+    // ── M11: TTC / FCW ────────────────────────────────────────────────────
+    const auto now = std::chrono::steady_clock::now();
+    const float dt_s = (last_det_time_.time_since_epoch().count() == 0)
+        ? 0.033f  // first frame: assume 30 fps
+        : std::chrono::duration<float>(now - last_det_time_).count();
+    last_det_time_ = now;
+
+    // COCO class IDs for VIGIA YOLO model (road-safety subset).
+    // person=0, bicycle=1, car=2, motorcycle=3, bus=5, truck=7
+    static constexpr uint32_t kClassPerson    = 0;
+    static constexpr uint32_t kClassBicycle   = 1;
+    static constexpr uint32_t kClassCar       = 2;
+    static constexpr uint32_t kClassMotorbike = 3;
+    static constexpr uint32_t kClassBus       = 5;
+    static constexpr uint32_t kClassTruck     = 7;
+
+    vigia::TtcResult best{};
+    for (const auto& d : msg->detections) {
+        if (d.confidence < 0.55f) continue;
+
+        const float bbox_h    = static_cast<float>(d.bbox.height);
+        const float bbox_area = static_cast<float>(d.bbox.width * d.bbox.height);
+        const float nan_depth = std::numeric_limits<float>::quiet_NaN();
+
+        vigia::TtcResult res{};
+        const uint32_t cid = d.class_id;
+
+        if (cid == kClassPerson) {
+            res = ttc_pedestrian_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, 0.f, ttc_threshold_s_);
+        } else if (cid == kClassBicycle || cid == kClassMotorbike) {
+            res = ttc_cyclist_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, 0.f, ttc_threshold_s_);
+        } else if (cid == kClassCar || cid == kClassBus || cid == kClassTruck) {
+            res = ttc_vehicle_.update(bbox_h, bbox_area, nan_depth, 0.f, dt_s, 0.f, ttc_threshold_s_);
+        }
+
+        if (res.valid && (!best.valid || res.ttc_s < best.ttc_s))
+            best = res;
+    }
+
+    if (best.valid) {
+        std::lock_guard<std::mutex> lk(fcw_mutex_);
+        if (pending_fcw_.empty()) {
+            pending_fcw_ = encode_fcw(best.ttc_s, best.class_id);
+            RCLCPP_WARN(get_logger(), "[FCW] TTC=%.2fs class=%d",
+                        static_cast<double>(best.ttc_s), best.class_id);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+std::vector<uint8_t> BleGattNode::encode_fcw(float ttc_s, int class_id)
+{
+    // [0x10 | ttc_f32_le(4) | class_id_u8(1)] = 6 bytes
+    std::vector<uint8_t> buf(vigia::ble::alert::kFcwPayloadBytes);
+    buf[0] = vigia::ble::alert::kFcwAlert;
+    std::memcpy(buf.data() + 1, &ttc_s, sizeof(float));
+    buf[5] = static_cast<uint8_t>(class_id & 0xFF);
+    return buf;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +285,29 @@ void BleGattNode::dbus_thread_main()
                 )
         ).forInterface(kGattCharIface);
 
+        // ALERT_CHAR — Pi→phone critical alerts (FCW + future ADAS warnings, M11)
+        // Notify-only, 6-byte payload: [opcode | ttc_f32_le | class_id_u8]
+        std::vector<uint8_t> alert_value;
+        auto alrt_obj = sdbus::createObject(*conn, kAlertObjPath);
+        alrt_obj->addVTable(
+            sdbus::registerInterface(kGattCharIface)
+                .withProperties(
+                    sdbus::defineProperty("UUID").withGetter(
+                        [](){ return std::string(vigia::ble::kAlertUuid); }),  // NOLINT
+                    sdbus::defineProperty("Service").withGetter(
+                        [](){ return sdbus::ObjectPath(kSvcObjPath); }),
+                    sdbus::defineProperty("Flags").withGetter(
+                        [](){ return std::vector<std::string>{"notify",
+                                                              "encrypt-authenticated-read"}; }),
+                    sdbus::defineProperty("Value").withGetter(
+                        [&alert_value](){ return alert_value; })
+                )
+                .withMethods(
+                    sdbus::registerMethod("StartNotify").implementedAs([&](){}),
+                    sdbus::registerMethod("StopNotify").implementedAs([&](){})
+                )
+        ).forInterface(kGattCharIface);
+
         // ObjectManager on app root (required by BlueZ RegisterApplication)
         auto app_obj = sdbus::createObject(*conn, kAppObjPath);
         // BlueZ calls GetManagedObjects to enumerate our GATT hierarchy.
@@ -286,12 +369,13 @@ void BleGattNode::dbus_thread_main()
             conn->processPendingRequest();  // non-blocking D-Bus dispatch
 
             auto now = std::chrono::steady_clock::now();
+
+            // ── Telemetry notify (stream_hz cadence) ─────────────────────
             if (now - last_notify >= interval_ms) {
                 last_notify = now;
                 auto frame = encode_current_frame();
                 if (!frame.empty()) {
                     telemetry_value = frame;
-                    // Signal BlueZ that the characteristic value changed → notify.
                     tel_obj->emitSignal("PropertiesChanged")
                         .onInterface("org.freedesktop.DBus.Properties")
                         .withArguments(
@@ -302,6 +386,27 @@ void BleGattNode::dbus_thread_main()
                         );
                 }
             }
+
+            // ── FCW alert notify (as soon as pending, out-of-band) ───────
+            {
+                std::vector<uint8_t> fcw_frame;
+                {
+                    std::lock_guard<std::mutex> lk(fcw_mutex_);
+                    fcw_frame.swap(pending_fcw_);   // drain atomically
+                }
+                if (!fcw_frame.empty()) {
+                    alert_value = fcw_frame;
+                    alrt_obj->emitSignal("PropertiesChanged")
+                        .onInterface("org.freedesktop.DBus.Properties")
+                        .withArguments(
+                            std::string(kGattCharIface),
+                            std::map<std::string, sdbus::Variant>{
+                                {"Value", sdbus::Variant(alert_value)}},
+                            std::vector<std::string>{}
+                        );
+                }
+            }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 

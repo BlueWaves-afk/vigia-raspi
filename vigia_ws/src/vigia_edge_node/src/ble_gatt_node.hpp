@@ -12,6 +12,7 @@
 #include "vigia_msgs/msg/detection_array.hpp"
 #include "vigia_edge_node/ble_frame_codec.hpp"
 #include "vigia_edge_node/ble_gatt_constants.hpp"
+#include "vigia_edge_node/ttc_estimator.hpp"
 #include "vigia_edge_node/vigia_qos.hpp"
 
 // BleGattNode — BlueZ D-Bus GATT peripheral for the phone link.
@@ -35,6 +36,9 @@ private:
     void on_latent(vigia_msgs::msg::SpatialLatent::ConstSharedPtr msg);
     void on_detections(vigia_msgs::msg::DetectionArray::ConstSharedPtr msg);
 
+    // Encode a 6-byte FCW alert frame: [0x10 | ttc_f32_le(4) | class_id_u8(1)]
+    static std::vector<uint8_t> encode_fcw(float ttc_s, int class_id);
+
     // D-Bus / BlueZ thread entry — blocks until shutdown_.
     void dbus_thread_main();
 
@@ -53,6 +57,20 @@ private:
     std::vector<float>  latest_latent_;
     float               latest_rri_{0.0f};
     bool                mailbox_ready_{false};
+
+    // ── TTC / FCW state (updated in on_detections, consumed in D-Bus thread) ─
+    // Separate mutex so high-freq detection callback doesn't block D-Bus notifies.
+    std::mutex fcw_mutex_;
+    // Pending FCW frame; empty = no pending alert.
+    std::vector<uint8_t> pending_fcw_;
+    // Per-class TTC estimators: vehicle(1), pedestrian(2), cyclist(3).
+    // Frame dimensions populated on first detection (assume 320×240 default until known).
+    vigia::TtcEstimator ttc_vehicle_{1,   320.f, 240.f};
+    vigia::TtcEstimator ttc_pedestrian_{2, 320.f, 240.f};
+    vigia::TtcEstimator ttc_cyclist_{3,   320.f, 240.f};
+    std::chrono::steady_clock::time_point last_det_time_{};
+    // Profile-scaled TTC threshold pushed from phone via CONTROL_CHAR (default = NEW × BaseTtc)
+    float ttc_threshold_s_{4.5f};   // NEW profile: BaseTtc(3.0s) × sProfile(1.5)
 
     // ── D-Bus thread ─────────────────────────────────────────────────────
     std::thread dbus_thread_;
