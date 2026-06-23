@@ -128,7 +128,7 @@ void EventStore::syncLoop()
     HazardObservation obs{};
 
     while (running_.load()) {
-        if (promoter_.wait_dequeue(obs, std::chrono::milliseconds(200))) {
+        if (promoter_.waitDequeue(obs, std::chrono::milliseconds(200))) {
             batch.push_back(obs);
 
             if (batch.size() >= cfg_.batch_size)
@@ -142,7 +142,7 @@ void EventStore::syncLoop()
         }
     }
 
-    while (promoter_.try_dequeue(obs))
+    while (promoter_.tryDequeue(obs))
         batch.push_back(obs);
 
     if (!batch.empty())

@@ -2,7 +2,7 @@
  * iss_filter_test.cpp — Unit tests for IssFilter
  *
  * Test matrix maps to real Indian road scenarios.  All ISS values are
- * normalized [0, 1] as produced by normalizeISS() in coordinator.cpp.
+ * normalized [0, 1] as produced by normalizeIss() in iss_compute.cpp.
  *
  * Reference calibration (ISS_MAX = 3.0, V_MIN = 2.0 m/s):
  *

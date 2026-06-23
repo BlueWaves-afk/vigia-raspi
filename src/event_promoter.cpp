@@ -141,7 +141,7 @@ bool EventPromoter::enqueue(HazardObservation obs)
     return true;
 }
 
-bool EventPromoter::try_dequeue(HazardObservation& out)
+bool EventPromoter::tryDequeue(HazardObservation& out)
 {
     std::lock_guard<std::mutex> lock(consumer_mutex_);
 
@@ -156,21 +156,21 @@ bool EventPromoter::try_dequeue(HazardObservation& out)
     return true;
 }
 
-bool EventPromoter::wait_dequeue(
+bool EventPromoter::waitDequeue(
     HazardObservation& out,
     std::chrono::milliseconds timeout)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
     while (std::chrono::steady_clock::now() < deadline) {
-        if (try_dequeue(out))
+        if (tryDequeue(out))
             return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return false;
 }
 
-std::size_t EventPromoter::pending_count() const
+std::size_t EventPromoter::pendingCount() const
 {
     const std::size_t head = head_.load(std::memory_order_acquire);
     const std::size_t tail = tail_.load(std::memory_order_acquire);

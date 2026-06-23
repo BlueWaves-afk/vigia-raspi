@@ -35,7 +35,8 @@ public:
         IssFilter::Result filter{};
     };
 
-    explicit SensorProcessor(Config cfg = Config{});
+    explicit SensorProcessor();
+    explicit SensorProcessor(Config cfg);
 
     Snapshot process(const SensorState& state) const;
     void reset();

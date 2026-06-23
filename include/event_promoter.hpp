@@ -38,9 +38,9 @@ public:
     bool submit(const HazardObservation& candidate);
 
     /* Consumer API — mutex on consumer side only. */
-    bool try_dequeue(HazardObservation& out);
-    bool wait_dequeue(HazardObservation& out, std::chrono::milliseconds timeout);
-    std::size_t pending_count() const;
+    bool tryDequeue(HazardObservation& out);
+    bool waitDequeue(HazardObservation& out, std::chrono::milliseconds timeout);
+    std::size_t pendingCount() const;
 
     const Config& config() const { return cfg_; }
     uint64_t deviceSeq() const { return device_seq_; }

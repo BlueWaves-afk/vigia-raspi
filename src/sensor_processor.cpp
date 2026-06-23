@@ -4,9 +4,13 @@
 
 namespace vigia {
 
+SensorProcessor::SensorProcessor()
+    : SensorProcessor(Config{})
+{}
+
 SensorProcessor::SensorProcessor(Config cfg)
-    : cfg_(cfg),
-      filter_(cfg.filter)
+    : cfg_(std::move(cfg)),
+      filter_(cfg_.filter)
 {}
 
 SensorProcessor::Snapshot SensorProcessor::process(const SensorState& state) const

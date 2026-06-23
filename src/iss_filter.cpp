@@ -5,8 +5,12 @@
 
 namespace vigia {
 
+IssFilter::IssFilter()
+    : IssFilter(Config{})
+{}
+
 IssFilter::IssFilter(Config cfg)
-    : cfg_(cfg)
+    : cfg_(std::move(cfg))
 {}
 
 IssFilter::Result IssFilter::update(float normalizedIss, float speedMs)

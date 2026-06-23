@@ -13,8 +13,8 @@ bool startsWith(std::string_view line, std::string_view prefix) {
 }
 
 /** Returns true when v is finite (not NaN, not Inf). */
-static bool isFiniteVal(float v) { return std::isfinite(v); }
-static bool isFiniteVal(double v) { return std::isfinite(v); }
+bool isFiniteVal(float v) { return std::isfinite(v); }
+bool isFiniteVal(double v) { return std::isfinite(v); }
 
 } // namespace
 

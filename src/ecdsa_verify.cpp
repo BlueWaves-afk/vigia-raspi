@@ -41,11 +41,6 @@ std::optional<std::array<std::uint8_t, 64>> loadPubkeyHexFile(
     oss << file.rdbuf();
     std::string hex = trim(oss.str());
 
-    for (char& c : hex) {
-        if (c == ':' || c == ' ' || c == '\n' || c == '\r' || c == '\t')
-            continue;
-    }
-
     std::string cleaned;
     cleaned.reserve(hex.size());
     for (char c : hex) {

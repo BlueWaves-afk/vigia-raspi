@@ -18,7 +18,7 @@ struct IssParams {
  */
 float computeVerticalImpulse(const ImuSample& imu);
 
-// ISS = |awz| / max(v_gps, V_MIN), clamped to [0, 1] via ISS_MAX
+// normalizeIss: ISS = |awz| / max(v_gps, V_MIN), clamped to [0, 1] via ISS_MAX
 float normalizeIss(float verticalImpulseMs2, float speedMs);
 
 // GPS quality gate used before geo-tagging and speed for ISS normalization

@@ -89,7 +89,8 @@ public:
         bool  isGenuineImpact{false};   // All three stages passed — use for fusion
     };
 
-    explicit IssFilter(Config cfg = Config{});
+    explicit IssFilter();
+    explicit IssFilter(Config cfg);
 
     // Feed one normalized ISS value (output of normalizeISS()) and the
     // current GPS speed in m/s.  Must be called once per frame in order.
