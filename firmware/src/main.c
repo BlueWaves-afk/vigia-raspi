@@ -141,15 +141,7 @@ int main(void) {
 
     /* Phase 2: read 9-byte serial from ATECC608A, zero-padded to 16 bytes. */
     static uint8_t k_device_id[16] = {0};
-    {
-        uint8_t atca_serial[ATCA_SERIAL_NUM_SIZE]; /* 9 bytes */
-        const ATCA_STATUS atca_s = atcab_read_serial_number(atca_serial);
-        if (atca_s == ATCA_SUCCESS) {
-            memcpy(k_device_id, atca_serial, ATCA_SERIAL_NUM_SIZE);
-        } else {
-            blink_panic(2); /* serial read failed — SE may need provisioning */
-        }
-    }
+    vigia_atca_read_device_id(k_device_id);
 #endif
 
     const uint32_t boot_ms = to_ms_since_boot(get_absolute_time());

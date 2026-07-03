@@ -9,9 +9,10 @@
  *   GP2 = SDA, GP3 = SCL
  *   ADDR pin → GND → I2C address 0x60
  *   Pull-ups: 4.7 kΩ to 3.3 V (external — not on Pico board)
- *   Speed: 400 kHz (Fast Mode)
+ *   Speed: 100 kHz default (jumper bringup); 400 kHz on production PCB
  */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -88,6 +89,12 @@ typedef struct {
 int vigia_atca_init(void);
 
 /**
+ * Read the 9-byte ATECC608 serial number into `device_id[16]` (zero-padded).
+ * Returns 0 on success. Live mode panics (2 blinks) on I2C/read failure.
+ */
+int vigia_atca_read_device_id(uint8_t device_id[16]);
+
+/**
  * Compute SHA-256 of `input` (len bytes) into `hash_out` (32 bytes).
  * Blocking — ~40 ms on I2C 400 kHz. Do NOT call from ISR.
  * Returns 0 on success, non-zero on ATCA error.
@@ -101,6 +108,15 @@ int vigia_atca_sha(const uint8_t *input, size_t len, uint8_t *hash_out);
  * Returns 0 on success, non-zero on ATCA error.
  */
 int vigia_atca_sign(const uint8_t *hash, uint8_t *sig_out);
+
+/**
+ * Ensure slot 0 holds a P-256 private key and export the 64-byte public key
+ * (X||Y, no 0x04 prefix). Uses atcab_get_pubkey() when populated, otherwise
+ * atcab_genkey(0). The private key never leaves the secure element.
+ * Sets *generated_new when a fresh key was created (live mode only).
+ * Returns 0 on success, non-zero on ATCA error.
+ */
+int vigia_atca_provision_slot0(uint8_t pubkey[64], bool *generated_new);
 
 #ifdef __cplusplus
 }
