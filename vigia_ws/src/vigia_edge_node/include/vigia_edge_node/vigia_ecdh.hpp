@@ -248,27 +248,26 @@ public:
                 digest_len = digest_buf.size();
             }
 
-            mbedtls_ecdsa_context ecdsa;
-            mbedtls_ecdsa_init(&ecdsa);
-            mbedtls_ecp_group_load(&ecdsa.grp, MBEDTLS_ECP_DP_SECP256R1);
+            mbedtls_ecp_group grp;
+            mbedtls_ecp_point Q;
+            mbedtls_ecp_group_init(&grp);
+            mbedtls_ecp_point_init(&Q);
+            mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
 
-            if (mbedtls_ecp_point_read_binary(&ecdsa.grp, &ecdsa.Q, peer_pub_65, 65) != 0) {
-                mbedtls_ecdsa_free(&ecdsa);
-                return false;
-            }
-
-            mbedtls_mpi r, s;
-            mbedtls_mpi_init(&r);
-            mbedtls_mpi_init(&s);
             int rc = -1;
-            if (mbedtls_mpi_read_binary(&r, sig, 32) == 0 &&
-                mbedtls_mpi_read_binary(&s, sig + 32, 32) == 0) {
-                rc = mbedtls_ecdsa_verify(
-                    &ecdsa.grp, digest, digest_len, &ecdsa.Q, &r, &s);
+            if (mbedtls_ecp_point_read_binary(&grp, &Q, peer_pub_65, 65) == 0) {
+                mbedtls_mpi r, s;
+                mbedtls_mpi_init(&r);
+                mbedtls_mpi_init(&s);
+                if (mbedtls_mpi_read_binary(&r, sig, 32) == 0 &&
+                    mbedtls_mpi_read_binary(&s, sig + 32, 32) == 0) {
+                    rc = mbedtls_ecdsa_verify(&grp, digest, digest_len, &Q, &r, &s);
+                }
+                mbedtls_mpi_free(&r);
+                mbedtls_mpi_free(&s);
             }
-            mbedtls_mpi_free(&r);
-            mbedtls_mpi_free(&s);
-            mbedtls_ecdsa_free(&ecdsa);
+            mbedtls_ecp_point_free(&Q);
+            mbedtls_ecp_group_free(&grp);
             return rc == 0;
         } catch (...) { return false; }
     }

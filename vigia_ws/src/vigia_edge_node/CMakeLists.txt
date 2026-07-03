@@ -189,6 +189,26 @@ target_link_libraries(vigia_edge_node
 install(TARGETS vigia_edge_node
     DESTINATION lib/${PROJECT_NAME})
 
+# Standalone bridge — build/run without AntiDeath/BLE/MQTT (Phase 2 bench).
+if(HAVE_MBEDTLS)
+    add_executable(sensor_bridge_node
+        src/sensor_bridge_main.cpp
+        src/sensor_bridge_node.cpp
+    )
+    target_include_directories(sensor_bridge_node
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_definitions(sensor_bridge_node PRIVATE VIGIA_HAVE_MBEDTLS)
+    ament_target_dependencies(sensor_bridge_node rclcpp vigia_msgs)
+    target_link_libraries(sensor_bridge_node
+        pthread
+        MbedTLS::mbedcrypto
+    )
+    install(TARGETS sensor_bridge_node DESTINATION lib/${PROJECT_NAME})
+endif()
+
 install(DIRECTORY config/
     DESTINATION share/${PROJECT_NAME}/config)
 
