@@ -8,7 +8,7 @@
 //   - execute_emergency_sequence() runs synchronously on SCHED_FIFO 99 timer thread
 //   - steady_clock only for all budget checks
 //   - single msgpack::sbuffer allocation permitted inside the emergency window
-//   - atomic_flag prevents re-entry
+//   - std::atomic<bool> prevents re-entry
 
 #include "anti_death_node.hpp"
 

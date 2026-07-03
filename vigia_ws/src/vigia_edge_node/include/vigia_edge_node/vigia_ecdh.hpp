@@ -24,6 +24,7 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/ecdh.h>
 #include <mbedtls/ecdsa.h>
+#include <mbedtls/ecp.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/hkdf.h>
 #include <mbedtls/md.h>
@@ -149,10 +150,32 @@ public:
     std::vector<uint8_t> public_key_uncompressed() const {
         std::lock_guard<std::mutex> lk(mu_);
         mbedtls_ecp_keypair* kp = mbedtls_pk_ec(pk_);
+
+        mbedtls_ecp_group grp;
+        mbedtls_ecp_point Q;
+        mbedtls_mpi d;
+        mbedtls_ecp_group_init(&grp);
+        mbedtls_ecp_point_init(&Q);
+        mbedtls_mpi_init(&d);
+
+        int rc = mbedtls_ecp_export(kp, &grp, &d, &Q);
+        if (rc != 0) {
+            mbedtls_mpi_free(&d);
+            mbedtls_ecp_point_free(&Q);
+            mbedtls_ecp_group_free(&grp);
+            throw std::runtime_error("VigiaIdentityKey: ecp_export failed");
+        }
+
         uint8_t buf[65];
         size_t olen = 0;
-        if (mbedtls_ecp_point_write_binary(&kp->grp, &kp->Q,
-                MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, buf, sizeof(buf)) != 0 || olen != 65)
+        rc = mbedtls_ecp_point_write_binary(
+            &grp, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, buf, sizeof(buf));
+
+        mbedtls_mpi_free(&d);
+        mbedtls_ecp_point_free(&Q);
+        mbedtls_ecp_group_free(&grp);
+
+        if (rc != 0 || olen != 65)
             throw std::runtime_error("VigiaIdentityKey: failed to export public key");
         return {buf, buf + 65};
     }
@@ -192,34 +215,40 @@ public:
      */
     std::vector<uint8_t> ecdh_shared_secret(const uint8_t* peer_pub_65) const {
         std::lock_guard<std::mutex> lk(mu_);
-        mbedtls_ecp_keypair* kp = mbedtls_pk_ec(pk_);
 
-        mbedtls_ecp_point Q_peer;
-        mbedtls_mpi shared;
-        mbedtls_ecp_point_init(&Q_peer);
-        mbedtls_mpi_init(&shared);
+        mbedtls_ecdh_context ecdh;
+        mbedtls_ecdh_init(&ecdh);
 
-        int rc = mbedtls_ecp_point_read_binary(&kp->grp, &Q_peer, peer_pub_65, 65);
+        int rc = mbedtls_ecdh_setup(&ecdh, MBEDTLS_ECP_DP_SECP256R1);
         if (rc != 0) {
-            mbedtls_ecp_point_free(&Q_peer); mbedtls_mpi_free(&shared);
+            mbedtls_ecdh_free(&ecdh);
+            throw std::runtime_error("ecdh_shared_secret: setup failed: " + std::to_string(rc));
+        }
+
+        rc = mbedtls_ecdh_get_params(&ecdh, mbedtls_pk_ec(pk_), MBEDTLS_ECDH_OURS);
+        if (rc != 0) {
+            mbedtls_ecdh_free(&ecdh);
+            throw std::runtime_error("ecdh_shared_secret: get_params failed: " + std::to_string(rc));
+        }
+
+        rc = mbedtls_ecdh_read_public(&ecdh, peer_pub_65, 65);
+        if (rc != 0) {
+            mbedtls_ecdh_free(&ecdh);
             throw std::runtime_error("ecdh_shared_secret: invalid peer public key");
         }
 
-        rc = mbedtls_ecdh_compute_shared(
-            &kp->grp, &shared, &Q_peer, &kp->d,
+        uint8_t secret[32];
+        size_t olen = 0;
+        rc = mbedtls_ecdh_calc_secret(
+            &ecdh, &olen, secret, sizeof(secret),
             mbedtls_ctr_drbg_random,
             const_cast<mbedtls_ctr_drbg_context*>(&ctr_drbg_));
+        mbedtls_ecdh_free(&ecdh);
 
-        if (rc != 0) {
-            mbedtls_ecp_point_free(&Q_peer); mbedtls_mpi_free(&shared);
-            throw std::runtime_error("ecdh_shared_secret: compute_shared failed: " + std::to_string(rc));
-        }
+        if (rc != 0)
+            throw std::runtime_error("ecdh_shared_secret: calc_secret failed: " + std::to_string(rc));
 
-        std::vector<uint8_t> out(32, 0);
-        mbedtls_mpi_write_binary(&shared, out.data(), 32);
-        mbedtls_ecp_point_free(&Q_peer);
-        mbedtls_mpi_free(&shared);
-        return out;
+        return {secret, secret + olen};
     }
 
     /**

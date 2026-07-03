@@ -13,7 +13,7 @@
 //   - execute_emergency_sequence() never yields to ROS 2
 //   - steady_clock for all budget checks
 //   - single msgpack::sbuffer allocation (+ one Paho message object)
-//   - atomic_flag prevents re-entry
+//   - std::atomic<bool> prevents re-entry
 //
 // Compile-time gates:
 //   VIGIA_HAVE_PAHO_MQTT  — enables Paho async_client + MsgPack path

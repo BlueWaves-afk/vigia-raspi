@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(vigia_edge_node)
 
+# Phase 2 bench: build only sensor_bridge_node (skip monolith + AntiDeath/BLE/MQTT).
+option(VIGIA_BRIDGE_ONLY "Build sensor_bridge_node only" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -120,74 +123,78 @@ else()
     set(HAVE_SDBUS FALSE)
 endif()
 
-# ── vigia_edge_node executable ─────────────────────────────────────────────
+# ── vigia_edge_node executable (full stack — skipped when VIGIA_BRIDGE_ONLY) ─
 
-set(NODE_SRCS
-    src/main.cpp
-    src/camera_node.cpp
-    src/fusion_node.cpp
-    src/sensor_bridge_node.cpp
-    src/anti_death_node.cpp
-)
+if(NOT VIGIA_BRIDGE_ONLY)
+    set(NODE_SRCS
+        src/main.cpp
+        src/camera_node.cpp
+        src/fusion_node.cpp
+        src/sensor_bridge_node.cpp
+        src/anti_death_node.cpp
+    )
 
-if(HAVE_ORT)
-    list(APPEND NODE_SRCS src/vision_node.cpp src/depth_node.cpp)
+    if(HAVE_ORT)
+        list(APPEND NODE_SRCS src/vision_node.cpp src/depth_node.cpp)
+    endif()
+
+    if(HAVE_SDBUS)
+        list(APPEND NODE_SRCS src/ble_gatt_node.cpp)
+    endif()
+
+    if(HAVE_PAHO_MQTT AND HAVE_MSGPACK)
+        list(APPEND NODE_SRCS src/hazard_uplink_node.cpp)
+    endif()
+
+    add_executable(vigia_edge_node ${NODE_SRCS})
+
+    target_include_directories(vigia_edge_node
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${EIGEN3_INCLUDE_DIRS}
+            ${SODIUM_INCLUDE_DIRS}
+            ${CURL_INCLUDE_DIRS}
+            $<$<BOOL:${HAVE_ORT}>:${ORT_INCLUDE_DIR}>
+            $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_INCLUDE_DIRS}>
+            $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_INCLUDE_DIRS}>
+            $<$<BOOL:${HAVE_PAHO_MQTT}>:${PAHO_MQTTPP_INCLUDE_DIRS}>
+            $<$<BOOL:${HAVE_MSGPACK}>:${MSGPACK_INCLUDE_DIR}>
+    )
+
+    target_compile_definitions(vigia_edge_node PRIVATE
+        $<$<BOOL:${HAVE_ORT}>:VIGIA_HAVE_ORT>
+        $<$<BOOL:${HAVE_MBEDTLS}>:VIGIA_HAVE_MBEDTLS>
+        $<$<BOOL:${GPIOD_FOUND}>:VIGIA_HAVE_LIBGPIOD>
+        $<$<BOOL:${HAVE_ACL_EP}>:VIGIA_HAVE_ACL_EP>
+        $<$<BOOL:${HAVE_SDBUS}>:VIGIA_HAVE_SDBUS>
+        # Phase 5: both Paho and msgpack must be found for the MQTT+MsgPack path.
+        $<$<AND:$<BOOL:${HAVE_PAHO_MQTT}>,$<BOOL:${HAVE_MSGPACK}>>:VIGIA_HAVE_PAHO_MQTT>
+    )
+
+    ament_target_dependencies(vigia_edge_node
+        rclcpp sensor_msgs std_msgs vigia_msgs)
+
+    target_link_libraries(vigia_edge_node
+        ${OpenCV_LIBS}
+        Eigen3::Eigen
+        pthread
+        rt
+        ${SODIUM_LIBRARIES}
+        ${CURL_LIBRARIES}
+        $<$<BOOL:${HAVE_ORT}>:${ORT_LIB}>
+        $<$<BOOL:${HAVE_MBEDTLS}>:MbedTLS::mbedcrypto>
+        $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_LIBRARIES}>
+        $<$<BOOL:${HAVE_ACL_EP}>:${ACL_EP_LIB}>
+        $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_LIBRARIES}>
+        $<$<BOOL:${HAVE_PAHO_MQTT}>:${PAHO_MQTTPP_LIBRARIES}>
+    )
+
+    install(TARGETS vigia_edge_node
+        DESTINATION lib/${PROJECT_NAME})
+else()
+    message(STATUS "VIGIA_BRIDGE_ONLY=ON — skipping vigia_edge_node monolith")
 endif()
-
-if(HAVE_SDBUS)
-    list(APPEND NODE_SRCS src/ble_gatt_node.cpp)
-endif()
-
-if(HAVE_PAHO_MQTT AND HAVE_MSGPACK)
-    list(APPEND NODE_SRCS src/hazard_uplink_node.cpp)
-endif()
-
-add_executable(vigia_edge_node ${NODE_SRCS})
-
-target_include_directories(vigia_edge_node
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${EIGEN3_INCLUDE_DIRS}
-        ${SODIUM_INCLUDE_DIRS}
-        ${CURL_INCLUDE_DIRS}
-        $<$<BOOL:${HAVE_ORT}>:${ORT_INCLUDE_DIR}>
-        $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_INCLUDE_DIRS}>
-        $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_INCLUDE_DIRS}>
-        $<$<BOOL:${HAVE_PAHO_MQTT}>:${PAHO_MQTTPP_INCLUDE_DIRS}>
-        $<$<BOOL:${HAVE_MSGPACK}>:${MSGPACK_INCLUDE_DIR}>
-)
-
-target_compile_definitions(vigia_edge_node PRIVATE
-    $<$<BOOL:${HAVE_ORT}>:VIGIA_HAVE_ORT>
-    $<$<BOOL:${HAVE_MBEDTLS}>:VIGIA_HAVE_MBEDTLS>
-    $<$<BOOL:${GPIOD_FOUND}>:VIGIA_HAVE_LIBGPIOD>
-    $<$<BOOL:${HAVE_ACL_EP}>:VIGIA_HAVE_ACL_EP>
-    $<$<BOOL:${HAVE_SDBUS}>:VIGIA_HAVE_SDBUS>
-    # Phase 5: both Paho and msgpack must be found for the MQTT+MsgPack path.
-    $<$<AND:$<BOOL:${HAVE_PAHO_MQTT}>,$<BOOL:${HAVE_MSGPACK}>>:VIGIA_HAVE_PAHO_MQTT>
-)
-
-ament_target_dependencies(vigia_edge_node
-    rclcpp sensor_msgs std_msgs vigia_msgs)
-
-target_link_libraries(vigia_edge_node
-    ${OpenCV_LIBS}
-    Eigen3::Eigen
-    pthread
-    rt
-    ${SODIUM_LIBRARIES}
-    ${CURL_LIBRARIES}
-    $<$<BOOL:${HAVE_ORT}>:${ORT_LIB}>
-    $<$<BOOL:${HAVE_MBEDTLS}>:MbedTLS::mbedcrypto>
-    $<$<BOOL:${GPIOD_FOUND}>:${GPIOD_LIBRARIES}>
-    $<$<BOOL:${HAVE_ACL_EP}>:${ACL_EP_LIB}>
-    $<$<BOOL:${HAVE_SDBUS}>:${SDBUS_LIBRARIES}>
-    $<$<BOOL:${HAVE_PAHO_MQTT}>:${PAHO_MQTTPP_LIBRARIES}>
-)
-
-install(TARGETS vigia_edge_node
-    DESTINATION lib/${PROJECT_NAME})
 
 # Standalone bridge — build/run without AntiDeath/BLE/MQTT (Phase 2 bench).
 if(HAVE_MBEDTLS)
