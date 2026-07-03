@@ -224,6 +224,10 @@ public:
 
     /**
      * Verify an ECDSA-SHA256 signature from a peer's uncompressed P-256 public key.
+     *
+     * When data_len == 32, `data` is treated as a precomputed SHA-256 digest
+     * (ATECC608A / SignedEt path).  Otherwise `data` is hashed first (BLE handshake).
+     * Signature must be 64-byte IEEE P1363 raw R||S (ATECC608A output format).
      * Returns true iff the signature is valid.  Never throws.
      */
     static bool verify_peer(
@@ -231,16 +235,39 @@ public:
         const uint8_t* data, size_t data_len,
         const uint8_t* sig,  size_t sig_len)
     {
+        if (!peer_pub_65 || !data || !sig || sig_len != 64)
+            return false;
+
         try {
+            std::array<uint8_t, 32> digest_buf{};
+            const uint8_t* digest = data;
+            size_t digest_len = data_len;
+            if (data_len != 32) {
+                digest_buf = sha256(data, data_len);
+                digest = digest_buf.data();
+                digest_len = digest_buf.size();
+            }
+
             mbedtls_ecdsa_context ecdsa;
             mbedtls_ecdsa_init(&ecdsa);
             mbedtls_ecp_group_load(&ecdsa.grp, MBEDTLS_ECP_DP_SECP256R1);
 
             if (mbedtls_ecp_point_read_binary(&ecdsa.grp, &ecdsa.Q, peer_pub_65, 65) != 0) {
-                mbedtls_ecdsa_free(&ecdsa); return false;
+                mbedtls_ecdsa_free(&ecdsa);
+                return false;
             }
-            auto hash = vigia::sha256(data, data_len);
-            int rc = mbedtls_ecdsa_read_signature(&ecdsa, hash.data(), hash.size(), sig, sig_len);
+
+            mbedtls_mpi r, s;
+            mbedtls_mpi_init(&r);
+            mbedtls_mpi_init(&s);
+            int rc = -1;
+            if (mbedtls_mpi_read_binary(&r, sig, 32) == 0 &&
+                mbedtls_mpi_read_binary(&s, sig + 32, 32) == 0) {
+                rc = mbedtls_ecdsa_verify(
+                    &ecdsa.grp, digest, digest_len, &ecdsa.Q, &r, &s);
+            }
+            mbedtls_mpi_free(&r);
+            mbedtls_mpi_free(&s);
             mbedtls_ecdsa_free(&ecdsa);
             return rc == 0;
         } catch (...) { return false; }

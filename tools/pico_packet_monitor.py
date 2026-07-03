@@ -39,6 +39,9 @@ class SignedEtPacket:
 
 
 def cobs_decode(src: bytes) -> bytes:
+    """COBS decode — matches sensor_bridge_node.cpp decode_cobs()."""
+    if len(src) < 2:
+        return b""
     dst = bytearray()
     read = 0
     while read < len(src):
@@ -48,43 +51,47 @@ def cobs_decode(src: bytes) -> bytes:
             break
         for _ in range(1, code):
             if read >= len(src):
-                return bytes()
+                return b""
             dst.append(src[read])
             read += 1
         if code < 0xFF:
             dst.append(0x00)
+    # Strip trailing structural zero (same as Pi sensor_bridge)
     if dst and dst[-1] == 0x00:
         dst.pop()
     return bytes(dst)
 
 
 def parse_signed_et(data: bytes) -> SignedEtPacket | None:
+    """Parse 173-byte SignedEtPacket (must match firmware atecc608a_driver.h)."""
+    # USB framing sometimes yields one extra trailing 0x00 after decode
+    if len(data) == SIGNED_ET_SIZE + 1 and data[-1] == 0x00:
+        data = data[:SIGNED_ET_SIZE]
     if len(data) != SIGNED_ET_SIZE:
         return None
-    (
-        magic,
-        version,
-        timestamp_us,
-        sequence,
-        qw,
-        qx,
-        qy,
-        qz,
-        ax,
-        ay,
-        az,
-        cal_status,
-        _pad,
-        latitude,
-        longitude,
-        speed_ms,
-        fix_type,
-        satellites,
-        _gps_pad,
-        et_hash,
-        ecdsa_sig,
-    ) = struct.unpack("<BBQ I 7f B 3x d d f B B x 32s 64s 8x", data)
-    if magic != SIGNED_ET_MAGIC or version != SIGNED_ET_VERSION:
+    if data[0] != SIGNED_ET_MAGIC or data[1] != SIGNED_ET_VERSION:
+        return None
+    try:
+        (
+            magic,
+            version,
+            timestamp_us,
+            sequence,
+            qw,
+            qx,
+            qy,
+            qz,
+            ax,
+            ay,
+            az,
+            cal_status,
+        ) = struct.unpack_from("<BBQ I 7f B", data, 0)
+        latitude, longitude, speed_ms, fix_type, satellites = struct.unpack_from(
+            "<ddfBB", data, 46
+        )
+        et_hash = data[69:101]
+        ecdsa_sig = data[101:165]
+    except struct.error:
         return None
     return SignedEtPacket(
         magic=magic,
@@ -116,8 +123,21 @@ def load_pubkey_hex(path: Path) -> bytes | None:
     return bytes.fromhex(text)
 
 
+def raw_rs_to_der(sig: bytes) -> bytes:
+    """ATECC608A / IEEE P1363 raw R||S → ASN.1 DER for cryptography.verify()."""
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+    if len(sig) != 64:
+        raise ValueError(f"expected 64-byte raw signature, got {len(sig)}")
+    r = int.from_bytes(sig[:32], "big")
+    s = int.from_bytes(sig[32:], "big")
+    return encode_dss_signature(r, s)
+
+
 def verify_ecdsa_simple(pubkey: bytes, digest: bytes, sig: bytes) -> bool:
-    if all(b == 0 for b in sig):
+    if len(sig) != 64 or all(b == 0 for b in sig):
+        return False
+    if len(digest) != 32 or all(b == 0 for b in digest):
         return False
     try:
         from cryptography.hazmat.primitives.asymmetric import ec
@@ -131,9 +151,11 @@ def verify_ecdsa_simple(pubkey: bytes, digest: bytes, sig: bytes) -> bool:
         ec.SECP256R1(), b"\x04" + pubkey
     )
     try:
-        public_key.verify(sig, digest, ec.ECDSA(Prehashed(SHA256())))
+        public_key.verify(
+            raw_rs_to_der(sig), digest, ec.ECDSA(Prehashed(SHA256()))
+        )
         return True
-    except InvalidSignature:
+    except (InvalidSignature, ValueError):
         return False
 
 
@@ -145,12 +167,17 @@ def open_serial(port: str, baud: int):
 
 def monitor(port: str, baud: int, duration: float, pubkey_path: Path | None) -> int:
     pubkey = load_pubkey_hex(pubkey_path) if pubkey_path else None
+    if pubkey_path and pubkey is None:
+        print(f"ERROR: invalid pubkey file {pubkey_path} (need 128 hex chars)", file=sys.stderr)
+        return 1
+
     ser = open_serial(port, baud)
 
     acc = bytearray()
     in_frame = False
     count = 0
     valid_sigs = 0
+    warned_stub = False
     start = time.monotonic()
 
     print(f"Listening on {port} @ {baud} for {duration:.0f}s (Ctrl+C to stop early)")
@@ -169,9 +196,20 @@ def monitor(port: str, baud: int, duration: float, pubkey_path: Path | None) -> 
                             count += 1
                             sig_ok = False
                             if pubkey:
-                                sig_ok = verify_ecdsa_simple(pubkey, pkt.et_hash, pkt.ecdsa_sig)
+                                sig_ok = verify_ecdsa_simple(
+                                    pubkey, pkt.et_hash, pkt.ecdsa_sig
+                                )
                                 if sig_ok:
                                     valid_sigs += 1
+                                elif not warned_stub and all(
+                                    b == 0 for b in pkt.ecdsa_sig
+                                ):
+                                    print(
+                                        "[warn] ecdsa_sig is all zeros — "
+                                        "flash vigia_pico_phase2_live.uf2 (not stub/hello)",
+                                        file=sys.stderr,
+                                    )
+                                    warned_stub = True
                             print(
                                 f"seq={pkt.sequence} ts={pkt.timestamp_us} "
                                 f"lat={pkt.latitude:.7f} lon={pkt.longitude:.7f} "

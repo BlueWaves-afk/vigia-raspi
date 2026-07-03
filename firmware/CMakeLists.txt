@@ -74,6 +74,7 @@ if(VIGIA_BUILD_PHASE2_LIVE)
         src/neo_m8n_driver.c
         src/bno085_driver.c
         src/atecc608a_driver.c
+        src/atecc608a_provision.c
         src/cobs_tx_driver.c
     )
     target_include_directories(vigia_pico_phase2_live PRIVATE
@@ -98,6 +99,41 @@ if(VIGIA_BUILD_PHASE2_LIVE)
     pico_enable_stdio_uart(vigia_pico_phase2_live 0)
     pico_add_extra_outputs(vigia_pico_phase2_live)
 endif()
+# ── ATECC608 slot-0 provision (one-shot — genkey + export pubkey over USB) ─
+# Build with: cmake -DVIGIA_BUILD_PROVISION=ON -DCRYPTOAUTHLIB_DIR=<path> ..
+option(VIGIA_BUILD_PROVISION "Build one-shot ATECC608 slot-0 provisioning firmware" OFF)
+
+if(VIGIA_BUILD_PROVISION)
+    if(NOT DEFINED CRYPTOAUTHLIB_DIR)
+        message(FATAL_ERROR "CRYPTOAUTHLIB_DIR must be set for provision build")
+    endif()
+
+    include(cmake/cryptoauthlib_pico.cmake)
+
+    add_executable(vigia_pico_provision
+        src/provision_main.c
+        src/atecc608a_driver.c
+        src/atecc608a_provision.c
+    )
+    target_include_directories(vigia_pico_provision PRIVATE
+        src
+        ${CRYPTOAUTHLIB_DIR}/lib
+    )
+    target_compile_definitions(vigia_pico_provision PRIVATE
+        VIGIA_PHASE2_STUB=0
+        VIGIA_ATCA_NO_PANIC=1
+    )
+    target_link_libraries(vigia_pico_provision
+        pico_stdlib
+        hardware_gpio
+        hardware_i2c
+    )
+    vigia_link_cryptoauthlib(vigia_pico_provision)
+    pico_enable_stdio_usb(vigia_pico_provision 1)
+    pico_enable_stdio_uart(vigia_pico_provision 0)
+    pico_add_extra_outputs(vigia_pico_provision)
+endif()
+
 pico_enable_stdio_usb(vigia_pico_hello 1)
 pico_enable_stdio_uart(vigia_pico_hello 0)
 
