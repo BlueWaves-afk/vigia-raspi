@@ -24,3 +24,4 @@ depth_debug*.png
 
 # Firmware CMake build output (artifacts, not source)
 firmware/build/
+.obsidian/
