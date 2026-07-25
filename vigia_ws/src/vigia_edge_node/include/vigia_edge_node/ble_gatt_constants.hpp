@@ -20,6 +20,7 @@ inline constexpr const char * kTelemetryUuid = "4d231514-5514-4847-bb6d-64e3aa7a
 inline constexpr const char * kControlUuid   = "0bb821dd-6b24-4185-ad69-662510769d19";  // Write (phone->Pi)
 inline constexpr const char * kAttestUuid    = "580c5fb6-5283-4194-84c8-5d6aec75b88a";  // Notify (anti-spoof)
 inline constexpr const char * kResponseUuid  = "a3f1c2d7-88e4-4b9a-b3c1-5d7e9f012345";  // Notify (Pi->phone control ACK)
+inline constexpr const char * kAlertUuid     = "c3a7d812-4f9e-4b3a-a5d2-7e1f8c0b6e94";  // Notify (FCW + CRITICAL alerts, Pi->phone)
 inline constexpr const char * kCccdUuid      = "00002902-0000-1000-8000-00805f9b34fb";
 
 // ── Handshake protocol bytes (mirror GattConstants.Protocol) ────────────────
@@ -35,6 +36,21 @@ namespace proto {
     inline constexpr int     kNonceBytes = 32;
 }
 
+// ── ALERT_CHAR opcodes (Pi -> phone), §5 M11 FCW ────────────────────────────
+// Wire format: [opcode(1) | payload...]
+// FCW: [0x10 | ttc_f32_le(4) | class_id_u8(1)]  = 6 bytes total
+namespace alert {
+    inline constexpr uint8_t kFcwAlert = 0x10;   // Forward Collision Warning
+
+    // class_id values (COCO subset VIGIA detects)
+    inline constexpr uint8_t kClassVehicle    = 1;
+    inline constexpr uint8_t kClassPedestrian = 2;
+    inline constexpr uint8_t kClassCyclist    = 3;
+    inline constexpr uint8_t kClassUnknown    = 0xFF;
+
+    inline constexpr std::size_t kFcwPayloadBytes = 6;  // opcode + float32 + uint8
+}
+
 // ── CONTROL_CHAR opcodes (phone -> Pi), design spec §7.1 ────────────────────
 namespace control {
     inline constexpr uint8_t kRequest256  = 0x10;  // ask for 256-D stream
@@ -43,6 +59,9 @@ namespace control {
     inline constexpr uint8_t kResumeStream= 0x13;  // resume telemetry notifications
     inline constexpr uint8_t kRekey       = 0x20;  // rotate session key (§5)
     inline constexpr uint8_t kPing        = 0xF0;  // liveness check
+    // M11 §3.3: profile-scaled TTC threshold push. Payload: [0xA0 | ttc_f32_le(4)] = 5 bytes.
+    // Matches GattConstants.Control.SET_TTC_THRESHOLD in Android app.
+    inline constexpr uint8_t kSetTtcThreshold = 0xA0;
 }
 
 // ── RESPONSE_CHAR reply bytes (Pi -> phone), mirrors control opcodes ─────────
