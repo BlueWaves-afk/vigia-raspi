@@ -41,6 +41,7 @@ ExecStart=/bin/bash -c '\
     --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/fusion_params.yaml \
     --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/sensor_bridge_params.yaml \
     --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/anti_death_params.yaml \
+    --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/hazard_uplink_params.yaml \
     --params-file /home/vigiasense/vigia_ws/src/vigia_edge_node/config/ble_gatt_params.yaml \
 '
 

@@ -16,3 +16,10 @@ anti_death_node:
     # Emergency HTTPS fallback (used when Paho MQTT not compiled in)
     aws_telemetry_url: "https://sq2ri2n51g.execute-api.us-east-1.amazonaws.com/prod/telemetry"
     device_key_path: "/etc/vigia/device_ed25519.key"
+
+    # R-CRIT-5: when compiled WITH Paho, the emergency path publishes over MQTT and
+    # needs a broker host — without it the Paho connect fails and (because Paho is
+    # compiled in) it never falls back to the HTTPS path above.
+    mqtt_broker_host: "a3re4nls2cuv10-ats.iot.us-east-1.amazonaws.com"
+    mqtt_broker_port: 8883
+    mqtt_topic_prefix: "vigia/attest"
