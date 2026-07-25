@@ -1,0 +1,12 @@
+hazard_uplink_node:
+  ros__parameters:
+    device_id: "vigia-001"
+    # AWS IoT Core ATS endpoint — mTLS 8883, QoS 1.
+    # R-CRIT-5: this file MUST be passed to the node via --params-file, otherwise
+    # mqtt_broker_host is empty and HazardUplinkNode disables itself at startup.
+    mqtt_broker_host: "a3re4nls2cuv10-ats.iot.us-east-1.amazonaws.com"
+    mqtt_port: 8883
+    # TLS credentials provisioned by tools/vigia-sign-device.sh + AmazonRootCA1.pem
+    mqtt_cert_path: "/etc/vigia/device_cert.pem"
+    mqtt_key_path:  "/etc/vigia/device.key"
+    mqtt_ca_path:   "/etc/vigia/AmazonRootCA1.pem"

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "vigia_msgs/msg/hazard_event.hpp"
+#include "vigia_edge_node/vigia_qos.hpp"
 
 // HazardUplinkNode — continuous MQTT attestation uplink.
 //

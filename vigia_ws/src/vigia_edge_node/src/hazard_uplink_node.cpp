@@ -48,8 +48,10 @@ HazardUplinkNode::HazardUplinkNode(const rclcpp::NodeOptions& options)
             "HazardUplinkNode: initial MQTT connect failed — will retry on first event.");
     }
 
+    // R-CRIT-4: topic + QoS must match FusionNode's publisher exactly
+    // ("/vigia/hazard_event", vigia::qos::hazard_events()) or no events arrive.
     sub_ = create_subscription<vigia_msgs::msg::HazardEvent>(
-        "/vigia/hazard_events", rclcpp::QoS(10),
+        "/vigia/hazard_event", vigia::qos::hazard_events(),
         std::bind(&HazardUplinkNode::on_hazard, this, std::placeholders::_1));
 
     RCLCPP_INFO(get_logger(),
