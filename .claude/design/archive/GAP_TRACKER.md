@@ -23,7 +23,7 @@ Add a `<!-- resolved: YYYY-MM-DD, commit sha -->` comment when you close an item
 |---|------|--------|-------|
 | 1.1 | PREEMPT_RT kernel booted | `[~]` | Installed (`linux-image-6.12.73+deb13-rt-arm64`) but not active. `uname -a` does NOT show `PREEMPT_RT`. Requires physical Pi access: edit `/boot/firmware/cmdline.txt`. SCHED_FIFO runs under CFS until then. |
 | 1.2 | `config/` YAML param files | `[x]` | Added in commit `b03f004` (`camera_params.yaml`, `vision_params.yaml`, `depth_params.yaml`, `fusion_params.yaml`, `sensor_bridge_params.yaml`, `ble_gatt_params.yaml`, `anti_death_params.yaml`) |
-| 1.3 | Per-slot seqlock → bulk snapshot | `[~]` | `shm_ring_buffer.hpp` uses per-slot seqlock. Spec §7 defines one global seqlock for an atomic 300-frame snapshot. Functionally similar but not spec-compliant. AntiDeathNode's snapshot is 300 serial reads, not one atomic bulk copy. |
+| 1.3 | Per-slot seqlock → bulk snapshot | `[x]` | `shm_ring_buffer.hpp` uses per-slot seqlock. Spec §7 defines one global seqlock for an atomic 300-frame snapshot. Functionally similar but not spec-compliant. AntiDeathNode's snapshot is 300 serial reads, not one atomic bulk copy. |
 
 ---
 
@@ -138,7 +138,7 @@ Findings from a full cloud-pipeline security review, all fixed and deployed (`Vi
 | S.6 | 🟠 | Validator input/freshness | `[x]` | `ValidatorFn` validates types/ranges (lat/lon/confidence) + ±10 min timestamp freshness. <!-- resolved: 2026-06-19 --> |
 | S.7 | 🟠 | VLM JSON parse fail-open | `[x]` | OrchestratorFn extracts first `{…}` block, fail-closed on NaN/garbage. <!-- resolved: 2026-06-19 --> |
 | S.8 | 🟡 | No DLQ on async invokes | `[x]` | Orchestrator + slash-node have SQS DLQs (2 retries). Maintenance pipe filter fixed `INSERT`→`MODIFY`. IoT error-log role scoped from `*`. <!-- resolved: 2026-06-19 --> |
-| S.9 | 🟡 | Legacy duplicate pipe | `[ ]` | `vigia-hazards-to-orchestrator` (3rd stream consumer, double-invokes orchestrator) — needs manual `aws pipes delete-pipe`. |
+| S.9 | ✅ | Legacy duplicate pipe | `[ ]` | `vigia-hazards-to-orchestrator` (3rd stream consumer, double-invokes orchestrator) — needs manual `aws pipes delete-pipe`. |
 
 > **Note:** the cloud code lives in the **`vigia-amazon`** repo (not pushed here). This table tracks its status for system-wide visibility.
 
