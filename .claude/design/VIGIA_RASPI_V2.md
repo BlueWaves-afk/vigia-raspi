@@ -19,6 +19,37 @@ Traceability to the shipped audit: the archived `GAP_TRACKER.md` tracked *featur
 
 ---
 
+## Review Reconciliation (v2.1 — cross-reviewed and verified against source, 2026-07-25)
+
+An independent second review (Codex) cross-checked this spec against source; every item below was then re-verified by reading the cited files. **This section is authoritative where it conflicts with the original findings.**
+
+### Findings RETRACTED / REVISED
+
+- **R-BUG-1 (COBS decode) — RETRACTED (false).** Hand-tracing `cobs_tx_driver.c:cobs_encode` against `sensor_bridge_node.cpp:decode_cobs`, plus 60k-round-trip fuzzing, shows the decoder is correct: the unconditional trailing-`0x00` strip removes COBS's implicit final-group delimiter, and genuine payload trailing zeros are preserved (`[0x11,0x00]` round-trips intact). Keep the proposed property test as a regression guard; there is no bug.
+- **R-CRIT-2 & R-BUG-2 (emergency snapshot) — RECLASSIFIED to dead-code / design-drift.** `ShmRingBuffer::snapshot_all()` has **no caller** (verified by grep). The anti-death path captures compact frame metadata, a latent pointer, signed telemetry, and the latest hazard — not the raw pixel ring — so there is no active emergency-deadline failure. If raw black-box imagery is a requirement, the real defect is that it is never captured; otherwise `snapshot_all` + the global seqlock are removable dead code.
+- **R-SEC-1 (BLE RNG) — SOFTENED.** mbedTLS CTR-DRBG auto-reseeds at its configured interval, so "seeded once, never reseeded" is inaccurate. Retained valid defects: unchecked `fread` in the `/dev/urandom` fallback (short read → zero nonce), unchecked DRBG return codes, and the undocumented single-thread assumption.
+- **R-SEC-3 (edge anti-replay) — SUPERSEDED by R-CRIT-6.** Persisting only the Pi's `last_et_seq_` would *worsen* the reboot lockout in R-CRIT-6. Do not persist the Pi watermark in isolation.
+
+### New CONFIRMED findings
+
+- **R-CRIT-4 — Continuous uplink topic mismatch (P0).** `fusion_node.cpp:38` publishes `/vigia/hazard_event` (singular); `hazard_uplink_node.cpp:52` subscribes `/vigia/hazard_events` (plural). No other publisher of the plural topic exists → the continuous uplink receives **zero** events, online or offline (this makes R-CRIT-1 moot until fixed). Fix: unify the topic via a shared constant used by both nodes.
+- **R-CRIT-5 — systemd never loads the MQTT config (P0).** `mqtt_broker_host` is defined only in `config/params.yaml`, which neither `config/vigia-edge.service` nor `systemd/vigia-edge.service` passes via `--params-file`. `HazardUplinkNode` sees an empty broker host and disables itself; the anti-death emergency path likewise lacks broker config. The deployed unit can silently lose both continuous and emergency uploads. Fix: load `params.yaml` (correct node namespace) or consolidate uplink params into a loaded file; add a boot assertion that the broker host is non-empty.
+- **R-CRIT-6 — Canonical device identity + reboot-safe sequencing (P0, cross-repo).** Three identities disagree: firmware signs the 16-byte zero-padded ATECC serial (`main.c:140`), the Pi packs the string `"vigia-001"` (`hazard_uplink_node.cpp:27`), and the server requires `device_id` to parse as exactly 16-byte hex (`vigia-amazon .../attestation/index.ts:54`, throws otherwise). Separately, firmware `s_et_seq` resets to 0 on every reboot (`main.c:140`) while the server durably requires `seq > last_seq`, so genuine post-reboot events are rejected until the old watermark is passed. Fix: ONE ATECC-derived device id used for signatures, certs, registry, MQTT topic, and pairing QR; and a signed boot-epoch + sequence (or secure persistent monotonic counter). Coordinate with vigia-amazon + vigia2. **Supersedes R-SEC-3.**
+- **R-SEC-5 — Local watermark advanced before ECDSA verify (P1).** `sensor_bridge_node.cpp:419` advances `last_et_seq_` before the signature check at `:457`. A forged high-sequence COBS frame poisons the local watermark and suppresses subsequent genuine frames. Fix: verify signature first, then advance atomically.
+- **R-SEC-6 — Pi authenticates any phone (P1).** `ble_gatt_node.cpp:283` verifies the RESPONSE signature using the public key supplied *in that same response* and never checks it against an authorized phone identity; handshake state is global rather than per-central. Any central can complete the handshake. Fix: pin/allow-list authorized phone identities (from the claim-device binding), key handshake state per central, reject unknown peers. (Also the Pi has no "sign binding challenge" command — required by vigia2 M-CRIT-2.)
+
+### Revised priority (raspi)
+
+1. R-CRIT-4 topic unify + R-CRIT-5 config load — restore uplink at all.
+2. R-CRIT-6 canonical identity + reboot-safe sequence (cross-repo).
+3. R-CRIT-1 store-and-forward; R-CRIT-3 delete/sign legacy path.
+4. R-SEC-5 verify-before-advance; R-SEC-6 phone authorization; R-SEC-1/2 hardening.
+5. R-SEC-4 frame hash; R-QUAL-1 CLAUDE.md; remaining hardening.
+
+Removed from scope: R-BUG-1; R-CRIT-2/R-BUG-2 (unless raw black-box imagery is a requirement).
+
+---
+
 ## 1. Architecture recap (as-built, verified)
 
 ```
