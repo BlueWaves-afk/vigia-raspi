@@ -1,7 +1,3 @@
-# Riding the Blue Wave: Building Autonomous Intelligence on the Edge #06
-
-*Episode 6: Why Most "Real-Time" Demos Aren't Actually Real-Time — a confession about my own benchmarks, and how to profile honestly on ARM.*
-
 I'll start with the confession. My README said the system ran at 10.3 FPS with a real-time parallel pipeline. When I sat down and actually measured it running with the display on, it managed **2–3 FPS**, and its worst-case frame latency was **608 milliseconds**. Both the 10.3 and the 2–3 were "true" numbers. That gap — between the number you quote and the number the system actually delivers when it matters — is what this final episode is about.
 
 ## What "real-time" actually has to mean
@@ -46,3 +42,59 @@ That's the through-line from Episode 1's motivation to here: constraints don't j
 Thanks for riding the wave with me. Road hazard detection was just the story; the real journey was learning to build autonomous intelligence that survives constraints, and to measure it without lying to yourself. ❤️
 
 *our [github repo](https://github.com/BlueWaves-afk/vigia-raspi).*
+
+---
+
+## 🎓 CS Fundamentals — study companion
+
+*This finale is about **real-time systems**, **performance measurement / statistics**, and the **System Design** discipline of observability and honest benchmarking — plus a **Computer Architecture** note on why the display stole your FPS. These "how do you measure it" questions separate senior candidates from junior ones.*
+
+### Operating Systems (OS) — real-time systems
+
+**What this post touches:** hard vs soft real-time, latency vs throughput, tail latency, resource contention, scheduling.
+
+**Deep dive.**
+- **Hard vs soft real-time.** *Hard* real-time: missing a deadline is a system failure (airbags, motor control). *Soft* real-time: a missed deadline degrades quality but is tolerable (video playback). A hazard detector is *firm/soft* — a late alert is nearly useless but not catastrophic. The correctness criterion is **latency**, not just throughput: producing the right answer *too late* is a wrong answer.
+- **Throughput vs latency — different metrics.** FPS is *throughput* (frames/sec). Per-frame **latency** is time from capture to decision. A pipeline can have high throughput and terrible worst-case latency (the sequential-MiDaS 608ms spike). For safety, latency — specifically the **tail** — is what counts.
+- **Resource contention (the VNC lesson).** `cv::imshow` over VNC encodes the framebuffer **on the same CPU cores** running inference, so the display *competes* with inference for compute — dropping 10 FPS to 3. This is contention for a shared resource (CPU), the same class of problem as lock contention but for compute cycles. **Lesson:** benchmark the *deployment* config, because a "harmless" component can steal the resource your hot path needs.
+
+**Interview Q&A.**
+1. *Hard vs soft real-time — example of each?* → Airbag (hard) vs video streaming (soft); define by the cost of a missed deadline.
+2. *Throughput vs latency — can you have one without the other?* → Yes: batching raises throughput but can raise latency; a pipeline can average fast yet have a huge P95 tail.
+3. *Why did turning on the display tank inference FPS?* → CPU contention — VNC encodes on the same cores; the display and inference fight for compute.
+
+### Performance measurement & Statistics (shows up in SDE + SRE interviews)
+
+**Deep dive.**
+- **Averages lie; use percentiles.** The mean hides the tail. **P95/P99 latency** = the value 95%/99% of requests come in under. A 100ms mean with a 608ms P95 is a system that's usually fine and periodically dangerous. For anything user- or safety-facing, you design and report against the tail, not the mean. (This is why big-tech SLOs are written as "P99 < X ms.")
+- **Why the tail dominates.** In a fast-moving car, the frame that matters is the worst one — where the expensive model, thermal throttle, and display all coincide. Optimising the average while ignoring the P95 optimises the wrong thing.
+- **EMA vs instantaneous.** An **Exponential Moving Average** (`ema = α·x + (1−α)·ema`) smooths a noisy metric to show a trend, but it *also* smooths away spikes — so an EMA FPS looks stable even when individual frames stall. Report both the smoothed trend *and* the distribution.
+- **Benchmark methodology / reproducibility.** A number without its config (headless vs display, input resolution, thermal state, warm vs cold cache) is meaningless. The blog's headless-10.3 vs display-3 contradiction is a **methodology** failure, not a code failure. Always: fix the input (deterministic replay of `hazard.mp4`), state the environment, run enough samples, report the distribution.
+
+**Interview Q&A.**
+1. *Why report P99 instead of the average latency?* → The average hides the tail that users/safety actually feel; SLOs target the tail.
+2. *What's an EMA and what does it hide?* → `α·x+(1−α)·ema`; smooths trend but masks spikes — pair it with percentiles.
+3. *How would you benchmark this system credibly?* → Deterministic input, stated config, warm-up, many samples, report P50/P95/P99 + throughput, not a single mean.
+4. *Your average latency is fine but users complain. What do you check?* → The tail (P95/P99), GC/allocation pauses, contention, cold-cache first requests, variance.
+
+### System Design — observability & SLOs
+- **Observability is how you catch a lie.** The instrumentation layer (lock-free telemetry ring, deterministic replay, out-of-order depth handling) is what turned "feels slow" into "eight ranked, specific causes." **You cannot optimise what you cannot measure**, and you cannot claim "real-time" without measuring the tail under load. This is the metrics/logging/tracing pillar of system design (the three pillars of observability: **metrics, logs, traces**).
+- **SLI / SLO / SLA.** An **SLI** is the measured indicator (e.g., P95 frame latency); an **SLO** is the target (P95 < 150ms); an **SLA** is the contractual promise. "Real-time" should be written as an SLO on the tail, then verified.
+- **Instrumentation must be cheap.** Logging in the hot path (the `std::cout` from Ep 4) *changes* what you measure (observer effect) — hence the lock-free ring-buffer sink. Good telemetry is low-overhead and off the critical path.
+
+**Interview Q&A.**
+1. *What are the three pillars of observability?* → Metrics, logs, traces.
+2. *Define SLI/SLO/SLA.* → Indicator / target / contract.
+3. *How do you measure a system without slowing it down?* → Low-overhead, off-hot-path telemetry (ring buffers, sampling), async export; beware the observer effect.
+
+### Computer Architecture — cameo
+- **Shared-core contention** is the compute analogue of cache/bus contention: two jobs on the same cores serialise on the ALUs. The fix mirrors the OS one — isolate the heavy job (dedicated core / headless), or shed the optional work (lower render rate).
+
+### Quick-review flashcards
+- **Hard vs soft real-time**; correctness = *latency*, not just throughput.
+- **Throughput (FPS) ≠ latency (per-frame); the tail (P95/P99) is what matters.**
+- **Averages lie → report percentiles.**
+- **EMA** smooths trend *and* hides spikes.
+- **Benchmark = deterministic input + stated config + distribution.**
+- **Observability pillars:** metrics, logs, traces. **SLI/SLO/SLA.**
+- **Observer effect:** measurement must be cheap and off the hot path.

@@ -1,7 +1,3 @@
-# Riding the Blue Wave: Building Autonomous Intelligence on the Edge #05
-
-*Episode 5: Temporal Stability vs Raw Confidence — why a steady, unremarkable detection beats a brilliant one that flashes for a single frame.*
-
 Every object detector gives you a confidence score, and the beginner's instinct is to trust it directly: high score means hazard, act on it. On a single image, fine. On a live video stream from a bouncing camera on an Indian road, that instinct will drive you insane — and possibly off the road. This episode is about the dimension a raw confidence score ignores: time.
 
 ## The problem is flicker
@@ -36,3 +32,48 @@ The biggest reliability win in the whole system did not come from a better model
 In the next episode — the one I think every edge-AI builder should read — I'll make an uncomfortable confession about benchmarks, and dig into why most "real-time" demos, including my own first attempt, aren't actually real-time.
 
 *our [github repo](https://github.com/BlueWaves-afk/vigia-raspi).*
+
+---
+
+## 🎓 CS Fundamentals — study companion
+
+*This episode is mostly **Data Structures & Algorithms** (the sliding-window pattern, circular buffers, cache locality) with a dip into **signal processing / ML** (temporal filtering, ensembles) and **System Design** (graceful degradation).*
+
+### Data Structures & Algorithms (DSA)
+
+**What this post touches:** sliding-window pattern, circular buffer vs `std::deque`, cache locality, incremental aggregates, weighted moving average.
+
+**Deep dive.**
+- **The sliding-window pattern.** Keep the last *k* items and compute an aggregate (count, mean, variance) over them; as a new item arrives, the window slides. It's one of the most common interview patterns (max-in-window, moving average, longest-substring). Here the window holds the last ~10 frames of detections and geometry.
+- **Persistence & stability as window stats.** *Persistence* = how many of the last *k* frames contained the detection (a **count/mean** over a boolean window). *Stability* = how little the geometry varies (a **variance / standard deviation** over the window). Both are O(k) to recompute, or O(1) if you maintain running sums incrementally (add the incoming, subtract the outgoing).
+- **Circular buffer vs `std::deque` — the cache-locality lesson.** A `std::deque` stores elements in **segmented** chunks scattered in memory; walking it for the window stats causes a **cache miss** at each segment boundary. A fixed `std::array<float, 10>` + head index is **contiguous** — the whole window fits in a cache line or two, and iteration is prefetch-friendly. Same Big-O, very different real speed on a Cortex-A72. *Asymptotic complexity ≠ constant factors; on real hardware the constant is memory locality.*
+- **Why not just raise the confidence threshold?** Because a threshold is memoryless — it can't tell a steady 0.6 (real) from a one-frame 0.9 spike (noise). The window adds the **time dimension** a point-estimate lacks.
+
+**Interview Q&A.**
+1. *Describe the sliding-window technique and a problem it solves.* → Maintain an aggregate over the last *k* elements with O(1) updates; e.g., moving average, max in window (monotonic deque), longest-substring-without-repeat.
+2. *Compute a moving average in O(1) per step.* → Keep a running sum; on new element add it and subtract the one leaving the window.
+3. *Two structures with the same Big-O can differ 10× in speed — why?* → Constant factors: cache locality, allocation, branch prediction. `deque` (segmented) vs `array` (contiguous) is the textbook case.
+4. *When is a circular buffer the right choice?* → Fixed-capacity, FIFO-ish, O(1) push/pop, no allocation, cache-friendly — bounded histories and streams.
+
+### Signal Processing / ML systems (bonus, common in ML-role interviews)
+- **Temporal filtering.** Requiring persistence is a **low-pass filter** over detections — it suppresses high-frequency flicker (noise) and passes stable signal. Same family as a moving average or EMA.
+- **Ensembling / late fusion.** Combining detection + geometry + temporal (+ IMU) into the RRI is a weighted **ensemble**; independent weak signals reduce variance and correlated failure. "A weak-but-consistent signal beats a strong-but-lone one" is the bias–variance intuition.
+- **The precision/recall tradeoff.** Temporal gating trades a little **recall** (you might delay flagging a real one-frame hazard) for a lot of **precision** (far fewer false alarms) — the right trade when false alarms erode trust.
+
+**Interview Q&A.**
+1. *How do you stabilise a noisy per-frame classifier?* → Temporal smoothing: majority vote / persistence over a window, or EMA of the score; trades recall for precision.
+2. *What is late fusion / ensembling and why does it help?* → Combine independent models' outputs; lower variance, robustness to any single failure.
+
+### System Design
+- **Graceful degradation via renormalisation.** The RRI carries a "have this input?" flag per term and renormalises weights over present terms, plus a **tier** (`vision-only / vision+depth / full`) reported downstream. So a dead sensor **degrades** the score's confidence rather than **zeroing** it. This is a core resilience pattern: *partial input → partial (labelled) answer, never a crash or a silent wrong answer.*
+
+**Interview Q&A.**
+1. *Design a scoring system that still works when some inputs are missing.* → Per-input presence flags, renormalise weights over available inputs, expose a degradation tier so consumers know the confidence level.
+
+### Quick-review flashcards
+- **Sliding window:** last *k* items, O(1) incremental aggregate.
+- **Persistence = mean over boolean window; stability = variance over window.**
+- **`deque` (segmented, cache-miss) vs `array` (contiguous, cache-hot)** — same Big-O, different constants.
+- **Temporal gating = low-pass filter; trades recall for precision.**
+- **Late fusion / ensemble** → lower variance, robust to single-signal failure.
+- **Graceful degradation:** renormalise over present inputs, report the tier.

@@ -1,7 +1,3 @@
-# Riding the Blue Wave: Building Autonomous Intelligence on the Edge #04
-
-*Episode 4: Asynchronous Pipelines Without Chaos — threads, cores, lock-free buffers, and the day I caught my own "parallel" pipeline running sequentially.*
-
 Adding threads to a system is easy. Adding threads *without* turning it into a minefield of race conditions, priority inversions, and mysterious frame drops is the actual engineering. In Episode 2 I described the pipeline as asynchronous and multi-threaded. This episode is about the discipline that keeps "asynchronous" from becoming "unpredictable" — and about a bug that taught me to distrust my own architecture diagrams.
 
 ## Threads are cheap; shared state is expensive
@@ -69,3 +65,58 @@ Asynchronous done right is not "sprinkle threads and hope." It is deliberate own
 In the next episode, I'll get into temporal reasoning — why a slightly weaker detection that shows up consistently is worth more than a confident one that flashes for a single frame.
 
 *our [github repo](https://github.com/BlueWaves-afk/vigia-raspi).*
+
+---
+
+## 🎓 CS Fundamentals — study companion
+
+*This is the **Operating Systems** episode — concurrency, locks, priority inversion, and real-time scheduling — plus the **Data Structures** behind lock-free buffers. If you master this one you can answer almost any concurrency question, which are among the most common in interviews.*
+
+### Operating Systems (OS) — concurrency & synchronization
+
+**What this post touches:** race conditions, critical sections, mutexes, lock contention, priority inversion & inheritance, real-time scheduling (SCHED_FIFO), CPU affinity, deadlock.
+
+**Deep dive.**
+- **Race condition & critical section.** A race is when the result depends on thread timing over shared state. The fix is to make the update a **critical section** — a region only one thread executes at a time — guarded by a lock. The frame buffer is shared state; without a lock, capture and process can tear a frame.
+- **Mutex & the cost of the critical section.** A mutex serialises access. The crucial lesson of the "clone-under-lock" bug: **whatever runs inside the lock is time every other thread waits.** Holding the mutex during a ~1ms `frame.clone()` blocked the reader for that whole millisecond. Fix = shrink the critical section to a pointer swap; do the expensive work outside. General principle: *minimise the critical section.*
+- **Lock contention & the hot-path `std::cout`.** `std::cout` takes a global lock; calling it per detection serialises threads on I/O. Contention is invisible until you profile — the reason logging belongs in a lock-free ring, not the hot path.
+- **Priority inversion — the classic RT bug.** A high-priority thread H waits on a lock held by a low-priority thread L; a medium-priority thread M preempts L, so L never releases, so H is stuck behind M forever. This actually killed the Mars Pathfinder mission. **Fixes:** *priority inheritance* (L temporarily inherits H's priority so it finishes and releases) or avoiding the shared lock entirely. The blog's answer for the critical path is the latter — a lock-free **seqlock**.
+- **Real-time scheduling.** A **real-time** thread needs *bounded* latency, not just speed. `SCHED_FIFO` (a fixed-priority, run-to-completion policy) + a **PREEMPT_RT** kernel + a **priority ladder** (safety monitor > sensors > camera > vision > fusion) ensures the important thread runs when it must. Contrast with the default fair scheduler (CFS), which optimises average throughput, not worst-case latency.
+- **CPU affinity.** Pinning each stage to its own core (`pinToCore`) gives cache warmth and stops the scheduler from migrating a hot thread. Combined with RT priorities, it makes latency predictable.
+- **Deadlock (bonus).** Four Coffman conditions: mutual exclusion, hold-and-wait, no preemption, circular wait. Avoid by lock ordering, try-lock, or (best here) not sharing a lock at all.
+
+**Interview Q&A.**
+1. *What is a race condition and how do you prevent it?* → Timing-dependent bug on shared state; guard the critical section with a lock (or use atomics/lock-free structures).
+2. *Why should critical sections be short?* → The lock holder blocks everyone else; long critical sections = contention and latency. (This is the single most reusable takeaway.)
+3. *Explain priority inversion and priority inheritance.* → H blocked by L, L preempted by M; inheritance bumps L to H's priority to release the lock. Cite Mars Pathfinder.
+4. *SCHED_FIFO vs CFS?* → Fixed-priority run-to-completion (bounded latency, real-time) vs fair time-sharing (throughput/fairness).
+5. *What are the four conditions for deadlock?* → Mutual exclusion, hold-and-wait, no preemption, circular wait; break any one.
+6. *A high-priority thread must snapshot data a lower-priority thread is writing, without ever blocking. How?* → A lock-free seqlock (below), avoiding the mutex that would invert priorities.
+
+### Data Structures & Algorithms (DSA) — lock-free & concurrent structures
+
+**Deep dive.**
+- **Ring buffer as a concurrency tool.** A single-producer/single-consumer ring can be made **lock-free** with atomic head/tail indices and correct memory ordering — no mutex at all. Great for the capture→process hand-off.
+- **Seqlock (sequence lock).** For one writer, many readers, where reads must never block writers: the writer increments a counter before (→ odd = "writing") and after (→ even = "stable") each write. A reader records the counter, copies, then re-reads the counter; if it changed or is odd, it retries. Readers are **wait-free-ish** (they may retry but never hold a lock), and the high-priority reader can never invert the writer's priority. Trade-off: readers can starve under a torrent of writes, and it only works when a retry (re-copy) is cheap.
+- **Concurrent queue (SafeQueue).** A thread-safe queue (mutex + condition variable, or lock-free) that lets `push` return immediately while a consumer `wait_and_pop`s. This is the producer–consumer bounded-buffer, realised.
+- **Memory ordering / atomics (COA crossover).** Lock-free code needs `std::atomic` with the right memory order (acquire/release) so the compiler/CPU don't reorder the "data write" past the "flag write." This is why lock-free is subtle: correctness depends on the hardware memory model.
+- **Buffer sizing = Little's Law.** The frame ring must hold ≥ (MiDaS latency × capture rate) frames so a slot isn't overwritten mid-read: ~525ms × 15 FPS ≈ 8 slots. That's **Little's Law** (`L = λ·W`): items in the system = arrival rate × time-in-system.
+
+**Interview Q&A.**
+1. *How do you make a single-producer/single-consumer queue lock-free?* → Atomic head/tail with acquire/release ordering; no mutex.
+2. *What's a seqlock and when do you use it?* → Wait-free reads for one writer / many readers where retry is cheap; avoids priority inversion.
+3. *How big should a buffer between a fast producer and slow consumer be?* → Little's Law: cover the consumer's latency window at the producer's rate; add margin.
+4. *Why do atomics need memory ordering?* → To stop compiler/CPU reordering that would let readers see a "ready" flag before the data it guards.
+
+### System Design
+- **The "measure, don't trust the diagram" lesson.** The architecture *claimed* parallel; profiling showed sequential (608ms P95). **Observability beats assumption** — a recurring system-design theme (revisited in Episode 6).
+- **Decoupling via async stages.** Never let the fast stage block on the slow one; hand off through a queue and let each run at its own rate.
+
+### Quick-review flashcards
+- **Critical section:** keep it *tiny* (the clone-under-lock lesson).
+- **Priority inversion:** H→L→M; fix with inheritance or lock-free. (Mars Pathfinder.)
+- **SCHED_FIFO + PREEMPT_RT + affinity** → bounded latency.
+- **Seqlock:** odd/even counter, reader retries, wait-free, no inversion.
+- **Deadlock:** 4 Coffman conditions.
+- **Little's Law:** `L = λ·W` → buffer sizing.
+- **Lock-free needs atomics + acquire/release ordering.**

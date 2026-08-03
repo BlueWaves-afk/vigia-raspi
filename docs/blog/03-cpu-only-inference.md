@@ -1,7 +1,3 @@
-# Riding the Blue Wave: Building Autonomous Intelligence on the Edge #03
-
-*Episode 3: Designing for CPU-only Inference — squeezing real-time perception out of an ARM chip with no GPU.*
-
 In the last episode I walked through the system architecture, the asynchronous multi-threaded pipeline that keeps the whole thing real-time. This episode goes one level deeper, into the part everyone assumes needs a GPU and where the Raspberry Pi flatly refuses to give you one: actually running the models.
 
 There is no CUDA here. No tensor cores. Just a handful of ARM Cortex cores, a thermal budget, and two neural networks that both want to run right now. This is about what it actually takes to make that work.
@@ -42,3 +38,50 @@ The lesson of CPU-only inference is that the neural network is not where the per
 In the next episode, I'll get into the concurrency itself — how to run capture, detection, and depth on different cores without the whole thing collapsing into a tangle of locks and race conditions. Asynchronous pipelines, without the chaos.
 
 *our [github repo](https://github.com/BlueWaves-afk/vigia-raspi).*
+
+---
+
+## 🎓 CS Fundamentals — study companion
+
+*This is the **Computer Architecture** episode. Quantization, SIMD, the memory hierarchy, and zero-copy are exam favourites and this post is built entirely from them. There's also solid **OS** (memory allocation) and **System Design** (capability detection) material.*
+
+### Computer Organization & Architecture (COA)
+
+**What this post touches:** number formats & quantization (INT8/FP32), SIMD/vectorization (NEON, UDOT), the memory hierarchy & cache, data locality, zero-copy, CPUID/feature detection.
+
+**Deep dive.**
+- **Number formats.** FP32 = 32-bit float (1 sign, 8 exponent, 23 mantissa) — wide dynamic range, expensive. INT8 = 8-bit integer — 4× less memory, and integer ALUs are far cheaper/faster. **Quantization** maps real weights/activations to INT8 via a scale (and zero-point): `real ≈ scale × (q − zero_point)`. You trade precision for speed+size. The blog quantizes **YOLO to INT8** (throughput matters, small accuracy loss is fine) but keeps **MiDaS in FP32** (depth is precision-sensitive). Classic engineering: match precision to the job.
+- **SIMD & NEON.** **SIMD** = Single Instruction, Multiple Data: one instruction operates on a vector of values at once. ARM's SIMD unit is **NEON**, which has `float32x4_t` (4 floats/op) but *not* a useful 64-bit-double vector path — which is exactly why the blog's `double`→`float` fix matters: doubles run **scalar** (one at a time), floats run **vectorised** (four at a time). **UDOT** is a NEON instruction that does an 8-bit dot-product in one shot — the hardware reason INT8 inference flies on ARM.
+- **The memory hierarchy.** Registers → L1 → L2 → (L3) → RAM → disk, each ~10× larger and slower than the last. A Cortex-A72 L1 hit is ~1–4 cycles; a RAM access is ~100+ cycles. So **cache misses**, not arithmetic, dominate. Every "pre-allocate the buffer and reuse it" fix in the post is really "stop thrashing the cache/allocator."
+- **Data locality & why allocation is expensive.** Allocating a fresh `cv::Mat` every frame (a) calls the heap allocator (a synchronization + bookkeeping cost) and (b) touches cold memory (cache misses + page faults). Reusing a buffer keeps the data **hot** in cache. The "resize before cvtColor" fix is a locality win too: do the expensive per-pixel op on 100k pixels, not 900k.
+- **Zero-copy.** The most expensive thing you can do with data is copy it. By wrapping the model's input tensor memory as a `cv::Mat` and writing preprocessing *directly into it*, the code removes an entire 300KB memcpy per frame. Zero-copy = share a pointer instead of duplicating bytes. (Same idea as `sendfile()`, `mmap`, and DMA in OS/networking.)
+- **CPUID / capability detection.** Not every ARM chip has the dot-product extension. The code reads `/proc/cpuinfo` for the `asimddp` flag before enabling the UDOT fast path. This is **runtime ISA feature detection** — the same reason x86 code checks `CPUID` for AVX before using it. *Detect, don't assume.*
+
+**Interview Q&A.**
+1. *What is quantization and what does it cost?* → Mapping FP32 → lower-bit (e.g., INT8) via scale/zero-point; 4× smaller + faster integer math; costs some precision (mitigated by calibration / quantization-aware training).
+2. *What is SIMD? Give an example.* → One instruction on a vector; e.g., NEON `float32x4_t` adds 4 floats at once. Why `double` is slower on ARM: no vectorised double path → scalar execution.
+3. *Explain the memory hierarchy and why cache misses matter.* → Speed/size tradeoff across registers→cache→RAM→disk; a miss costs ~100 cycles, so locality dominates real performance.
+4. *What is zero-copy and why does it help?* → Avoid duplicating data by sharing a pointer/mapping; saves bandwidth and cache pressure; examples: `mmap`, `sendfile`, DMA, wrapping a tensor buffer.
+5. *How do you use a CPU feature that only some chips have?* → Runtime detection (CPUID / `/proc/cpuinfo`) + a fallback path.
+6. *Why do per-frame heap allocations hurt on an edge CPU?* → Allocator overhead + cache-cold memory + fragmentation + (on constrained devices) page faults; fix by pre-allocating and reusing.
+
+### Operating Systems (OS)
+
+- **Heap vs stack allocation.** Stack allocation is a pointer bump (nearly free); heap allocation (`malloc`/`new`) walks free lists, may lock, and can fragment. The hot loop avoids heap churn by hoisting buffers out of the loop. **The general rule:** no allocation in the steady-state hot path.
+- **Virtual memory & page faults.** First touch of freshly-allocated memory triggers a page fault (kernel maps a physical page). Reusing warm buffers avoids repeated faults — relevant on a memory-pressured Pi with SD-card swap.
+
+**Interview Q&A.**
+1. *Stack vs heap allocation cost?* → Bump-pointer vs allocator bookkeeping/locking/fragmentation.
+2. *What is a page fault?* → Trap when accessing an unmapped/mapped-but-not-resident page; the kernel loads/maps a page. Minor vs major faults.
+
+### System Design
+- **Portability via an abstraction + fast-path.** Standardising on ONNX Runtime (portable) with an ACL/KleidiAI INT8 execution provider (fast, ARM-native) behind a capability gate is a clean pattern: *a portable interface with a hardware-accelerated fast path selected at runtime.*
+
+### Quick-review flashcards
+- **Quantization:** `real ≈ scale·(q − zero)`; INT8 = 4× smaller, integer-fast.
+- **SIMD/NEON:** one instr, many data; `float32x4` vectorises, `double` doesn't on A72.
+- **UDOT:** 1-instruction INT8 dot product → why INT8 flies on ARM.
+- **Memory hierarchy:** miss ≈ 100 cycles → locality wins.
+- **Zero-copy:** share a pointer, don't memcpy.
+- **CPUID / `asimddp`:** detect the feature, keep a fallback.
+- **Hot-path rule:** zero heap allocation in steady state.
