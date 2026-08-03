@@ -120,3 +120,15 @@ In the next episode, I'll get into temporal reasoning — why a slightly weaker 
 - **Deadlock:** 4 Coffman conditions.
 - **Little's Law:** `L = λ·W` → buffer sizing.
 - **Lock-free needs atomics + acquire/release ordering.**
+
+### ⚖️ This vs That — the architecture decisions, and the roads not taken
+
+| Decision | Alternatives | Why this choice |
+|---|---|---|
+| **Seqlock (lock-free) on the RT path** | `std::mutex`; RCU; spinlock | A mutex on a high-priority reader invites priority inversion; RCU is powerful but complex and grace-period-heavy. A seqlock is simple, wait-free for one-writer/many-reader, and never inverts priority — perfect when a retry (re-copy) is cheap. |
+| **Explicit `std::thread` + core pinning** | Thread pool; async runtime / coroutines; OpenMP | Pools and runtimes abstract away exactly what a real-time system needs: which thread runs on which core at which priority. Explicit threads give that control. |
+| **Message-passing queues (where decoupling)** | Shared memory + locks everywhere | Queues make ownership and backpressure explicit and avoid shared-state races. Shared memory is used *only* where latest-wins semantics make it simpler (the frame ring). |
+| **SCHED_FIFO + PREEMPT_RT** | Default CFS scheduler | CFS optimises fairness and average throughput; it makes no worst-case latency guarantee. Real-time work needs fixed priorities and a preemptible kernel so the critical thread runs *when* it must. |
+| **Dedicated MiDaS thread (Core 2)** | Keep MiDaS inline (the original bug) | Inline made "parallel" actually sequential (608ms P95). A dedicated thread makes YOLO's 83ms the frame latency even on depth frames. |
+
+**The one to defend:** *lock-free vs mutex on the hot path.* Most candidates reach for a mutex reflexively. The stronger answer names the failure mode — **priority inversion** — and picks the tool to the access pattern: mutex for general mutual exclusion, but a **seqlock/lock-free** structure when a high-priority thread must never block on a low-priority one. Knowing *when a mutex is the wrong tool* is the senior signal.

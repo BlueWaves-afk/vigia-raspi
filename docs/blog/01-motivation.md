@@ -219,3 +219,15 @@ In the next episode, I will dive into the complete architecture and design choic
 - **Edge computing** = compute near the data source to cut latency/bandwidth and survive partitions.
 - **RISC (ARM)** vs **CISC (x86)**.
 - **Sculley's law (informal):** the model is ~5% of an ML system.
+
+### ⚖️ This vs That — the architecture decisions, and the roads not taken
+
+*The heart of every "why did you build it this way" interview. For each big fork, here's what else was on the table and why I went the way I did.*
+
+| Decision | Alternatives | Why this choice |
+|---|---|---|
+| **Edge inference** | Cloud inference; hybrid | Cloud gives you unlimited model size but puts the *network on the critical path* — fatal for a safety task on unreliable rural links. Edge = bounded latency, works offline, private, cheap to run. |
+| **CPU-only** | GPU / Google Coral TPU / an NPU stick | Accelerators are faster but cost money, draw power, and aren't universally available — which *breaks the whole "affordable, accessible" thesis*. Proving it on a bare CPU is the harder, more defensible claim. |
+| **Native C++** | Python + PyTorch | Python is faster to prototype but the GIL blocks true multi-core parallelism and the interpreter adds unpredictable latency. C++ buys deterministic latency, real threads, and manual memory control — the things a real-time edge system lives or dies on. |
+
+**The one to be able to defend out loud:** *edge vs cloud.* The instinct in interviews is "just use the cloud, it's more powerful." The senior answer is: **put the network on the critical path only if you can afford to lose it.** For a hazard 20 metres ahead on a road with no signal, you can't — so intelligence moves to the edge, and the cloud becomes an optional, eventually-consistent sync layer, not a dependency. That single tradeoff (latency + availability + privacy vs raw model power) is the whole reason this series exists.

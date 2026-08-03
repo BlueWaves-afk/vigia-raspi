@@ -77,3 +77,14 @@ In the next episode — the one I think every edge-AI builder should read — I'
 - **Temporal gating = low-pass filter; trades recall for precision.**
 - **Late fusion / ensemble** → lower variance, robust to single-signal failure.
 - **Graceful degradation:** renormalise over present inputs, report the tier.
+
+### ⚖️ This vs That — the architecture decisions, and the roads not taken
+
+| Decision | Alternatives | Why this choice |
+|---|---|---|
+| **Temporal smoothing (persistence/stability)** | Raw per-frame confidence threshold | A threshold is memoryless — it can't distinguish a steady 0.6 from a one-frame 0.9 spike. A window adds the time dimension that turns flicker into a stable decision. |
+| **Simple sliding-window stats** | Kalman filter; Bayesian tracker; SORT/DeepSORT | Kalman/SORT are more powerful trackers but carry state, tuning, and CPU cost. On a tight budget, cheap persistence + variance recover most of the stability for a fraction of the complexity. |
+| **Circular `std::array`** | `std::deque`; linked list | Same Big-O, but the array is contiguous and cache-hot; the deque is segmented (cache misses) and the list is a pointer-chase. On an A72, locality is the real cost. |
+| **Weighted-sum fusion (renormalised)** | Learned fusion (small NN); max; majority vote | A weighted sum is interpretable, allocation-free, and *degrades gracefully* by renormalising over present inputs. A learned fusion needs training data and turns the decision into a black box. |
+
+**The one to defend:** *simple filter vs "proper" tracker (Kalman/SORT).* It's tempting to name-drop Kalman filters. The mature answer is **YAGNI on a constrained device**: a Kalman filter models motion you may not need, adds state and tuning, and costs cycles you don't have — while a sliding window of persistence + variance buys 90% of the robustness for a ring of ten floats. Choosing the *cheapest technique that solves the actual problem* is the signal.

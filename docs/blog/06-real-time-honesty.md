@@ -98,3 +98,14 @@ Thanks for riding the wave with me. Road hazard detection was just the story; th
 - **Benchmark = deterministic input + stated config + distribution.**
 - **Observability pillars:** metrics, logs, traces. **SLI/SLO/SLA.**
 - **Observer effect:** measurement must be cheap and off the hot path.
+
+### ⚖️ This vs That — the architecture decisions, and the roads not taken
+
+| Decision | Alternatives | Why this choice |
+|---|---|---|
+| **P95/P99 as the SLO** | Mean latency; EMA FPS | The mean and a smoothed FPS both hide the tail — and the tail (the frame where MiDaS + throttle + display collide) is the one that gets someone hurt. You design against the percentile, not the average. |
+| **Deterministic replay (`hazard.mp4`)** | Benchmarking on a live camera | A live camera is never reproducible — lighting, motion, and thermals drift between runs. A fixed clip makes runs comparable and regressions detectable. |
+| **Lock-free instrumentation ring** | `printf`/`std::cout` logging | Logging in the hot path perturbs what you're measuring (observer effect) and contends on a global lock. A lock-free ring records timings cheaply, off the critical path. |
+| **State-the-config benchmarking** | Quote a single best-case number | "10.3 FPS" headless and "3 FPS" with display are both real; a number without its config is marketing. Honest benchmarking reports the environment and the distribution. |
+
+**The one to defend:** *percentiles vs the mean.* This is *the* SRE/systems interview tell. Anyone can quote an average; the mature engineer says **"averages hide the tail, and the tail is the user experience"** — then designs the SLO as a percentile under the real, worst-case config. It's also the moral of the whole series: a system is only as real-time as its *worst* frame, measured honestly.

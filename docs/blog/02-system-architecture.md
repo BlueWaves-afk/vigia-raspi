@@ -303,3 +303,15 @@ In the next episode, I will dive into CPU-only inference and optimization on ARM
 - **Sliding window** → last *k* items, aggregate.
 - **DVFS / adaptive scheduling** → measure a signal, adjust workload.
 - **Backpressure / load shedding** → degrade instead of collapse.
+
+### ⚖️ This vs That — the architecture decisions, and the roads not taken
+
+| Decision | Alternatives | Why this choice |
+|---|---|---|
+| **Async multi-threaded pipeline** | One sequential loop (capture→YOLO→MiDaS→fuse) | Sequential is trivial to write and caps you at ~2–3 FPS because every stage waits for the slowest. Async lets a slow stage run behind a fast one — the only way to stay real-time. |
+| **Threads across cores** | Single-threaded async I/O event loop (à la Node.js) | An event loop wins for **I/O-bound** work, but inference is **CPU-bound** — you need genuine parallelism on multiple cores, which an event loop on one core can't give you. |
+| **Stride scheduling (MiDaS every Nth frame)** | Run every model every frame; drop frames uniformly | Depth at 525ms can't run at camera rate. Uniform frame-dropping throws away detections too. Striding *only the expensive stage* keeps detection fast and depth "good enough." |
+| **Multi-signal fusion (RRI)** | One end-to-end model that outputs "hazard: yes/no" | A single model is simpler but a black box — brittle to false positives and impossible to degrade gracefully when a sensor drops. Fusing independent signals is robust and explainable. |
+| **Latest-wins ring + work queue** | One shared queue for everything | Different hand-offs want different semantics: freshness (drop-stale ring) for capture, completeness (FIFO queue) for depth work. One structure can't be both. |
+
+**The one to defend:** *async vs sequential.* Interviewers love "your pipeline is slow — speed it up." The junior answer optimises the model. The senior answer: **the model wasn't the bottleneck; the sequential structure was.** Decouple the stages with buffers so the 525ms stage runs in the background and the fast stage sets the frame rate. That reframing — from "faster model" to "better dataflow" — is the entire point of Episode 2.

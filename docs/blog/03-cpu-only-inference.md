@@ -85,3 +85,15 @@ In the next episode, I'll get into the concurrency itself — how to run capture
 - **Zero-copy:** share a pointer, don't memcpy.
 - **CPUID / `asimddp`:** detect the feature, keep a fallback.
 - **Hot-path rule:** zero heap allocation in steady state.
+
+### ⚖️ This vs That — the architecture decisions, and the roads not taken
+
+| Decision | Alternatives | Why this choice |
+|---|---|---|
+| **ONNX Runtime + ACL/KleidiAI (INT8 UDOT)** | OpenVINO; TFLite; ncnn; raw NEON kernels | OpenVINO forced FP32 and fought INT8 quantization; TFLite/ncnn are strong on ARM but ONNX Runtime gave the best mix of *portability* + a native INT8 dot-product fast path + zero-copy IO binding. Raw NEON is fastest but unmaintainable. |
+| **INT8 for YOLO** | FP16; FP32 | The A72 has no broadly useful FP16 *compute* path, and FP32 is slow. INT8 hits the UDOT hardware — the only real speedup available. |
+| **FP32 for MiDaS** | INT8 depth | Depth feeds precision-sensitive plane geometry; aggressive quantization wrecks it. Since MiDaS is strided, its FP32 cost is amortised — so keep the accuracy. |
+| **Zero-copy IO binding** | memcpy preprocessing → tensor | Copying 300KB/frame is pure waste on a bandwidth-bound CPU. Writing preprocessing directly into the tensor buffer removes the copy entirely. |
+| **Compiler auto-vectorization (float)** | Hand-written NEON intrinsics | Intrinsics are ~10% faster but brittle and unportable. Feeding the compiler `float` (not `double`) lets it auto-vectorise for free — 90% of the win, 0% of the maintenance cost. |
+
+**The one to defend:** *selective precision (INT8 here, FP32 there).* The naive move is "quantize everything for speed." The right move is **match precision to the job**: quantize the throughput-critical, error-tolerant stage (detection) and protect the precision-critical stage (depth). Blanket quantization would either slow you down or silently corrupt your geometry.
