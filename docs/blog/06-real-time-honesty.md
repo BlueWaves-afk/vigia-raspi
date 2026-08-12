@@ -45,6 +45,22 @@ Thanks for riding the wave with me. Road hazard detection was just the story; th
 
 ---
 
+## 🧰 Measuring real-time, from zero — percentiles, jitter, and what I chose it over
+
+Most "real-time" demos aren't; they're "fast on average when nothing else is happening." From zero, how to tell the truth about latency:
+
+- **Hard vs soft vs firm real-time.** Hard = a missed deadline is a failure (airbags); soft = degraded quality (video); firm = a late result is worthless but not catastrophic. Naming which one you're building sets the bar.
+- **Report P95/P99 tail latency — not the mean.** The mean hides the frames that blow the deadline. A pipeline with a great average and an ugly 99th percentile *misses hazards exactly when the system is busy*. **Jitter** (variance of latency) matters as much as the number — a real-time system is one whose *worst case* is bounded.
+- **Little's Law** (`L = λ·W`) relates throughput, occupancy, and latency — the back-of-envelope for why a stage backs up.
+- **Instrument every stage.** Per-stage timers, an EMA of latency, and `perf` tracing on ARM turn "feels fast" into numbers you can defend.
+
+## 🚢 From demo to production
+
+- **Continuous benchmarking** — the macro-benchmark runs in CI (cross-compiled), and a P99 regression fails the build, so "real-time" stays true release over release.
+- **Honest SLIs/SLOs** — pick the percentile and deadline you actually promise, then measure against it in the field, not just at the demo table.
+
+---
+
 ## 🎓 CS Fundamentals — study companion
 
 *This finale is about **real-time systems**, **performance measurement / statistics**, and the **System Design** discipline of observability and honest benchmarking — plus a **Computer Architecture** note on why the display stole your FPS. These "how do you measure it" questions separate senior candidates from junior ones.*

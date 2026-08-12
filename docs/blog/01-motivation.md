@@ -171,6 +171,30 @@ In the next episode, I will dive into the complete architecture and design choic
 
 ---
 
+## 🧰 The stack, from zero — and what I chose it over
+
+Before the architecture episodes go deep, here's the whole toolbox in one place, and the road not taken for each. This is the "what frameworks did you use, and why not the obvious ones" tour.
+
+- **Language — C++17 (over Python/PyTorch).** Python is faster to prototype, but its GIL serialises threads and the interpreter injects unpredictable latency — both fatal for a real-time loop. C++ buys deterministic latency, true multi-core threads, and manual memory control. Built with **CMake**, cross-compiled for the Pi 5's Cortex-A76 with `-mcpu=cortex-a76 -O3 -ftree-vectorize` so the compiler auto-vectorises to **NEON** SIMD.
+- **Inference runtime — ONNX Runtime + ARM Compute Library / KleidiAI (over OpenVINO and TFLite).** The hackathon baseline used **OpenVINO** with a forced FP32 hint — not ideal on an A76 and awkward to quantise. We standardised on **ONNX Runtime** (C++) with the ACL/KleidiAI execution provider for **INT8 UDOT** dot-product acceleration, and zero-copy IO-binding on the hot loop. Honest status: this migration is in progress — the current build still links OpenVINO while the ONNX/KleidiAI path lands. **TFLite** was the other option; ONNX won on C++ ergonomics and the ARM INT8 story.
+- **Models — YOLO (INT8) for detection, MiDaS (FP32) for monocular depth.** Two models, two precisions, fused later (Episode 2). Open-source weights, native inference, no vendor lock.
+- **Vision — OpenCV** for capture, colour-space, and ROI work.
+- **Runtime & concurrency — ROS2 nodes + a PREEMPT_RT kernel.** Each node runs on a dedicated `std::thread` with `SCHED_FIFO` priority and CPU affinity, on a real-time kernel (Episode 4). The priority ladder is explicit: anti-death > sensor-bridge > camera > vision/depth > fusion.
+- **Sync & integrity — libcurl (HTTPS event uplink) + OpenSSL (HMAC event signing).** Only *verified events* leave the device — a few signed bytes, never the video.
+
+## 🚢 From demo to production
+
+The gap between "runs on my Pi at the demo table" and "survives a month bolted to a windshield" is its own discipline, worth naming from zero:
+- **Reproducible cross-compilation** — a pinned toolchain and CMake cache so the same binary builds anywhere, not just on the one Pi it was hacked on.
+- **CPU feature-gating** — the INT8 fast path is guarded behind a `/proc/cpuinfo asimddp` CPUID check, so the binary degrades gracefully on a chip without dot-product, instead of crashing.
+- **Deployment as a service** — shipped as a `systemd` unit (or a container) that restarts on failure and starts on boot, not a terminal command someone runs by hand.
+- **Thermal & power management** — the scheduler has to plan for throttling, because on the edge the chip *will* get hot (Episode 3/6).
+- **Observability & OTA** — structured logs, health metrics, and a safe over-the-air update path for a device you can't plug a keyboard into.
+
+Honesty is part of the bar: the ONNX/KleidiAI migration is mid-flight, and a few subsystems still carry hardware-access-pending flags. Naming that precisely — rather than claiming the demo is finished — is the same engineering maturity the rest of this series argues for.
+
+---
+
 ## 🎓 CS Fundamentals — study companion
 
 *The article above is the story of **why** edge AI is hard. This section turns that story into interview-ready theory. Revisit it before placement season and you should be able to answer core questions on **Computer Architecture (COA)**, **Computer Networks (CN)**, **Operating Systems (OS)**, and **System Design** drawn from this one motivating problem.*

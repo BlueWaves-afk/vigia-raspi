@@ -68,6 +68,23 @@ In the next episode, I'll get into temporal reasoning — why a slightly weaker 
 
 ---
 
+## 🧰 The concurrency stack, from zero — PREEMPT_RT, SCHED_FIFO, lock-free, and what I chose it over
+
+"Async without chaos" is really "real-time without priority inversion." From zero:
+
+- **A PREEMPT_RT kernel — over a vanilla kernel.** Vanilla Linux optimises average throughput; its scheduling latency is *unbounded*, which is death for a deadline. **PREEMPT_RT** makes almost the whole kernel preemptible, giving bounded worst-case latency.
+- **SCHED_FIFO priorities + CPU affinity — over default fair scheduling.** Each node runs on a dedicated `std::thread` with a real-time `SCHED_FIFO` priority and is pinned to a core (`pthread_setaffinity_np`). The ladder is explicit: anti-death 99 > sensor-bridge 85 > camera 80 > vision/depth 75 > fusion 70. Highest-priority work always wins the CPU.
+- **Priority inheritance vs inversion.** ROS2's default executors use mutexes that aren't priority-inheritance-aware — a low-priority thread holding a lock can stall a high-priority one (priority inversion). The fix: dedicated threads, a `StaticSingleThreadedExecutor`, and no dynamic allocation on the spin path.
+- **A lock-free seqlock ring buffer — over a mutex-guarded queue.** A mutex queue makes the writer or reader *block* — jitter, the enemy of real-time. A **seqlock ring buffer** lets the writer never block; the reader reads, checks a version counter, and retries if it changed. Perfect for a producer (camera) that must never wait on a slow consumer. The ring is **bounded**, so memory is fixed — no unbounded queue growth under back-pressure.
+
+## 🚢 From demo to production
+
+- **CPU isolation** (`isolcpus` / `nohz_full`) so the OS doesn't schedule anything else on the RT cores.
+- **RT-throttling config** tuned so a runaway RT thread can't lock the box.
+- **Measure it** with `cyclictest` and per-stage timing — a real-time claim you haven't measured is a guess (Episode 6).
+
+---
+
 ## 🎓 CS Fundamentals — study companion
 
 *This is the **Operating Systems** episode — concurrency, locks, priority inversion, and real-time scheduling — plus the **Data Structures** behind lock-free buffers. If you master this one you can answer almost any concurrency question, which are among the most common in interviews.*

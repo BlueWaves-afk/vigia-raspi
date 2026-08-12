@@ -35,6 +35,23 @@ In the next episode — the one I think every edge-AI builder should read — I'
 
 ---
 
+## 🧰 The temporal-filtering stack, from zero — EMA, hysteresis, tracking, and what I chose it over
+
+Raw per-frame confidence flickers — a pothole detected at 0.7, then 0.4, then 0.8. Acting on a single frame is how you get false alarms. From zero, how you turn a jittery signal into a stable decision:
+
+- **Exponential moving average (EMA) — over a plain average, and over a Kalman filter.** A plain window-average needs unbounded memory; a **Kalman filter** is more powerful but needs a motion model and more compute. **EMA** (`s ← α·x + (1−α)·s`) is O(1) memory and one multiply-add per frame — the right weight for an edge budget, smoothing noise while staying responsive.
+- **Hysteresis / dual thresholds (Schmitt-trigger idea).** A detection must cross a *high* threshold to appear and fall below a *lower* one to disappear. That gap kills the flicker you get from a single threshold sitting right at the noise floor.
+- **Tracking-by-detection.** Associate detections across frames (IoU matching) and give each track a lifecycle: tentative → confirmed → lost. A hazard is only promoted once a track is *confirmed* over several frames — temporal evidence, not a lucky frame.
+- **A sliding window over frames** held in a **deque** (O(1) push/pop, cache-friendly) — the same DSA pattern as "sliding window maximum," applied to confidence.
+
+## 🚢 From demo to production
+
+- **Thresholds are configuration**, tuned per deployment (a highway and a village road have different noise).
+- **Stability metrics** — track false-positive/negative rates over time, not just single-frame accuracy.
+- In a safety domain a **false positive has real cost** (crying wolf), so the whole filter is biased toward *confirmed* over *fast*.
+
+---
+
 ## 🎓 CS Fundamentals — study companion
 
 *This episode is mostly **Data Structures & Algorithms** (the sliding-window pattern, circular buffers, cache locality) with a dip into **signal processing / ML** (temporal filtering, ensembles) and **System Design** (graceful degradation).*

@@ -41,6 +41,23 @@ In the next episode, I'll get into the concurrency itself — how to run capture
 
 ---
 
+## 🧰 The inference stack, from zero — quantization, SIMD, and what I chose it over
+
+Making a neural net run on a bare ARM CPU is mostly about *moving fewer bytes and doing more per instruction*. From zero:
+
+- **INT8 quantization (over FP32).** Store weights/activations as 8-bit integers instead of 32-bit floats: ~4× less memory traffic and access to integer dot-product hardware. The cost is a small accuracy hit, managed with **calibration**. On a memory-bound device this is the single biggest win — the cores were starving for data, not arithmetic.
+- **SIMD / NEON + UDOT (the hardware basis).** SIMD = one instruction over a vector of values. ARM's **UDOT** dot-product instruction (FEAT_DotProd) multiply-accumulates a whole INT8 vector in one go — exactly a matmul's inner loop. It's gated behind a `/proc/cpuinfo asimddp` CPUID check so the binary degrades on chips without it.
+- **Execution providers (ONNX Runtime) — over OpenVINO and TFLite.** ONNX Runtime has pluggable backends; the **ARM Compute Library / KleidiAI** provider is the INT8 fast path. We moved off the **OpenVINO** hackathon baseline (forced FP32, awkward to quantise) and chose ONNX over **TFLite** for C++ ergonomics and the ARM INT8 story. Honest status: migration in progress; the current build still links OpenVINO.
+- **Zero-copy IO-binding.** Pre-bind input/output tensors once so there's no per-frame `malloc`/copy on the hot loop. In a memory-bound system, eliminating data movement *is* the optimization.
+
+## 🚢 From demo to production
+
+- **CPU feature-gating** — probe `asimddp` before using the INT8 path; fall back gracefully.
+- **Model versioning + warmup** — pin the model artifact, run a warmup inference so the first real frame isn't slow.
+- **Thermal-aware scheduling** — the chip throttles under load, so cold-start benchmarks lie; budget for the hot steady state (Episode 6).
+
+---
+
 ## 🎓 CS Fundamentals — study companion
 
 *This is the **Computer Architecture** episode. Quantization, SIMD, the memory hierarchy, and zero-copy are exam favourites and this post is built entirely from them. There's also solid **OS** (memory allocation) and **System Design** (capability detection) material.*

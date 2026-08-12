@@ -244,6 +244,23 @@ In the next episode, I will dive into CPU-only inference and optimization on ARM
 
 ---
 
+## 🧰 The runtime, from zero — ROS2 nodes, and what I chose it over
+
+The system isn't one program; it's a set of agents that publish and subscribe: **perception** (YOLO detections) and **analytical** (MiDaS depth) feed **fusion**, which feeds a **coordinator** and a **temporal** stage, which feed an **event promoter → signer → store**. The framework choice underneath, from zero:
+
+- **ROS2 as the node/message-passing runtime — over a monolithic loop, and over hand-rolled threads+queues.** A monolithic loop couples every stage: one slow model stalls the pipeline and you can't run stages at different rates. Hand-rolling threads+queues means reinventing pub/sub, discovery, and lifecycle badly. ROS2 gives typed **publish/subscribe** topics, per-node lifecycle, and process isolation for free — perception publishes detections and doesn't care who consumes them. The catch (fixed in Episode 4): ROS2's default executors aren't real-time-safe, so we run a `StaticSingleThreadedExecutor` with no dynamic allocation on spin.
+- **Pub/sub decoupling = independent rates.** Producers publish, consumers subscribe, so the camera, vision, and depth run at different rates and fusion reconciles them (Episode 4). Message-passing concurrency — share by communicating, not by locking shared state.
+- **An "anti-death" supervisor.** A dedicated highest-priority node keeps the system alive if one stage stalls — graceful degradation instead of a frozen screen.
+
+## 🚢 From demo to production
+
+- **Launch files + params, not hard-coded constants** — thresholds, topics, and model paths are configuration, so the same binary redeploys to a new road without a recompile.
+- **Node lifecycle & health** — managed startup/shutdown and a supervisor that restarts a dead node.
+- **Process isolation** — a crash in vision shouldn't take down event signing; separate nodes contain the blast radius.
+- Shipped as a **systemd/container** service, config mounted, not a shell command.
+
+---
+
 ## 🎓 CS Fundamentals — study companion
 
 *This episode is a goldmine for **Operating Systems** and **Data Structures**, with a side of **Computer Architecture** and **System Design**. If you understand every term below, you can hold your own on concurrency, scheduling, and pipeline design in any interview.*
